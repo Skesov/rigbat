@@ -3,6 +3,7 @@
 use crate::domain::{BatteryReading, DeviceInfo};
 
 pub mod bluez;
+pub mod steelseries;
 pub mod sysfs;
 
 #[async_trait::async_trait]
