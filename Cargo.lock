@@ -541,6 +541,7 @@ dependencies = [
  "serde_json",
  "tiny-skia",
  "tokio",
+ "zbus",
 ]
 
 [[package]]

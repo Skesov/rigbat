@@ -4,7 +4,7 @@ use anyhow::Context as _;
 
 use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
 
-use super::BatterySource;
+use super::{BatteryBackend, BatterySource};
 
 pub struct SysfsSource {
     info: DeviceInfo,
@@ -95,6 +95,22 @@ impl BatterySource for SysfsSource {
         let state = parse_status(&status_str);
 
         Ok(BatteryReading::new(percent, state))
+    }
+}
+
+pub struct SysfsBackend;
+
+#[async_trait::async_trait]
+impl BatteryBackend for SysfsBackend {
+    fn name(&self) -> &'static str {
+        "sysfs"
+    }
+
+    async fn discover(&self) -> Vec<Box<dyn BatterySource>> {
+        SysfsSource::enumerate()
+            .into_iter()
+            .map(|s| Box::new(s) as Box<dyn BatterySource>)
+            .collect()
     }
 }
 

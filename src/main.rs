@@ -1,6 +1,7 @@
 mod app;
 mod appearance;
 mod cli;
+mod discovery;
 mod domain;
 mod sources;
 mod tray;
@@ -17,10 +18,7 @@ async fn main() {
         return;
     }
 
-    let sources = sources::sysfs::SysfsSource::enumerate()
-        .into_iter()
-        .map(|s| Box::new(s) as Box<dyn sources::BatterySource>)
-        .collect();
+    let sources = discovery::discover_all().await;
 
     let rows = app::poll_once(sources).await;
 
@@ -32,10 +30,7 @@ async fn main() {
 }
 
 async fn run_tray() {
-    let sources: Vec<Box<dyn sources::BatterySource>> = sources::sysfs::SysfsSource::enumerate()
-        .into_iter()
-        .map(|s| Box::new(s) as Box<dyn sources::BatterySource>)
-        .collect();
+    let sources = discovery::discover_all().await;
 
     let n = sources.len();
     println!("rigbat tray: {n} device(s)");
