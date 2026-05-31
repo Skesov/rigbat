@@ -1,3 +1,5 @@
+pub mod supervisor;
+
 use tokio::task::JoinSet;
 
 use crate::domain::{BatteryReading, DeviceInfo};
