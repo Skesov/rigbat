@@ -8,3 +8,7 @@ license = "MIT"
 repository = "https://github.com/Skesov/rigbat"
 
 [dependencies]
+async-trait = "0.1"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1"
