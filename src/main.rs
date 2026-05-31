@@ -1,4 +1,5 @@
 mod app;
+mod appearance;
 mod cli;
 mod domain;
 mod sources;
@@ -40,9 +41,11 @@ async fn run_tray() {
     println!("rigbat tray: {n} device(s)");
 
     let mut rx = app::supervisor::Supervisor::spawn(sources);
+    let mut theme_rx = appearance::spawn();
 
     let app = tray::TrayApp::new(
         rx.clone(),
+        theme_rx.clone(),
         Box::new(tray::icon::TinySkiaRenderer::default()),
     );
 
@@ -54,7 +57,15 @@ async fn run_tray() {
         }
     };
 
-    while rx.changed().await.is_ok() {
+    loop {
+        tokio::select! {
+            r = rx.changed() => {
+                if r.is_err() { break; }
+            }
+            r = theme_rx.changed() => {
+                if r.is_err() { break; }
+            }
+        }
         if handle.update(|_| {}).await.is_none() {
             break;
         }

@@ -8,7 +8,7 @@ use tiny_skia::{
 };
 
 pub trait IconRenderer: Send + Sync {
-    fn render(&self, status: PrimaryStatus) -> Vec<ksni::Icon>;
+    fn render(&self, status: PrimaryStatus, theme: &Theme) -> Vec<ksni::Icon>;
 }
 
 /// Цвета темы в формате RGBA (straight alpha).
@@ -19,40 +19,49 @@ pub struct Theme {
     pub offline: [u8; 4],
 }
 
-impl Default for Theme {
-    fn default() -> Self {
+impl Theme {
+    /// Тёмная тема: светлый передний план (Nord off-white).
+    pub fn dark() -> Self {
         Self {
             normal: [216, 222, 233, 255],
             low: [191, 97, 106, 255],
             charging: [163, 190, 140, 255],
-            offline: [76, 86, 106, 180],
+            offline: [216, 222, 233, 180],
+        }
+    }
+
+    /// Светлая тема: тёмный передний план (Nord polar night).
+    pub fn light() -> Self {
+        Self {
+            normal: [59, 66, 82, 255],
+            low: [191, 97, 106, 255],
+            charging: [163, 190, 140, 255],
+            offline: [59, 66, 82, 180],
         }
     }
 }
 
 pub struct TinySkiaRenderer {
-    sizes: Vec<u32>,
-    theme: Theme,
+    pub sizes: Vec<u32>,
 }
 
 impl Default for TinySkiaRenderer {
     fn default() -> Self {
         Self {
             sizes: vec![22, 24, 32, 44, 64],
-            theme: Theme::default(),
         }
     }
 }
 
 impl IconRenderer for TinySkiaRenderer {
-    fn render(&self, status: PrimaryStatus) -> Vec<ksni::Icon> {
+    fn render(&self, status: PrimaryStatus, theme: &Theme) -> Vec<ksni::Icon> {
         let (color_rgba, fill_ratio, is_offline) = match status {
-            PrimaryStatus::Offline => (self.theme.offline, 0.0_f32, true),
+            PrimaryStatus::Offline => (theme.offline, 0.0_f32, true),
             PrimaryStatus::Charging { percent } => {
-                (self.theme.charging, f32::from(percent) / 100.0, false)
+                (theme.charging, f32::from(percent) / 100.0, false)
             }
-            PrimaryStatus::Low { percent } => (self.theme.low, f32::from(percent) / 100.0, false),
-            PrimaryStatus::Ok { percent } => (self.theme.normal, f32::from(percent) / 100.0, false),
+            PrimaryStatus::Low { percent } => (theme.low, f32::from(percent) / 100.0, false),
+            PrimaryStatus::Ok { percent } => (theme.normal, f32::from(percent) / 100.0, false),
         };
 
         self.sizes
@@ -198,13 +207,13 @@ mod tests {
     use super::*;
 
     fn default_sizes() -> Vec<u32> {
-        TinySkiaRenderer::default().sizes
+        TinySkiaRenderer::default().sizes.clone()
     }
 
     #[test]
     fn ok_renders_correct_count() {
         let renderer = TinySkiaRenderer::default();
-        let icons = renderer.render(PrimaryStatus::Ok { percent: 50 });
+        let icons = renderer.render(PrimaryStatus::Ok { percent: 50 }, &Theme::dark());
         assert_eq!(icons.len(), default_sizes().len());
     }
 
@@ -212,7 +221,7 @@ mod tests {
     fn ok_icon_dimensions_and_data_len() {
         let renderer = TinySkiaRenderer::default();
         let sizes = renderer.sizes.clone();
-        let icons = renderer.render(PrimaryStatus::Ok { percent: 50 });
+        let icons = renderer.render(PrimaryStatus::Ok { percent: 50 }, &Theme::dark());
 
         for icon in &icons {
             assert_eq!(icon.width, icon.height, "width must equal height");
@@ -235,7 +244,7 @@ mod tests {
     #[test]
     fn offline_renders_valid_icons() {
         let renderer = TinySkiaRenderer::default();
-        let icons = renderer.render(PrimaryStatus::Offline);
+        let icons = renderer.render(PrimaryStatus::Offline, &Theme::dark());
         assert_eq!(icons.len(), default_sizes().len());
         for icon in &icons {
             let expected_len = (icon.width * icon.height * 4) as usize;
@@ -246,7 +255,7 @@ mod tests {
     #[test]
     fn charging_renders_valid_icons() {
         let renderer = TinySkiaRenderer::default();
-        let icons = renderer.render(PrimaryStatus::Charging { percent: 75 });
+        let icons = renderer.render(PrimaryStatus::Charging { percent: 75 }, &Theme::dark());
         assert_eq!(icons.len(), default_sizes().len());
         for icon in &icons {
             let expected_len = (icon.width * icon.height * 4) as usize;
@@ -257,11 +266,36 @@ mod tests {
     #[test]
     fn low_renders_valid_icons() {
         let renderer = TinySkiaRenderer::default();
-        let icons = renderer.render(PrimaryStatus::Low { percent: 10 });
+        let icons = renderer.render(PrimaryStatus::Low { percent: 10 }, &Theme::dark());
         assert_eq!(icons.len(), default_sizes().len());
         for icon in &icons {
             let expected_len = (icon.width * icon.height * 4) as usize;
             assert_eq!(icon.data.len(), expected_len);
         }
+    }
+
+    #[test]
+    fn dark_and_light_themes_differ_by_normal() {
+        assert_ne!(
+            Theme::dark().normal,
+            Theme::light().normal,
+            "dark and light themes must have different normal colors"
+        );
+    }
+
+    #[test]
+    fn render_dark_differs_from_light() {
+        let renderer = TinySkiaRenderer::default();
+        let status = PrimaryStatus::Ok { percent: 50 };
+        let dark_icons = renderer.render(status, &Theme::dark());
+        let light_icons = renderer.render(status, &Theme::light());
+
+        assert!(!dark_icons.is_empty());
+        assert!(!light_icons.is_empty());
+
+        // Хотя бы один пиксель отличается в первой иконке
+        let dark_data = &dark_icons[0].data;
+        let light_data = &light_icons[0].data;
+        assert_ne!(dark_data, light_data, "dark and light renders must differ");
     }
 }

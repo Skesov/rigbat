@@ -6,17 +6,27 @@ use ksni::{MenuItem, ToolTip, Tray};
 use tokio::sync::watch;
 
 use crate::app::supervisor::TrayState;
+use crate::appearance::ColorScheme;
 use crate::domain::{BatteryReading, ChargeState, DeviceInfo, PrimaryStatus};
-use crate::tray::icon::IconRenderer;
+use crate::tray::icon::{IconRenderer, Theme};
 
 pub struct TrayApp {
     pub rx: watch::Receiver<TrayState>,
+    pub theme_rx: watch::Receiver<ColorScheme>,
     pub renderer: Box<dyn IconRenderer>,
 }
 
 impl TrayApp {
-    pub fn new(rx: watch::Receiver<TrayState>, renderer: Box<dyn IconRenderer>) -> Self {
-        Self { rx, renderer }
+    pub fn new(
+        rx: watch::Receiver<TrayState>,
+        theme_rx: watch::Receiver<ColorScheme>,
+        renderer: Box<dyn IconRenderer>,
+    ) -> Self {
+        Self {
+            rx,
+            theme_rx,
+            renderer,
+        }
     }
 }
 
@@ -30,7 +40,12 @@ impl Tray for TrayApp {
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        self.renderer.render(self.rx.borrow().primary_status)
+        let theme = match *self.theme_rx.borrow() {
+            ColorScheme::Dark => Theme::dark(),
+            ColorScheme::Light => Theme::light(),
+        };
+        self.renderer
+            .render(self.rx.borrow().primary_status, &theme)
     }
 
     fn tool_tip(&self) -> ToolTip {
