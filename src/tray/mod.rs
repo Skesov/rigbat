@@ -7,6 +7,7 @@ use tokio::sync::watch;
 
 use crate::app::supervisor::TrayState;
 use crate::appearance::ColorScheme;
+use crate::config::DisplayMode;
 use crate::domain::{BatteryReading, ChargeState, DeviceInfo, PrimaryStatus};
 use crate::tray::icon::{IconRenderer, Theme};
 
@@ -44,8 +45,12 @@ impl Tray for TrayApp {
             ColorScheme::Dark => Theme::dark(),
             ColorScheme::Light => Theme::light(),
         };
-        self.renderer
-            .render(self.rx.borrow().primary_status, &theme)
+        // TODO(U4a): replace DisplayMode::IconOnly with the value from loaded config.
+        self.renderer.render(
+            self.rx.borrow().primary_status,
+            &theme,
+            DisplayMode::IconOnly,
+        )
     }
 
     fn tool_tip(&self) -> ToolTip {
