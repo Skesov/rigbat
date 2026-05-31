@@ -11,7 +11,7 @@ pub trait IconRenderer: Send + Sync {
     fn render(&self, status: PrimaryStatus, theme: &Theme) -> Vec<ksni::Icon>;
 }
 
-/// Цвета темы в формате RGBA (straight alpha).
+/// Theme colors in RGBA format (straight alpha).
 pub struct Theme {
     pub normal: [u8; 4],
     pub low: [u8; 4],
@@ -20,7 +20,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Тёмная тема: светлый передний план (Nord off-white).
+    /// Dark theme: light foreground (Nord off-white).
     pub fn dark() -> Self {
         Self {
             normal: [216, 222, 233, 255],
@@ -30,7 +30,7 @@ impl Theme {
         }
     }
 
-    /// Светлая тема: тёмный передний план (Nord polar night).
+    /// Light theme: dark foreground (Nord polar night).
     pub fn light() -> Self {
         Self {
             normal: [59, 66, 82, 255],
@@ -71,9 +71,9 @@ impl IconRenderer for TinySkiaRenderer {
     }
 }
 
-/// Рендерит одну иконку батареи размером `n×n`.
-/// Возвращает `None` только если `Pixmap::new` не смог выделить буфер
-/// (в практике не происходит для размеров <= 64).
+/// Renders a single battery icon of size `n×n`.
+/// Returns `None` only if `Pixmap::new` fails to allocate a buffer
+/// (in practice, this does not occur for sizes <= 64).
 #[allow(dead_code)]
 fn render_icon(
     n: u32,
@@ -85,13 +85,13 @@ fn render_icon(
 
     let s = n as f32;
 
-    // Габариты корпуса батареи
+    // Battery body dimensions
     let body_x = s * 0.05;
     let body_y = s * 0.31;
     let body_w = s * 0.80;
     let body_h = s * 0.38;
 
-    // Носик справа
+    // Nub on the right
     let nub_w = s * 0.06;
     let nub_h = s * 0.16;
     let nub_x = body_x + body_w;
@@ -103,7 +103,7 @@ fn render_icon(
     let [r, g, b, a] = color_rgba;
     let paint_color = Color::from_rgba8(r, g, b, a);
 
-    // Заливка пропорционально заряду
+    // Fill proportional to charge level
     if fill_ratio > 0.0 {
         let inner_x = body_x + half_stroke;
         let inner_y = body_y + half_stroke;
@@ -120,7 +120,7 @@ fn render_icon(
         }
     }
 
-    // Обводка корпуса
+    // Battery body outline
     {
         let mut stroke_paint = Paint::default();
         stroke_paint.set_color(paint_color);
@@ -144,7 +144,7 @@ fn render_icon(
         }
     }
 
-    // Носик
+    // Nub
     {
         let nub_rect = tiny_skia::Rect::from_xywh(nub_x, nub_y, nub_w, nub_h);
         if let Some(rect) = nub_rect {
@@ -161,7 +161,7 @@ fn render_icon(
         }
     }
 
-    // Диагональная линия для Offline
+    // Diagonal line for Offline
     if is_offline {
         let mut stroke_paint = Paint::default();
         stroke_paint.set_color(paint_color);
@@ -181,7 +181,7 @@ fn render_icon(
         }
     }
 
-    // Конвертация: premultiplied RGBA → ARGB32 network byte order (A,R,G,B)
+    // Conversion: premultiplied RGBA → ARGB32 network byte order (A,R,G,B)
     let rgba_data = pixmap.data();
     let mut argb_data = Vec::with_capacity(rgba_data.len());
     for chunk in rgba_data.chunks_exact(4) {
@@ -293,7 +293,7 @@ mod tests {
         assert!(!dark_icons.is_empty());
         assert!(!light_icons.is_empty());
 
-        // Хотя бы один пиксель отличается в первой иконке
+        // At least one pixel differs in the first icon
         let dark_data = &dark_icons[0].data;
         let light_data = &light_icons[0].data;
         assert_ne!(dark_data, light_data, "dark and light renders must differ");

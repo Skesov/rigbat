@@ -18,7 +18,7 @@ pub enum DisplayMode {
 #[serde(default)]
 pub struct Config {
     pub display_mode: DisplayMode,
-    /// Имена устройств для показа иконками. Пустой = показывать все.
+    /// Device names to display as icons. Empty list = show all.
     pub shown_devices: Vec<String>,
 }
 
@@ -32,20 +32,20 @@ impl Default for Config {
 }
 
 impl Config {
-    /// true, если устройство показывать (пустой список = все).
+    /// Returns true if the device should be shown (empty list = show all).
     pub fn is_shown(&self, name: &str) -> bool {
         self.shown_devices.is_empty() || self.shown_devices.iter().any(|n| n == name)
     }
 }
 
-/// ~/.config/rigbat/config.json (XDG). None, если домашний каталог недоступен.
+/// ~/.config/rigbat/config.json (XDG). None if home directory is not available.
 pub fn config_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "rigbat")
         .map(|dirs| dirs.config_dir().join("config.json"))
 }
 
-/// Читает конфиг. Файла нет или он битый → Config::default() (битый — залогировать,
-/// не падать). Никогда не паникует.
+/// Reads config. File missing or invalid → Config::default() (log invalid files,
+/// do not panic). Never panics.
 pub fn load() -> Config {
     let path = match config_path() {
         Some(p) => p,
@@ -66,7 +66,7 @@ pub fn load() -> Config {
     }
 }
 
-/// Атомарно сохраняет: создать каталог, записать во временный файл, переименовать.
+/// Saves atomically: create directory, write to temp file, rename.
 pub fn save(config: &Config) -> anyhow::Result<()> {
     use anyhow::Context as _;
 

@@ -32,7 +32,7 @@ impl SysfsSource {
         for entry in entries.flatten() {
             let entry_path = entry.path();
 
-            // Пропустить Mains (AC adapter)
+            // Skip Mains (AC adapter)
             let type_path = entry_path.join("type");
             if let Ok(kind_str) = std::fs::read_to_string(&type_path)
                 && kind_str.trim() == "Mains"
@@ -40,12 +40,12 @@ impl SysfsSource {
                 continue;
             }
 
-            // Требовать наличие файла capacity
+            // Require the capacity file to exist
             if !entry_path.join("capacity").exists() {
                 continue;
             }
 
-            // Имя: из model_name, если файл есть и непустой; иначе имя записи
+            // Name: from model_name if the file exists and is non-empty; otherwise use the directory name
             let name = {
                 let model_path = entry_path.join("model_name");
                 let model = std::fs::read_to_string(&model_path)

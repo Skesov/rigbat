@@ -21,9 +21,9 @@ pub struct TrayState {
 pub struct Supervisor;
 
 impl Supervisor {
-    /// Поднимает фоновые задачи опроса и агрегатор.
-    /// Возвращает watch-приёмник текущего состояния.
-    /// Задачи живут до завершения рантайма.
+    /// Spawns background polling tasks and the aggregator.
+    /// Returns a watch receiver for the current state.
+    /// Tasks live until the runtime terminates.
     pub fn spawn(sources: Vec<Box<dyn BatterySource>>) -> watch::Receiver<TrayState> {
         let device_infos: Vec<DeviceInfo> = sources.iter().map(|s| s.device().clone()).collect();
 
@@ -49,7 +49,7 @@ impl Supervisor {
             });
         }
 
-        // Агрегатор: получает обновления от источников, пересчитывает состояние.
+        // Aggregator: receives updates from sources, recalculates state.
         let n = device_infos.len();
         tokio::spawn(async move {
             let mut readings: Vec<Option<BatteryReading>> = vec![None; n];
@@ -74,7 +74,7 @@ impl Supervisor {
                     primary_status,
                 };
 
-                // Если приёмник закрыт — завершить задачу.
+                // If the receiver is closed, terminate the task.
                 if watch_tx.send(state).is_err() {
                     return;
                 }
@@ -93,8 +93,8 @@ fn build_initial_state(device_infos: &[DeviceInfo]) -> TrayState {
     }
 }
 
-/// Возвращает индекс первого устройства с показанием Some,
-/// иначе 0 (если устройства есть), иначе None.
+/// Returns the index of the first device with a Some reading,
+/// or 0 (if devices exist), or None.
 fn compute_primary(readings: &[Option<BatteryReading>]) -> Option<usize> {
     if readings.is_empty() {
         return None;
@@ -151,7 +151,7 @@ mod tests {
         BatteryReading::new(percent, ChargeState::Discharging)
     }
 
-    /// Ждёт состояния, где primary_status != Offline, с таймаутом.
+    /// Waits for a state where primary_status != Offline, with a timeout.
     async fn wait_for_connected(rx: &mut watch::Receiver<TrayState>) -> TrayState {
         timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -188,7 +188,7 @@ mod tests {
         assert_eq!(state.primary_status, PrimaryStatus::Ok { percent: 80 });
     }
 
-    /// Все источники Err → primary_status Offline, primary Some(0)
+    /// All sources Err → primary_status Offline, primary Some(0)
     #[tokio::test]
     async fn all_err_stays_offline() {
         let sources: Vec<Box<dyn BatterySource>> = vec![
@@ -202,8 +202,8 @@ mod tests {
 
         let rx = Supervisor::spawn(sources);
 
-        // Источники мгновенны — даём планировщику возможность выполнить задачи.
-        // yield_now гарантирует, что все готовые задачи получат управление.
+        // Sources are instant — give the scheduler a chance to run tasks.
+        // yield_now guarantees that all ready tasks will be executed.
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
@@ -213,7 +213,7 @@ mod tests {
         assert_eq!(state.primary_status, PrimaryStatus::Offline);
     }
 
-    /// spawn(vec![]) → devices пуст, primary None, primary_status Offline
+    /// spawn(vec![]) → devices empty, primary None, primary_status Offline
     #[tokio::test]
     async fn empty_sources() {
         let rx = Supervisor::spawn(vec![]);

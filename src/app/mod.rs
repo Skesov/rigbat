@@ -5,8 +5,8 @@ use tokio::task::JoinSet;
 use crate::domain::{BatteryReading, DeviceInfo};
 use crate::sources::BatterySource;
 
-/// Опрашивает все источники параллельно. Err источника → None (offline).
-/// Результат отсортирован по имени устройства для стабильного вывода.
+/// Polls all sources in parallel. Error from a source becomes None (offline).
+/// Result is sorted by device name for stable output.
 pub async fn poll_once(
     sources: Vec<Box<dyn BatterySource>>,
 ) -> Vec<(DeviceInfo, Option<BatteryReading>)> {

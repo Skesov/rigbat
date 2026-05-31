@@ -84,14 +84,14 @@ impl Tray for TrayApp {
     }
 }
 
-/// Форматирует сводку по primary-устройству для тултипа.
+/// Formats a summary of the primary device for the tooltip.
 pub fn format_primary_summary(state: &TrayState) -> String {
     match state.primary_status {
         PrimaryStatus::Offline => {
             if state.devices.is_empty() {
                 "No devices".into()
             } else {
-                // Показать имя первого устройства (primary index или 0)
+                // Show the name of the first device (primary index or 0)
                 let idx = state.primary.unwrap_or(0);
                 let name = state
                     .devices
@@ -125,7 +125,7 @@ fn primary_device_name(state: &TrayState) -> &str {
         .unwrap_or("unknown")
 }
 
-/// Форматирует строку устройства для пункта меню.
+/// Formats a device entry string for a menu item.
 pub fn format_device_entry(info: &DeviceInfo, reading: Option<BatteryReading>) -> String {
     match reading {
         None => format!("{}: offline", info.name),

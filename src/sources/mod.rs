@@ -9,12 +9,12 @@ pub mod sysfs;
 #[async_trait::async_trait]
 pub trait BatterySource: Send {
     fn device(&self) -> &DeviceInfo;
-    /// Опрашивает устройство. Err — устройство не отвечает/недоступно
-    /// (вызывающий трактует как offline).
+    /// Polls the device. Err indicates the device is unresponsive or unavailable
+    /// (the caller treats this as offline).
     async fn poll(&mut self) -> anyhow::Result<BatteryReading>;
 }
 
-/// Транспортный слой: находит устройства и создаёт источники.
+/// Transport layer: discovers devices and creates battery sources.
 #[async_trait::async_trait]
 pub trait BatteryBackend: Send + Sync {
     fn name(&self) -> &'static str;

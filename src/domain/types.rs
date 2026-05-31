@@ -22,12 +22,12 @@ pub struct DeviceInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatteryReading {
-    pub percent: u8, // инвариант: 0..=100
+    pub percent: u8, // invariant: 0..=100
     pub state: ChargeState,
 }
 
 impl BatteryReading {
-    /// Создаёт показание, ограничивая percent диапазоном 0..=100.
+    /// Creates a reading, constraining percent to range 0..=100.
     pub fn new(percent: u8, state: ChargeState) -> Self {
         Self {
             percent: percent.min(100),

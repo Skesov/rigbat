@@ -1,13 +1,13 @@
-/// BlueZ Battery1 backend — читает заряд Bluetooth-устройств через D-Bus (zbus).
+/// BlueZ Battery1 backend — reads the charge level of Bluetooth devices via D-Bus (zbus).
 ///
-/// Протокол:
-/// - Сервис: `org.bluez`, system bus.
-/// - ObjectManager на `/` → `GetManagedObjects` → все объекты.
-/// - Объект интересен, если есть интерфейс `org.bluez.Device1` с `Connected == true`
-///   И присутствует интерфейс `org.bluez.Battery1`.
-/// - Имя: `Device1.Alias` → `Device1.Name` → адрес из пути объекта.
-/// - Заряд: `Battery1.Percentage` (u8).
-/// - Charging-инфо у Battery1 нет → всегда `ChargeState::Discharging`.
+/// Protocol:
+/// - Service: `org.bluez`, system bus.
+/// - ObjectManager at `/` → `GetManagedObjects` → all objects.
+/// - An object is of interest if it has the `org.bluez.Device1` interface with `Connected == true`
+///   and the `org.bluez.Battery1` interface is present.
+/// - Name: `Device1.Alias` → `Device1.Name` → address from the object path.
+/// - Charge: `Battery1.Percentage` (u8).
+/// - No charging info in Battery1 → always `ChargeState::Discharging`.
 use anyhow::Context as _;
 use zbus::zvariant::OwnedObjectPath;
 
@@ -23,7 +23,7 @@ pub struct BluezSource {
     conn: zbus::Connection,
 }
 
-/// Выбирает имя устройства: Alias → Name → адрес из пути объекта.
+/// Selects the device name: Alias → Name → address from the object path.
 pub fn device_name(alias: Option<&str>, name: Option<&str>, addr: &str) -> String {
     alias
         .filter(|s| !s.is_empty())
@@ -83,7 +83,7 @@ async fn discover_inner() -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
             continue;
         }
 
-        // Проверить Connected
+        // Check Connected property
         let connected = device_iface
             .get("Connected")
             .and_then(|v| bool::try_from(v.clone()).ok())
@@ -101,8 +101,8 @@ async fn discover_inner() -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
             .get("Name")
             .and_then(|v| String::try_from(v.clone()).ok());
 
-        // Адрес как запасной вариант имени: последний компонент пути
-        // BlueZ кодирует адрес в пути: /org/bluez/hciX/dev_XX_XX_XX_XX_XX_XX
+        // Address as a fallback name: the last path component
+        // BlueZ encodes the address in the path: /org/bluez/hciX/dev_XX_XX_XX_XX_XX_XX
         let addr_fallback = path
             .as_str()
             .rsplit('/')
@@ -134,7 +134,7 @@ impl BatterySource for BluezSource {
     }
 
     async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
-        // Проверить Connected
+        // Check Connected property
         let props_device = zbus::fdo::PropertiesProxy::builder(&self.conn)
             .destination("org.bluez")
             .context("setting destination for Device1")?
@@ -161,7 +161,7 @@ impl BatterySource for BluezSource {
             anyhow::bail!("device {} is not connected", self.info.name);
         }
 
-        // Читать заряд (тот же PropertiesProxy, он на том же пути)
+        // Read the charge (same PropertiesProxy, it's at the same path)
         let pct_val = props_device
             .get(battery_iface, "Percentage")
             .await

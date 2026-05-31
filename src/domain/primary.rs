@@ -8,9 +8,9 @@ pub enum PrimaryStatus {
     Charging { percent: u8 },
 }
 
-/// Классифицирует показание для primary-устройства.
-/// `reading == None` означает offline (устройство не отвечает).
-/// Порядок приоритета: Offline → Charging → Low → Ok.
+/// Classifies a reading for a primary device.
+/// `reading == None` means offline (device not responding).
+/// Priority order: Offline → Charging → Low → Ok.
 pub fn classify(reading: Option<BatteryReading>, low_threshold: u8) -> PrimaryStatus {
     match reading {
         None => PrimaryStatus::Offline,

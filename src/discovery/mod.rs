@@ -4,8 +4,8 @@ use futures_util::future::join_all;
 
 use crate::sources::BatterySource;
 
-/// Опрашивает все бэкенды параллельно, возвращает плоский список источников.
-/// Порядок: по реестру (sysfs первый, потом bluez).
+/// Queries all backends in parallel, returns a flat list of sources.
+/// Order: as registered (sysfs first, then bluez).
 pub async fn discover_all() -> Vec<Box<dyn BatterySource>> {
     let backends = registry::backends();
     let futures: Vec<_> = backends.iter().map(|b| b.discover()).collect();

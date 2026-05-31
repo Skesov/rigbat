@@ -7,8 +7,8 @@ pub enum ColorScheme {
     Light,
 }
 
-/// Поднимает фоновую задачу: читает color-scheme из xdg-portal и
-/// обновляет watch при смене темы. Если портал недоступен — остаётся дефолт Dark.
+/// Spawns a background task: reads color-scheme from xdg-portal and
+/// updates the watch on theme change. If the portal is unavailable, defaults to Dark.
 pub fn spawn() -> watch::Receiver<ColorScheme> {
     let (tx, rx) = watch::channel(ColorScheme::Dark);
 

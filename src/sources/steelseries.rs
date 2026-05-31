@@ -1,14 +1,14 @@
-//! SteelSeries HID backend — заряд по выделенному config-интерфейсу.
+//! SteelSeries HID backend — reads charge via a dedicated config interface.
 //!
-//! Протокол: vendor 0x1038, USB-интерфейс 3.
-//! Write output report `[0x00, 0xD2]`, read ответ:
-//! `resp[0] == 0xD2`, `resp[1]` бит7 = charging, биты0-6 = шаг (5% каждый),
-//! `percent = (step - 1) * 5`, клампить 0..=100.
+//! Protocol: vendor 0x1038, USB interface 3.
+//! Write output report `[0x00, 0xD2]`, read response:
+//! `resp[0] == 0xD2`, `resp[1]` bit 7 = charging, bits 0-6 = step (5% each),
+//! `percent = (step - 1) * 5`, clamp to 0..=100.
 //!
-//! Обнаружение: `/sys/class/hidraw/hidrawN/device/uevent` содержит
-//! `HID_ID=0003:VVVVVVVV:PPPPPPPP`; canonicalize device → сегмент `:1.N` → интерфейс N.
+//! Discovery: `/sys/class/hidraw/hidrawN/device/uevent` contains
+//! `HID_ID=0003:VVVVVVVV:PPPPPPPP`; canonicalize device → segment `:1.N` → interface N.
 //!
-//! Реверс-референс: исходный Python-драйвер universal-battery-tray.
+//! Reverse reference: original Python driver universal-battery-tray.
 
 use std::{
     io::{Read as _, Write as _},
@@ -24,18 +24,18 @@ use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
 
 use super::{BatteryBackend, BatterySource};
 
-// ── Константы протокола ──────────────────────────────────────────────────────
+// ── Protocol constants ────────────────────────────────────────────────────────
 
 const VENDOR_ID: u16 = 0x1038;
 const BATTERY_INTERFACE: u8 = 3;
 const BATTERY_QUERY: u8 = 0xD2;
 
-/// Таймаут ожидания ответа от устройства (миллисекунды).
+/// Response timeout from the device (milliseconds).
 const POLL_TIMEOUT_MS: u16 = 1000;
 
-// ── Таблица устройств ────────────────────────────────────────────────────────
+// ── Device table ─────────────────────────────────────────────────────────────
 
-/// Описание поддержанного устройства. Новая модель = +1 строка в `DEVICES`.
+/// Description of a supported device. New model = +1 line in `DEVICES`.
 struct SteelSeriesDevice {
     product_id: u16,
     name: &'static str,
@@ -91,15 +91,15 @@ fn discover_inner() -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
             }
         };
 
-        // try_node возвращает Err для несовпадающих узлов — это штатно, молча пропускаем.
+        // try_node returns Err for non-matching nodes — this is normal, silently skip.
         let _ = try_node(&entry.file_name().to_string_lossy(), &mut sources);
     }
 
     Ok(sources)
 }
 
-/// Пробует добавить узел hidrawN в список источников.
-/// Возвращает Err, если узел не подходит или возникла ошибка — вызывающий пропускает.
+/// Attempts to add a hidrawN node to the list of sources.
+/// Returns Err if the node does not match or an error occurs — the caller skips it.
 fn try_node(node_name: &str, sources: &mut Vec<Box<dyn BatterySource>>) -> anyhow::Result<()> {
     let uevent_path = format!("/sys/class/hidraw/{node_name}/device/uevent");
     let uevent =
@@ -161,14 +161,14 @@ impl BatterySource for SteelSeriesSource {
 
     async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
         let path = self.dev_path.clone();
-        // Блокирующий I/O выносим из async-контекста.
+        // Move blocking I/O out of the async context.
         tokio::task::spawn_blocking(move || poll_device(&path))
             .await
             .context("spawn_blocking")?
     }
 }
 
-/// Синхронный опрос устройства через /dev/hidrawN.
+/// Synchronous polling of the device via /dev/hidrawN.
 fn poll_device(dev_path: &std::path::Path) -> anyhow::Result<BatteryReading> {
     use std::os::fd::AsFd as _;
 
@@ -179,11 +179,11 @@ fn poll_device(dev_path: &std::path::Path) -> anyhow::Result<BatteryReading> {
         .open(dev_path)
         .with_context(|| format!("opening {}", dev_path.display()))?;
 
-    // Отправить запрос батареи.
+    // Send battery query request.
     file.write_all(&[0x00, BATTERY_QUERY])
         .context("writing battery query")?;
 
-    // Дренировать буфер до нужного ответа с общим таймаутом.
+    // Drain the buffer until we get the expected response with an overall timeout.
     let mut buf = [0u8; 64];
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_millis(u64::from(POLL_TIMEOUT_MS));
@@ -222,15 +222,15 @@ fn poll_device(dev_path: &std::path::Path) -> anyhow::Result<BatteryReading> {
         if let Some(reading) = parse_battery_response(&buf[..n]) {
             return Ok(reading);
         }
-        // Ответ не тот — продолжаем дренировать.
+        // Not the expected response — continue draining.
     }
 }
 
-// ── Чистые функции ───────────────────────────────────────────────────────────
+// ── Pure functions ────────────────────────────────────────────────────────────
 
-/// Парсит `HID_ID=bus:vendor:product` → `(vendor, product)`.
+/// Parses `HID_ID=bus:vendor:product` → `(vendor, product)`.
 ///
-/// Пример: `"0003:00001038:00001852"` → `(0x1038, 0x1852)`.
+/// Example: `"0003:00001038:00001852"` → `(0x1038, 0x1852)`.
 pub fn parse_hid_id(s: &str) -> Option<(u16, u16)> {
     let mut parts = s.splitn(3, ':');
     let _bus = parts.next()?;
@@ -243,23 +243,23 @@ pub fn parse_hid_id(s: &str) -> Option<(u16, u16)> {
     Some((vendor, product))
 }
 
-/// Извлекает номер USB-интерфейса из реального пути sysfs.
+/// Extracts the USB interface number from the canonical sysfs path.
 ///
-/// Ищет последний сегмент вида `:1.N` и возвращает N.
-/// Пример: `"/sys/devices/…/7-1.1:1.3/…"` → `Some(3)`.
+/// Looks for the last segment of the form `:1.N` and returns N.
+/// Example: `"/sys/devices/…/7-1.1:1.3/…"` → `Some(3)`.
 pub fn parse_usb_interface(real_path: &str) -> Option<u8> {
     real_path.split('/').rev().find_map(|seg| {
-        // Сегмент вида "7-1.1:1.3" — ищем часть после последнего ':'
+        // Segment like "7-1.1:1.3" — look for the part after the last ':'
         let after_colon = seg.rsplit(':').next()?;
-        // after_colon должен быть "1.N"
+        // after_colon should be "1.N"
         let n_str = after_colon.strip_prefix("1.")?;
         n_str.parse::<u8>().ok()
     })
 }
 
-/// Парсит ответ HID: `buf[0] == 0xD2`, `buf[1]` бит7 = charging, биты0-6 = шаг.
+/// Parses HID response: `buf[0] == 0xD2`, `buf[1]` bit 7 = charging, bits 0-6 = step.
 ///
-/// `percent = (step - 1) * 5`, клампить 0..=100.
+/// `percent = (step - 1) * 5`, clamped to 0..=100.
 pub fn parse_battery_response(buf: &[u8]) -> Option<BatteryReading> {
     if buf.len() < 2 || buf[0] != BATTERY_QUERY {
         return None;
@@ -280,7 +280,7 @@ pub fn parse_battery_response(buf: &[u8]) -> Option<BatteryReading> {
     Some(BatteryReading::new(percent, state))
 }
 
-// ── Тесты ────────────────────────────────────────────────────────────────────
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
