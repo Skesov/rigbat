@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context as _;
 
-use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
+use crate::domain::{BatteryReading, ChargeState, DeviceInfo, guess_kind};
 
 use super::{BatteryBackend, BatterySource};
 
@@ -60,8 +60,8 @@ impl SysfsSource {
             };
 
             let info = DeviceInfo {
+                kind: guess_kind(&name),
                 name,
-                kind: DeviceKind::Other,
             };
 
             sources.push(SysfsSource {
