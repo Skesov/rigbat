@@ -1,6 +1,7 @@
 mod app;
 mod appearance;
 mod cli;
+mod config;
 mod discovery;
 mod domain;
 mod sources;
