@@ -1,0 +1,10 @@
+[package]
+name = "rigbat"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "System tray battery monitor for gaming peripherals"
+license = "MIT"
+repository = "https://github.com/Skesov/rigbat"
+
+[dependencies]
