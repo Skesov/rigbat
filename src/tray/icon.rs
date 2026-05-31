@@ -264,7 +264,13 @@ fn draw_battery_nub(pixmap: &mut Pixmap, g: &BatteryGeom, color: Color) {
         let path = PathBuilder::from_rect(rect);
         let mut paint = Paint::default();
         paint.set_color(color);
-        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
 }
 

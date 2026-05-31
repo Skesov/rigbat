@@ -31,6 +31,26 @@ impl Default for Config {
     }
 }
 
+impl DisplayMode {
+    /// All display modes in display order, used to build the Settings menu.
+    pub const ALL: [DisplayMode; 4] = [
+        DisplayMode::IconOnly,
+        DisplayMode::PercentOnly,
+        DisplayMode::PercentInIcon,
+        DisplayMode::PercentBesideIcon,
+    ];
+
+    /// Human-readable label for the Settings > Display radio menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            DisplayMode::IconOnly => "Icon",
+            DisplayMode::PercentOnly => "Percent",
+            DisplayMode::PercentInIcon => "Percent in icon",
+            DisplayMode::PercentBesideIcon => "Percent beside icon",
+        }
+    }
+}
+
 impl Config {
     /// Returns true if the device should be shown (empty list = show all).
     pub fn is_shown(&self, name: &str) -> bool {
@@ -142,5 +162,36 @@ mod tests {
         assert!(cfg.is_shown("mouse"));
         assert!(!cfg.is_shown("keyboard"));
         assert!(!cfg.is_shown("headset"));
+    }
+
+    #[test]
+    fn display_mode_all_has_four_variants() {
+        assert_eq!(DisplayMode::ALL.len(), 4);
+    }
+
+    #[test]
+    fn display_mode_all_contains_each_variant() {
+        assert!(DisplayMode::ALL.contains(&DisplayMode::IconOnly));
+        assert!(DisplayMode::ALL.contains(&DisplayMode::PercentOnly));
+        assert!(DisplayMode::ALL.contains(&DisplayMode::PercentInIcon));
+        assert!(DisplayMode::ALL.contains(&DisplayMode::PercentBesideIcon));
+    }
+
+    #[test]
+    fn display_mode_label_non_empty() {
+        for mode in DisplayMode::ALL {
+            assert!(!mode.label().is_empty(), "label for {mode:?} is empty");
+        }
+    }
+
+    #[test]
+    fn display_mode_label_values() {
+        assert_eq!(DisplayMode::IconOnly.label(), "Icon");
+        assert_eq!(DisplayMode::PercentOnly.label(), "Percent");
+        assert_eq!(DisplayMode::PercentInIcon.label(), "Percent in icon");
+        assert_eq!(
+            DisplayMode::PercentBesideIcon.label(),
+            "Percent beside icon"
+        );
     }
 }

@@ -39,10 +39,13 @@ async fn run_tray() {
     let mut rx = app::supervisor::Supervisor::spawn(sources);
     let mut theme_rx = appearance::spawn();
 
+    let config = crate::config::load();
+
     let app = tray::TrayApp::new(
         rx.clone(),
         theme_rx.clone(),
         Box::new(tray::icon::TinySkiaRenderer::default()),
+        config,
     );
 
     let handle = match app.spawn().await {

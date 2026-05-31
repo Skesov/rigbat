@@ -7,14 +7,17 @@ use tokio::sync::watch;
 
 use crate::app::supervisor::TrayState;
 use crate::appearance::ColorScheme;
-use crate::config::DisplayMode;
-use crate::domain::{BatteryReading, ChargeState, DeviceInfo, PrimaryStatus};
+use crate::config::{Config, DisplayMode};
+use crate::domain::{
+    BatteryReading, ChargeState, DeviceInfo, PrimaryStatus, freedesktop_icon_name,
+};
 use crate::tray::icon::{IconRenderer, Theme};
 
 pub struct TrayApp {
     pub rx: watch::Receiver<TrayState>,
     pub theme_rx: watch::Receiver<ColorScheme>,
     pub renderer: Box<dyn IconRenderer>,
+    pub config: Config,
 }
 
 impl TrayApp {
@@ -22,16 +25,21 @@ impl TrayApp {
         rx: watch::Receiver<TrayState>,
         theme_rx: watch::Receiver<ColorScheme>,
         renderer: Box<dyn IconRenderer>,
+        config: Config,
     ) -> Self {
         Self {
             rx,
             theme_rx,
             renderer,
+            config,
         }
     }
 }
 
 impl Tray for TrayApp {
+    // Left-click opens the menu instead of calling activate().
+    const MENU_ON_ACTIVATE: bool = true;
+
     fn id(&self) -> String {
         "rigbat".into()
     }
@@ -45,11 +53,10 @@ impl Tray for TrayApp {
             ColorScheme::Dark => Theme::dark(),
             ColorScheme::Light => Theme::light(),
         };
-        // TODO(U4a): replace DisplayMode::IconOnly with the value from loaded config.
         self.renderer.render(
             self.rx.borrow().primary_status,
             &theme,
-            DisplayMode::IconOnly,
+            self.config.display_mode,
         )
     }
 
@@ -64,18 +71,57 @@ impl Tray for TrayApp {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let state = self.rx.borrow();
+
+        // Device status rows — informational, not clickable.
         let mut items: Vec<MenuItem<Self>> = state
             .devices
             .iter()
             .map(|(info, reading)| {
-                let label = format_device_entry(info, *reading);
                 MenuItem::Standard(ksni::menu::StandardItem {
-                    label,
+                    label: format_device_entry(info, *reading),
+                    icon_name: freedesktop_icon_name(info.kind).to_owned(),
                     enabled: false,
                     ..ksni::menu::StandardItem::default()
                 })
             })
             .collect();
+
+        items.push(MenuItem::Separator);
+
+        // Build the Display radio group reflecting the current config value.
+        let selected = DisplayMode::ALL
+            .iter()
+            .position(|&m| m == self.config.display_mode)
+            .unwrap_or(0);
+
+        let display_submenu = MenuItem::SubMenu(ksni::menu::SubMenu {
+            label: "Display".into(),
+            submenu: vec![MenuItem::RadioGroup(ksni::menu::RadioGroup {
+                selected,
+                select: Box::new(|this: &mut Self, idx| {
+                    if let Some(&mode) = DisplayMode::ALL.get(idx) {
+                        this.config.display_mode = mode;
+                        let _ = crate::config::save(&this.config);
+                    }
+                }),
+                options: DisplayMode::ALL
+                    .iter()
+                    .map(|m| ksni::menu::RadioItem {
+                        label: m.label().into(),
+                        ..ksni::menu::RadioItem::default()
+                    })
+                    .collect(),
+            })],
+            ..ksni::menu::SubMenu::default()
+        });
+
+        let settings_submenu = MenuItem::SubMenu(ksni::menu::SubMenu {
+            label: "Settings".into(),
+            submenu: vec![display_submenu],
+            ..ksni::menu::SubMenu::default()
+        });
+
+        items.push(settings_submenu);
 
         items.push(MenuItem::Separator);
 
