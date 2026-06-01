@@ -16,22 +16,22 @@ use crate::tray::icon::{IconRenderer, Theme};
 pub struct TrayApp {
     pub rx: watch::Receiver<TrayState>,
     pub theme_rx: watch::Receiver<ColorScheme>,
+    pub config: watch::Sender<Config>,
     pub renderer: Box<dyn IconRenderer>,
-    pub config: Config,
 }
 
 impl TrayApp {
     pub fn new(
         rx: watch::Receiver<TrayState>,
         theme_rx: watch::Receiver<ColorScheme>,
+        config: watch::Sender<Config>,
         renderer: Box<dyn IconRenderer>,
-        config: Config,
     ) -> Self {
         Self {
             rx,
             theme_rx,
-            renderer,
             config,
+            renderer,
         }
     }
 }
@@ -56,7 +56,7 @@ impl Tray for TrayApp {
         self.renderer.render(
             self.rx.borrow().primary_status,
             &theme,
-            self.config.display_mode,
+            self.config.borrow().display_mode,
         )
     }
 
@@ -91,7 +91,7 @@ impl Tray for TrayApp {
         // Build the Display radio group reflecting the current config value.
         let selected = DisplayMode::ALL
             .iter()
-            .position(|&m| m == self.config.display_mode)
+            .position(|&m| m == self.config.borrow().display_mode)
             .unwrap_or(0);
 
         let display_submenu = MenuItem::SubMenu(ksni::menu::SubMenu {
@@ -100,8 +100,12 @@ impl Tray for TrayApp {
                 selected,
                 select: Box::new(|this: &mut Self, idx| {
                     if let Some(&mode) = DisplayMode::ALL.get(idx) {
-                        this.config.display_mode = mode;
-                        let _ = crate::config::save(&this.config);
+                        // Update config via the watch channel; the main loop
+                        // receives the notification and calls handle.update to
+                        // re-publish the icon immediately.
+                        this.config.send_modify(|c| c.display_mode = mode);
+                        let cfg = this.config.borrow().clone();
+                        let _ = crate::config::save(&cfg);
                     }
                 }),
                 options: DisplayMode::ALL

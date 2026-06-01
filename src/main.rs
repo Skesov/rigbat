@@ -40,12 +40,15 @@ async fn run_tray() {
     let mut theme_rx = appearance::spawn();
 
     let config = crate::config::load();
+    // Route config through a watch channel so the radio handler can notify the
+    // main loop, which then calls handle.update to re-publish the icon.
+    let (config_tx, mut config_rx) = tokio::sync::watch::channel(config);
 
     let app = tray::TrayApp::new(
         rx.clone(),
         theme_rx.clone(),
+        config_tx,
         Box::new(tray::icon::TinySkiaRenderer::default()),
-        config,
     );
 
     let handle = match app.spawn().await {
@@ -62,6 +65,9 @@ async fn run_tray() {
                 if r.is_err() { break; }
             }
             r = theme_rx.changed() => {
+                if r.is_err() { break; }
+            }
+            r = config_rx.changed() => {
                 if r.is_err() { break; }
             }
         }
