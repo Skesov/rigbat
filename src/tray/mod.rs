@@ -7,7 +7,7 @@ use tokio::sync::watch;
 
 use crate::app::supervisor::TrayState;
 use crate::appearance::ColorScheme;
-use crate::config::{Config, DisplayMode};
+use crate::config::Config;
 use crate::domain::{
     BatteryReading, ChargeState, DeviceInfo, PrimaryStatus, freedesktop_icon_name,
 };
@@ -88,32 +88,18 @@ impl Tray for TrayApp {
 
         items.push(MenuItem::Separator);
 
-        // Display-mode picker. Plain Standard items are the most reliable
-        // clickable element across SNI hosts; the current mode is marked. A
-        // single submenu level keeps the top level clean (progressive
-        // disclosure) while avoiding the nested submenu + RadioGroup that did
-        // not deliver clicks on COSMIC.
-        let current = self.config.borrow().display_mode;
-        let mode_items: Vec<MenuItem<Self>> = DisplayMode::ALL
-            .iter()
-            .map(|&mode| {
-                let marker = if mode == current { "● " } else { "    " };
-                MenuItem::Standard(ksni::menu::StandardItem {
-                    label: format!("{marker}{}", mode.label()),
-                    activate: Box::new(move |this: &mut Self| {
-                        this.config.send_modify(|c| c.display_mode = mode);
-                        let cfg = this.config.borrow().clone();
-                        let _ = crate::config::save(&cfg);
-                    }),
-                    ..ksni::menu::StandardItem::default()
-                })
-            })
-            .collect();
-
-        items.push(MenuItem::SubMenu(ksni::menu::SubMenu {
-            label: "Show as".into(),
-            submenu: mode_items,
-            ..ksni::menu::SubMenu::default()
+        // "Settings…" opens the settings window in a separate process.
+        items.push(MenuItem::Standard(ksni::menu::StandardItem {
+            label: "Settings\u{2026}".into(),
+            activate: Box::new(|_: &mut Self| match std::env::current_exe() {
+                Ok(exe) => {
+                    if let Err(e) = std::process::Command::new(exe).arg("settings").spawn() {
+                        eprintln!("rigbat: failed to launch settings window: {e}");
+                    }
+                }
+                Err(e) => eprintln!("rigbat: cannot find own executable: {e}"),
+            }),
+            ..ksni::menu::StandardItem::default()
         }));
 
         items.push(MenuItem::Separator);
