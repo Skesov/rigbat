@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use tokio::sync::{mpsc, watch};
+use std::sync::Arc;
+
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::time::sleep;
 
 use crate::domain::{BatteryReading, DeviceInfo, PrimaryStatus, classify};
@@ -22,29 +24,39 @@ pub struct Supervisor;
 
 impl Supervisor {
     /// Spawns background polling tasks and the aggregator.
-    /// Returns a watch receiver for the current state.
+    /// Returns a watch receiver for the current state and a Notify handle that
+    /// immediately re-polls all sources when triggered (e.g. on system resume).
     /// Tasks live until the runtime terminates.
-    pub fn spawn(sources: Vec<Box<dyn BatterySource>>) -> watch::Receiver<TrayState> {
+    pub fn spawn(
+        sources: Vec<Box<dyn BatterySource>>,
+    ) -> (watch::Receiver<TrayState>, Arc<Notify>) {
         let device_infos: Vec<DeviceInfo> = sources.iter().map(|s| s.device().clone()).collect();
 
         let initial = build_initial_state(&device_infos);
         let (watch_tx, watch_rx) = watch::channel(initial);
 
+        let refresh = Arc::new(Notify::new());
+
         if sources.is_empty() {
-            return watch_rx;
+            return (watch_rx, refresh);
         }
 
         let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<(usize, Option<BatteryReading>)>(32);
 
         for (i, mut src) in sources.into_iter().enumerate() {
             let tx = mpsc_tx.clone();
+            let refresh = refresh.clone();
             tokio::spawn(async move {
                 loop {
                     let reading = src.poll().await.ok();
                     if tx.send((i, reading)).await.is_err() {
                         return;
                     }
-                    sleep(POLL_INTERVAL).await;
+                    // Wait for the normal poll interval or an early wake-up from refresh.
+                    tokio::select! {
+                        _ = sleep(POLL_INTERVAL) => {}
+                        _ = refresh.notified() => {}
+                    }
                 }
             });
         }
@@ -81,7 +93,7 @@ impl Supervisor {
             }
         });
 
-        watch_rx
+        (watch_rx, refresh)
     }
 }
 
@@ -181,7 +193,7 @@ mod tests {
             }),
         ];
 
-        let mut rx = Supervisor::spawn(sources);
+        let (mut rx, _refresh) = Supervisor::spawn(sources);
         let state = wait_for_connected(&mut rx).await;
 
         assert_eq!(state.primary, Some(1));
@@ -200,7 +212,7 @@ mod tests {
             }),
         ];
 
-        let rx = Supervisor::spawn(sources);
+        let (rx, _refresh) = Supervisor::spawn(sources);
 
         // Sources are instant — give the scheduler a chance to run tasks.
         // yield_now guarantees that all ready tasks will be executed.
@@ -216,7 +228,7 @@ mod tests {
     /// spawn(vec![]) → devices empty, primary None, primary_status Offline
     #[tokio::test]
     async fn empty_sources() {
-        let rx = Supervisor::spawn(vec![]);
+        let (rx, _refresh) = Supervisor::spawn(vec![]);
         let state = rx.borrow().clone();
 
         assert!(state.devices.is_empty());

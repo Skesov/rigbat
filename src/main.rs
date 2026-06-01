@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod discovery;
 mod domain;
+mod session;
 mod sources;
 mod tray;
 
@@ -36,7 +37,8 @@ async fn run_tray() {
     let n = sources.len();
     println!("rigbat tray: {n} device(s)");
 
-    let mut rx = app::supervisor::Supervisor::spawn(sources);
+    let (mut rx, refresh) = app::supervisor::Supervisor::spawn(sources);
+    crate::session::watch_resume(refresh);
     let mut theme_rx = appearance::spawn();
 
     let config = crate::config::load();
