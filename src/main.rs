@@ -45,6 +45,9 @@ async fn run_tray() {
     // Route config through a watch channel so the radio handler can notify the
     // main loop, which then calls handle.update to re-publish the icon.
     let (config_tx, mut config_rx) = tokio::sync::watch::channel(config);
+    // Start the filesystem watcher. It pushes reloaded configs into config_tx
+    // whenever config.json changes on disk (best-effort, never fatal).
+    crate::config::watch_file(config_tx.clone());
 
     let app = tray::TrayApp::new(
         rx.clone(),

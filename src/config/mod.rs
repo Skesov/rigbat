@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -107,6 +107,67 @@ pub fn save(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Returns `true` if any path in the event matches the target config file name.
+/// Comparing by file name is sufficient because the watch is non-recursive and
+/// scoped to the config directory.
+fn event_touches(event: &notify::Event, target: &Path) -> bool {
+    let name = target.file_name();
+    event.paths.iter().any(|p| p.file_name() == name)
+}
+
+/// Watches the config file's parent directory and pushes a fresh [`Config`] into
+/// `tx` whenever the file changes on disk. Quietly does nothing if the path or
+/// the watcher is unavailable (config watching is best-effort, never fatal).
+pub fn watch_file(tx: tokio::sync::watch::Sender<Config>) {
+    let Some(path) = config_path() else { return };
+    let Some(dir) = path.parent().map(|p| p.to_path_buf()) else {
+        return;
+    };
+
+    // Ensure the directory exists before watching. Best-effort.
+    let _ = std::fs::create_dir_all(&dir);
+
+    std::thread::spawn(move || {
+        let (raw_tx, raw_rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+
+        // `recommended_watcher` uses a callback that receives `Result<Event>`.
+        // Forward every item to the std::sync::mpsc channel so this thread can
+        // process events synchronously without any async runtime.
+        let mut watcher = match notify::recommended_watcher(move |ev| {
+            let _ = raw_tx.send(ev);
+        }) {
+            Ok(w) => w,
+            Err(_) => return,
+        };
+
+        // Watch the parent directory non-recursively so rename-based atomic
+        // writes (temp file → rename) are captured.
+        use notify::Watcher as _;
+        if watcher
+            .watch(&dir, notify::RecursiveMode::NonRecursive)
+            .is_err()
+        {
+            return;
+        }
+
+        // Keep `watcher` alive for the lifetime of this loop.
+        for result in raw_rx {
+            let Ok(event) = result else { continue };
+            if event_touches(&event, &path) {
+                let cfg = load();
+                tx.send_if_modified(|cur| {
+                    if *cur != cfg {
+                        *cur = cfg;
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +246,41 @@ mod tests {
         assert_eq!(DisplayMode::IconOnly.label(), "Icon");
         assert_eq!(DisplayMode::PercentOnly.label(), "Percent");
         assert_eq!(DisplayMode::PercentInIcon.label(), "Percent in icon");
+    }
+
+    #[test]
+    fn event_touches_matching_filename() {
+        use std::path::PathBuf;
+        let target = PathBuf::from("/home/user/.config/rigbat/config.json");
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/home/user/.config/rigbat/config.json")],
+            attrs: Default::default(),
+        };
+        assert!(event_touches(&event, &target));
+    }
+
+    #[test]
+    fn event_touches_non_matching_filename() {
+        use std::path::PathBuf;
+        let target = PathBuf::from("/home/user/.config/rigbat/config.json");
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/home/user/.config/rigbat/other.json")],
+            attrs: Default::default(),
+        };
+        assert!(!event_touches(&event, &target));
+    }
+
+    #[test]
+    fn event_touches_tmp_file_excluded() {
+        use std::path::PathBuf;
+        let target = PathBuf::from("/home/user/.config/rigbat/config.json");
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/home/user/.config/rigbat/config.json.tmp")],
+            attrs: Default::default(),
+        };
+        assert!(!event_touches(&event, &target));
     }
 }
