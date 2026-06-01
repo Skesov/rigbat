@@ -5,16 +5,38 @@ mod config;
 mod discovery;
 mod domain;
 mod session;
+mod settings;
 mod sources;
 mod tray;
 
 use ksni::TrayMethods;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = args.first().map(String::as_str).unwrap_or("list");
 
+    if mode == "settings" {
+        if let Err(e) = settings::run() {
+            eprintln!("rigbat settings: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("rigbat: failed to start runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    rt.block_on(async_main(mode));
+}
+
+async fn async_main(mode: &str) {
     if mode == "tray" {
         run_tray().await;
         return;
