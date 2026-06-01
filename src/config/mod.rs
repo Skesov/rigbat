@@ -38,12 +38,12 @@ impl DisplayMode {
         DisplayMode::PercentInIcon,
     ];
 
-    /// Human-readable label for the "Show as" menu.
+    /// Human-readable label used in the settings window radio group.
     pub fn label(self) -> &'static str {
         match self {
-            DisplayMode::IconOnly => "Icon",
-            DisplayMode::PercentOnly => "Percent",
-            DisplayMode::PercentInIcon => "Percent in icon",
+            DisplayMode::IconOnly => "Battery icon only",
+            DisplayMode::PercentOnly => "Percentage as text",
+            DisplayMode::PercentInIcon => "Percentage inside icon",
         }
     }
 }
@@ -243,9 +243,9 @@ mod tests {
 
     #[test]
     fn display_mode_label_values() {
-        assert_eq!(DisplayMode::IconOnly.label(), "Icon");
-        assert_eq!(DisplayMode::PercentOnly.label(), "Percent");
-        assert_eq!(DisplayMode::PercentInIcon.label(), "Percent in icon");
+        assert_eq!(DisplayMode::IconOnly.label(), "Battery icon only");
+        assert_eq!(DisplayMode::PercentOnly.label(), "Percentage as text");
+        assert_eq!(DisplayMode::PercentInIcon.label(), "Percentage inside icon");
     }
 
     #[test]
