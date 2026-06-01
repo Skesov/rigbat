@@ -11,7 +11,6 @@ pub enum DisplayMode {
     IconOnly,
     PercentOnly,
     PercentInIcon,
-    PercentBesideIcon,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,20 +32,18 @@ impl Default for Config {
 
 impl DisplayMode {
     /// All display modes in display order, used to build the Settings menu.
-    pub const ALL: [DisplayMode; 4] = [
+    pub const ALL: [DisplayMode; 3] = [
         DisplayMode::IconOnly,
         DisplayMode::PercentOnly,
         DisplayMode::PercentInIcon,
-        DisplayMode::PercentBesideIcon,
     ];
 
-    /// Human-readable label for the Settings > Display radio menu.
+    /// Human-readable label for the "Show as" menu.
     pub fn label(self) -> &'static str {
         match self {
             DisplayMode::IconOnly => "Icon",
             DisplayMode::PercentOnly => "Percent",
             DisplayMode::PercentInIcon => "Percent in icon",
-            DisplayMode::PercentBesideIcon => "Percent beside icon",
         }
     }
 }
@@ -124,7 +121,7 @@ mod tests {
     #[test]
     fn serde_round_trip() {
         let cfg = Config {
-            display_mode: DisplayMode::PercentBesideIcon,
+            display_mode: DisplayMode::PercentInIcon,
             shown_devices: vec!["mouse".to_string(), "keyboard".to_string()],
         };
         let json = serde_json::to_string(&cfg).unwrap();
@@ -165,8 +162,8 @@ mod tests {
     }
 
     #[test]
-    fn display_mode_all_has_four_variants() {
-        assert_eq!(DisplayMode::ALL.len(), 4);
+    fn display_mode_all_has_three_variants() {
+        assert_eq!(DisplayMode::ALL.len(), 3);
     }
 
     #[test]
@@ -174,7 +171,6 @@ mod tests {
         assert!(DisplayMode::ALL.contains(&DisplayMode::IconOnly));
         assert!(DisplayMode::ALL.contains(&DisplayMode::PercentOnly));
         assert!(DisplayMode::ALL.contains(&DisplayMode::PercentInIcon));
-        assert!(DisplayMode::ALL.contains(&DisplayMode::PercentBesideIcon));
     }
 
     #[test]
@@ -189,9 +185,5 @@ mod tests {
         assert_eq!(DisplayMode::IconOnly.label(), "Icon");
         assert_eq!(DisplayMode::PercentOnly.label(), "Percent");
         assert_eq!(DisplayMode::PercentInIcon.label(), "Percent in icon");
-        assert_eq!(
-            DisplayMode::PercentBesideIcon.label(),
-            "Percent beside icon"
-        );
     }
 }

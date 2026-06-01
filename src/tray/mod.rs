@@ -88,44 +88,33 @@ impl Tray for TrayApp {
 
         items.push(MenuItem::Separator);
 
-        // Build the Display radio group reflecting the current config value.
-        let selected = DisplayMode::ALL
+        // Display-mode picker. Plain Standard items are the most reliable
+        // clickable element across SNI hosts; the current mode is marked. A
+        // single submenu level keeps the top level clean (progressive
+        // disclosure) while avoiding the nested submenu + RadioGroup that did
+        // not deliver clicks on COSMIC.
+        let current = self.config.borrow().display_mode;
+        let mode_items: Vec<MenuItem<Self>> = DisplayMode::ALL
             .iter()
-            .position(|&m| m == self.config.borrow().display_mode)
-            .unwrap_or(0);
-
-        let display_submenu = MenuItem::SubMenu(ksni::menu::SubMenu {
-            label: "Display".into(),
-            submenu: vec![MenuItem::RadioGroup(ksni::menu::RadioGroup {
-                selected,
-                select: Box::new(|this: &mut Self, idx| {
-                    if let Some(&mode) = DisplayMode::ALL.get(idx) {
-                        // Update config via the watch channel; the main loop
-                        // receives the notification and calls handle.update to
-                        // re-publish the icon immediately.
+            .map(|&mode| {
+                let marker = if mode == current { "● " } else { "    " };
+                MenuItem::Standard(ksni::menu::StandardItem {
+                    label: format!("{marker}{}", mode.label()),
+                    activate: Box::new(move |this: &mut Self| {
                         this.config.send_modify(|c| c.display_mode = mode);
                         let cfg = this.config.borrow().clone();
                         let _ = crate::config::save(&cfg);
-                    }
-                }),
-                options: DisplayMode::ALL
-                    .iter()
-                    .map(|m| ksni::menu::RadioItem {
-                        label: m.label().into(),
-                        ..ksni::menu::RadioItem::default()
-                    })
-                    .collect(),
-            })],
-            ..ksni::menu::SubMenu::default()
-        });
+                    }),
+                    ..ksni::menu::StandardItem::default()
+                })
+            })
+            .collect();
 
-        let settings_submenu = MenuItem::SubMenu(ksni::menu::SubMenu {
-            label: "Settings".into(),
-            submenu: vec![display_submenu],
+        items.push(MenuItem::SubMenu(ksni::menu::SubMenu {
+            label: "Show as".into(),
+            submenu: mode_items,
             ..ksni::menu::SubMenu::default()
-        });
-
-        items.push(settings_submenu);
+        }));
 
         items.push(MenuItem::Separator);
 

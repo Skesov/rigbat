@@ -126,15 +126,6 @@ fn render_mode(
             draw_percent_in_battery(&mut pixmap, percent, color);
             Some(pixmap_to_icon(pixmap))
         }
-        DisplayMode::PercentBesideIcon => {
-            // Canvas is 2× wide: battery on the left half, number on the right.
-            let width = size * 2;
-            let mut pixmap = Pixmap::new(width, size)?;
-            let side = size as f32;
-            draw_battery_in_region(&mut pixmap, 0.0, 0.0, side, fill_ratio, color, false);
-            draw_percent_in_region(&mut pixmap, side, 0.0, side, side, percent, color);
-            Some(pixmap_to_icon(pixmap))
-        }
     }
 }
 
@@ -168,28 +159,6 @@ fn draw_battery_outline_only(pixmap: &mut Pixmap, color: Color) {
     let g = battery_geometry(pixmap.width() as f32, pixmap.height() as f32);
     draw_battery_outline(pixmap, &g, color);
     draw_battery_nub(pixmap, &g, color);
-}
-
-/// Draws a battery (outline + fill + nub + optional cross) into a square
-/// region of side `side` at `(rx, ry)` inside `pixmap`. Used for `PercentBesideIcon`.
-fn draw_battery_in_region(
-    pixmap: &mut Pixmap,
-    rx: f32,
-    ry: f32,
-    side: f32,
-    fill_ratio: f32,
-    color: Color,
-    is_offline: bool,
-) {
-    let mut g = battery_geometry(side, side);
-    g.bx += rx;
-    g.by += ry;
-    draw_battery_fill(pixmap, &g, fill_ratio, color);
-    draw_battery_outline(pixmap, &g, color);
-    draw_battery_nub(pixmap, &g, color);
-    if is_offline {
-        draw_cross_line(pixmap, &g, color);
-    }
 }
 
 /// Geometry of the battery body within a `w`×`h` canvas.
@@ -480,7 +449,6 @@ mod tests {
             ("icon_only", DisplayMode::IconOnly),
             ("percent_only", DisplayMode::PercentOnly),
             ("percent_in_icon", DisplayMode::PercentInIcon),
-            ("percent_beside", DisplayMode::PercentBesideIcon),
         ];
         for (name, mode) in cases {
             let icons = renderer.render(PrimaryStatus::Ok { percent: 90 }, &Theme::dark(), mode);
@@ -579,51 +547,6 @@ mod tests {
         }
     }
 
-    // --- mode: PercentBesideIcon ----------------------------------------
-
-    #[test]
-    fn percent_beside_icon_renders_correct_count() {
-        let renderer = TinySkiaRenderer::default();
-        let icons = renderer.render(
-            PrimaryStatus::Ok { percent: 50 },
-            &Theme::dark(),
-            DisplayMode::PercentBesideIcon,
-        );
-        assert_eq!(icons.len(), default_sizes().len());
-    }
-
-    #[test]
-    fn percent_beside_icon_width_is_double_height() {
-        let renderer = TinySkiaRenderer::default();
-        let icons = renderer.render(
-            PrimaryStatus::Ok { percent: 50 },
-            &Theme::dark(),
-            DisplayMode::PercentBesideIcon,
-        );
-        for icon in &icons {
-            assert_eq!(
-                icon.width,
-                icon.height * 2,
-                "PercentBesideIcon: width must be 2×height, got {}×{}",
-                icon.width,
-                icon.height
-            );
-        }
-    }
-
-    #[test]
-    fn percent_beside_icon_data_len() {
-        let renderer = TinySkiaRenderer::default();
-        let icons = renderer.render(
-            PrimaryStatus::Ok { percent: 50 },
-            &Theme::dark(),
-            DisplayMode::PercentBesideIcon,
-        );
-        for icon in &icons {
-            assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
-        }
-    }
-
     // --- offline falls back to battery in every mode ---------------------
 
     #[test]
@@ -647,7 +570,6 @@ mod tests {
             DisplayMode::IconOnly,
             DisplayMode::PercentOnly,
             DisplayMode::PercentInIcon,
-            DisplayMode::PercentBesideIcon,
         ] {
             let icons = renderer.render(PrimaryStatus::Offline, &Theme::dark(), mode);
             assert_eq!(
