@@ -9,7 +9,7 @@ use crate::domain::{BatteryReading, DeviceInfo, PrimaryStatus, classify};
 use crate::sources::BatterySource;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
-const LOW_THRESHOLD: u8 = 20;
+pub const LOW_THRESHOLD: u8 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayState {

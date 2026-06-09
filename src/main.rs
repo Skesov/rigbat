@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod discovery;
 mod domain;
+mod notifications;
 mod session;
 mod settings;
 mod sources;
@@ -61,6 +62,7 @@ async fn run_tray() {
 
     let (mut rx, refresh) = app::supervisor::Supervisor::spawn(sources);
     crate::session::watch_resume(refresh.clone());
+    crate::notifications::spawn(rx.clone(), app::supervisor::LOW_THRESHOLD);
     let mut theme_rx = appearance::spawn();
 
     let config = crate::config::load();
