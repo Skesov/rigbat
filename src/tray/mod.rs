@@ -1,7 +1,9 @@
 pub mod icon;
 
+use std::sync::Arc;
+
 use ksni::{MenuItem, ToolTip, Tray};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 use crate::app::supervisor::TrayState;
 use crate::appearance::ColorScheme;
@@ -16,6 +18,7 @@ pub struct TrayApp {
     pub theme_rx: watch::Receiver<ColorScheme>,
     pub config: watch::Receiver<Config>,
     pub renderer: Box<dyn IconRenderer>,
+    pub refresh: Arc<Notify>,
 }
 
 impl TrayApp {
@@ -24,12 +27,14 @@ impl TrayApp {
         theme_rx: watch::Receiver<ColorScheme>,
         config: watch::Receiver<Config>,
         renderer: Box<dyn IconRenderer>,
+        refresh: Arc<Notify>,
     ) -> Self {
         Self {
             rx,
             theme_rx,
             config,
             renderer,
+            refresh,
         }
     }
 }
@@ -85,6 +90,14 @@ impl Tray for TrayApp {
             .collect();
 
         items.push(MenuItem::Separator);
+
+        // Reuses the resume-wake Arc<Notify> — not a separate poll path.
+        items.push(MenuItem::Standard(ksni::menu::StandardItem {
+            label: "Refresh".into(),
+            icon_name: "view-refresh".into(),
+            activate: Box::new(|app: &mut Self| app.refresh.notify_waiters()),
+            ..ksni::menu::StandardItem::default()
+        }));
 
         // "Settings…" opens the settings window in a separate process.
         items.push(MenuItem::Standard(ksni::menu::StandardItem {

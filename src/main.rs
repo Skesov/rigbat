@@ -60,7 +60,7 @@ async fn run_tray() {
     println!("rigbat tray: {n} device(s)");
 
     let (mut rx, refresh) = app::supervisor::Supervisor::spawn(sources);
-    crate::session::watch_resume(refresh);
+    crate::session::watch_resume(refresh.clone());
     let mut theme_rx = appearance::spawn();
 
     let config = crate::config::load();
@@ -76,6 +76,7 @@ async fn run_tray() {
         theme_rx.clone(),
         config_tx.subscribe(),
         Box::new(tray::icon::TinySkiaRenderer::default()),
+        refresh,
     );
 
     let handle = match app.spawn().await {
