@@ -1,7 +1,3 @@
-// This module is part of the tray icon infrastructure used in T4b/T4c.
-// Types are public API but not yet wired into main, hence dead_code for now.
-#![allow(dead_code)]
-
 use crate::config::DisplayMode;
 use crate::domain::PrimaryStatus;
 use tiny_skia::{

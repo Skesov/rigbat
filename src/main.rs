@@ -74,7 +74,7 @@ async fn run_tray() {
     let app = tray::TrayApp::new(
         rx.clone(),
         theme_rx.clone(),
-        config_tx,
+        config_tx.subscribe(),
         Box::new(tray::icon::TinySkiaRenderer::default()),
     );
 

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +16,8 @@ pub enum DisplayMode {
 pub struct Config {
     pub display_mode: DisplayMode,
     /// Device names to display as icons. Empty list = show all.
+    // wired in D2 (Visible devices) / U4b (multi-icon)
+    #[allow(dead_code)]
     pub shown_devices: Vec<String>,
 }
 
@@ -50,6 +50,8 @@ impl DisplayMode {
 
 impl Config {
     /// Returns true if the device should be shown (empty list = show all).
+    // wired in D2 (Visible devices) / U4b (multi-icon)
+    #[allow(dead_code)]
     pub fn is_shown(&self, name: &str) -> bool {
         self.shown_devices.is_empty() || self.shown_devices.iter().any(|n| n == name)
     }

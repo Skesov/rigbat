@@ -1,6 +1,4 @@
 pub mod icon;
-#[allow(unused_imports)]
-pub use icon::*;
 
 use ksni::{MenuItem, ToolTip, Tray};
 use tokio::sync::watch;
@@ -16,7 +14,7 @@ use crate::tray::icon::{IconRenderer, Theme};
 pub struct TrayApp {
     pub rx: watch::Receiver<TrayState>,
     pub theme_rx: watch::Receiver<ColorScheme>,
-    pub config: watch::Sender<Config>,
+    pub config: watch::Receiver<Config>,
     pub renderer: Box<dyn IconRenderer>,
 }
 
@@ -24,7 +22,7 @@ impl TrayApp {
     pub fn new(
         rx: watch::Receiver<TrayState>,
         theme_rx: watch::Receiver<ColorScheme>,
-        config: watch::Sender<Config>,
+        config: watch::Receiver<Config>,
         renderer: Box<dyn IconRenderer>,
     ) -> Self {
         Self {

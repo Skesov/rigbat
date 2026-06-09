@@ -130,12 +130,8 @@ pub fn run() -> anyhow::Result<()> {
         "rigbat",
         options,
         Box::new(|cc| {
-            // Follow the system light/dark preference (Wayland/X11 via xdg-desktop-portal).
-            // TODO: this call may panic on COSMIC/Wayland because querying the OS color
-            // scheme goes through a D-Bus/portal call and the settings process runs with
-            // no tokio runtime — the same root cause that forced `accesskit` to be removed.
-            // If smoke-testing reveals a startup panic, replace with:
-            //   cc.egui_ctx.set_theme(egui::Theme::Dark);
+            // Follow the system light/dark preference. Confirmed safe in the runtime-less settings
+            // process on COSMIC/Wayland — portal theme queries do not hit the zbus-no-runtime path.
             cc.egui_ctx.set_theme(egui::ThemePreference::System);
             Ok(Box::new(SettingsApp {
                 config,
