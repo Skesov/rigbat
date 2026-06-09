@@ -1,5 +1,6 @@
 mod app;
 mod appearance;
+mod autostart;
 mod cli;
 mod config;
 mod discovery;

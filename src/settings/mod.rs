@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::autostart;
 use crate::config::{self, Config, DisplayMode};
 use crate::domain::DeviceInfo;
 
@@ -15,6 +16,8 @@ struct SettingsApp {
     /// Set to `Some(Instant::now())` on every successful save; cleared implicitly
     /// by comparing elapsed time on each frame.
     saved_at: Option<Instant>,
+    /// Reflects `~/.config/autostart/rigbat.desktop` existence — not stored in Config.
+    autostart_enabled: bool,
 }
 
 impl SettingsApp {
@@ -118,16 +121,26 @@ impl SettingsApp {
             }
         }
 
-        // ── Startup (disabled placeholder) ────────────────────────────────────
+        // ── Startup ───────────────────────────────────────────────────────────
         ui.add_space(16.0);
         Self::section_header(ui, "Startup");
-        // Throwaway local — intentionally not stored in Config (coming soon).
-        let mut _startup_placeholder = false;
-        ui.add_enabled(
-            false,
-            egui::Checkbox::new(&mut _startup_placeholder, "Start with session"),
-        );
-        ui.label(egui::RichText::new("(coming soon)").weak());
+        if ui
+            .checkbox(&mut self.autostart_enabled, "Start with session")
+            .changed()
+        {
+            match autostart::set_enabled(self.autostart_enabled) {
+                Ok(()) => {
+                    self.saved_at = Some(Instant::now());
+                    ui.ctx()
+                        .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
+                }
+                Err(e) => {
+                    eprintln!("rigbat settings: failed to update autostart: {e}");
+                    // Revert the checkbox so it reflects the real filesystem state.
+                    self.autostart_enabled = !self.autostart_enabled;
+                }
+            }
+        }
 
         // ── About ─────────────────────────────────────────────────────────────
         ui.add_space(16.0);
@@ -216,6 +229,7 @@ pub fn run() -> anyhow::Result<()> {
                 config,
                 devices,
                 saved_at: None,
+                autostart_enabled: autostart::is_enabled(),
             }))
         }),
     )
