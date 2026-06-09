@@ -99,16 +99,24 @@ impl SettingsApp {
             }
         }
 
-        // ── Notifications (disabled placeholder) ─────────────────────────────
+        // ── Notifications ─────────────────────────────────────────────────────
         ui.add_space(16.0);
         Self::section_header(ui, "Notifications");
-        // Throwaway local — intentionally not stored in Config (coming soon).
-        let mut _notify_placeholder = false;
-        ui.add_enabled(
-            false,
-            egui::Checkbox::new(&mut _notify_placeholder, "Low battery notifications"),
-        );
-        ui.label(egui::RichText::new("(coming soon)").weak());
+        if ui
+            .checkbox(
+                &mut self.config.notifications_enabled,
+                "Low battery notifications",
+            )
+            .changed()
+        {
+            if let Err(e) = config::save(&self.config) {
+                eprintln!("rigbat settings: failed to save config: {e}");
+            } else {
+                self.saved_at = Some(Instant::now());
+                ui.ctx()
+                    .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
+            }
+        }
 
         // ── Startup (disabled placeholder) ────────────────────────────────────
         ui.add_space(16.0);

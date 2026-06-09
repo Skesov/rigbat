@@ -62,7 +62,6 @@ async fn run_tray() {
 
     let (mut rx, refresh) = app::supervisor::Supervisor::spawn(sources);
     crate::session::watch_resume(refresh.clone());
-    crate::notifications::spawn(rx.clone(), app::supervisor::LOW_THRESHOLD);
     let mut theme_rx = appearance::spawn();
 
     let config = crate::config::load();
@@ -72,6 +71,13 @@ async fn run_tray() {
     // Start the filesystem watcher. It pushes reloaded configs into config_tx
     // whenever config.json changes on disk (best-effort, never fatal).
     crate::config::watch_file(config_tx.clone());
+    // Spawn the notifier after config_tx is available so it can receive the
+    // notifications_enabled flag via a config receiver.
+    crate::notifications::spawn(
+        rx.clone(),
+        config_tx.subscribe(),
+        app::supervisor::LOW_THRESHOLD,
+    );
 
     let app = tray::TrayApp::new(
         rx.clone(),

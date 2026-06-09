@@ -19,6 +19,10 @@ pub struct Config {
     // wired in D2 (Visible devices) / U4b (multi-icon)
     #[allow(dead_code)]
     pub shown_devices: Vec<String>,
+    /// Whether to send desktop notifications for low-battery crossings.
+    /// Defaults to true; old config files without this key load as true
+    /// because `#[serde(default)]` on the struct fills missing fields from Default.
+    pub notifications_enabled: bool,
 }
 
 impl Default for Config {
@@ -26,6 +30,7 @@ impl Default for Config {
         Self {
             display_mode: DisplayMode::IconOnly,
             shown_devices: Vec::new(),
+            notifications_enabled: true,
         }
     }
 }
@@ -186,10 +191,17 @@ mod tests {
         let cfg = Config {
             display_mode: DisplayMode::PercentInIcon,
             shown_devices: vec!["mouse".to_string(), "keyboard".to_string()],
+            notifications_enabled: false,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg, restored);
+    }
+
+    #[test]
+    fn empty_json_notifications_enabled_defaults_true() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert!(cfg.notifications_enabled);
     }
 
     #[test]
@@ -218,6 +230,7 @@ mod tests {
         let cfg = Config {
             display_mode: DisplayMode::IconOnly,
             shown_devices: vec!["mouse".to_string()],
+            notifications_enabled: true,
         };
         assert!(cfg.is_shown("mouse"));
         assert!(!cfg.is_shown("keyboard"));

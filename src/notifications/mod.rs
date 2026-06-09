@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use tokio::sync::watch;
 
 use crate::app::supervisor::TrayState;
+use crate::config::Config;
 use crate::domain::{PrimaryStatus, classify};
 
 /// zbus proxy for org.freedesktop.Notifications (session bus).
@@ -52,9 +53,18 @@ impl LowTracker {
 /// Spawns a background task that fires a desktop notification whenever a device
 /// crosses into the low-battery state while discharging.
 ///
+/// `config_rx` is watched for the `notifications_enabled` flag. While disabled,
+/// `LowTracker::observe` still runs (crossings are consumed silently), so toggling
+/// notifications back on does not retroactively spam for devices that are already
+/// low — they re-notify only on the next fresh low crossing.
+///
 /// The task exits quietly if the session bus or the Notifications service is
 /// unavailable — battery monitoring continues unaffected.
-pub fn spawn(mut rx: watch::Receiver<TrayState>, threshold: u8) {
+pub fn spawn(
+    mut rx: watch::Receiver<TrayState>,
+    config_rx: watch::Receiver<Config>,
+    threshold: u8,
+) {
     tokio::spawn(async move {
         let Ok(conn) = zbus::Connection::session().await else {
             return;
@@ -65,11 +75,12 @@ pub fn spawn(mut rx: watch::Receiver<TrayState>, threshold: u8) {
         let mut tracker = LowTracker::default();
 
         loop {
-            // Collect pending notifications while holding the borrow, then drop it
-            // before any .await so the watch::Ref does not cross an await point.
-            let pending: Vec<(String, u8)> = {
+            // Collect pending notifications and read the enabled flag while
+            // holding borrows, then drop both refs before any .await so no
+            // watch::Ref crosses an await point.
+            let (pending, enabled): (Vec<(String, u8)>, bool) = {
                 let state = rx.borrow_and_update();
-                state
+                let pending = state
                     .devices
                     .iter()
                     .filter_map(|(info, reading)| {
@@ -82,27 +93,33 @@ pub fn spawn(mut rx: watch::Receiver<TrayState>, threshold: u8) {
                             None
                         }
                     })
-                    .collect()
+                    .collect();
+                let enabled = config_rx.borrow().notifications_enabled;
+                (pending, enabled)
             };
 
-            for (name, pct) in pending {
-                let summary = format!("{name} battery low");
-                let body = format!("{pct}% remaining");
-                let mut hints = std::collections::HashMap::new();
-                // urgency == 2 (critical) keeps the notification visible until dismissed.
-                hints.insert("urgency", zbus::zvariant::Value::U8(2));
-                let _ = proxy
-                    .notify(
-                        "rigbat",
-                        0,
-                        "battery-caution",
-                        &summary,
-                        &body,
-                        &[],
-                        hints,
-                        0,
-                    )
-                    .await;
+            // Only send if notifications are enabled. Crossings were already
+            // consumed by LowTracker above regardless of this flag.
+            if enabled {
+                for (name, pct) in pending {
+                    let summary = format!("{name} battery low");
+                    let body = format!("{pct}% remaining");
+                    let mut hints = std::collections::HashMap::new();
+                    // urgency == 2 (critical) keeps the notification visible until dismissed.
+                    hints.insert("urgency", zbus::zvariant::Value::U8(2));
+                    let _ = proxy
+                        .notify(
+                            "rigbat",
+                            0,
+                            "battery-caution",
+                            &summary,
+                            &body,
+                            &[],
+                            hints,
+                            0,
+                        )
+                        .await;
+                }
             }
 
             if rx.changed().await.is_err() {
