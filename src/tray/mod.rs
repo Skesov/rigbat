@@ -74,11 +74,14 @@ impl Tray for TrayApp {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let state = self.rx.borrow();
+        let cfg = self.config.borrow();
 
-        // Device status rows — informational, not clickable.
+        // Device status rows — informational, not clickable. Filtered by the
+        // user's visible-devices selection (empty shown_devices = show all).
         let mut items: Vec<MenuItem<Self>> = state
             .devices
             .iter()
+            .filter(|(info, _)| cfg.is_shown(&info.name))
             .map(|(info, reading)| {
                 MenuItem::Standard(ksni::menu::StandardItem {
                     label: format_device_entry(info, *reading),

@@ -1,14 +1,17 @@
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 
 use crate::config::{self, Config, DisplayMode};
+use crate::domain::DeviceInfo;
 
 /// Seconds the "Changes saved." status line remains visible after a save.
 const SAVED_VISIBLE_SECS: u64 = 2;
 
 struct SettingsApp {
     config: Config,
+    devices: Vec<DeviceInfo>,
     /// Set to `Some(Instant::now())` on every successful save; cleared implicitly
     /// by comparing elapsed time on each frame.
     saved_at: Option<Instant>,
@@ -58,10 +61,43 @@ impl SettingsApp {
             }
         }
 
-        // ── Visible devices (placeholder — D2 makes it functional) ────────────
+        // ── Visible devices ───────────────────────────────────────────────────
         ui.add_space(16.0);
         Self::section_header(ui, "Visible devices");
-        ui.label(egui::RichText::new("Device selection arrives with multiple tray icons.").weak());
+
+        if self.devices.is_empty() {
+            ui.label(egui::RichText::new("No devices found. Connect a device and reopen.").weak());
+        } else {
+            ui.label(egui::RichText::new("All shown if none are selected.").weak());
+
+            let all_names: Vec<String> = self.devices.iter().map(|d| d.name.clone()).collect();
+
+            for device in &self.devices {
+                let name = &device.name;
+                let mut checked = self.config.is_shown(name);
+                if ui.checkbox(&mut checked, name).changed() {
+                    // Rebuild the checked set after this toggle.
+                    let mut checked_set: HashSet<String> = all_names
+                        .iter()
+                        .filter(|n| self.config.is_shown(n))
+                        .cloned()
+                        .collect();
+                    if checked {
+                        checked_set.insert(name.clone());
+                    } else {
+                        checked_set.remove(name.as_str());
+                    }
+                    self.config.shown_devices = shown_after_toggle(&all_names, &checked_set);
+                    if let Err(e) = config::save(&self.config) {
+                        eprintln!("rigbat settings: failed to save config: {e}");
+                    } else {
+                        self.saved_at = Some(Instant::now());
+                        ui.ctx()
+                            .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
+                    }
+                }
+            }
+        }
 
         // ── Notifications (disabled placeholder) ─────────────────────────────
         ui.add_space(16.0);
@@ -115,9 +151,44 @@ impl SettingsApp {
     }
 }
 
+/// Returns the `shown_devices` value after a toggle. If every device in `all`
+/// is present in `checked`, returns an empty `Vec` (canonical "show all").
+/// Otherwise returns only the checked names in the order they appear in `all`.
+fn shown_after_toggle(all: &[String], checked: &HashSet<String>) -> Vec<String> {
+    if all.iter().all(|n| checked.contains(n)) {
+        Vec::new()
+    } else {
+        all.iter()
+            .filter(|n| checked.contains(n.as_str()))
+            .cloned()
+            .collect()
+    }
+}
+
+/// Gathers connected device infos in a throwaway tokio runtime, dropped before
+/// eframe starts. Returns an empty list if the runtime or discovery fails
+/// (settings must still open so the user can change other options).
+fn discover_devices() -> Vec<DeviceInfo> {
+    let Ok(rt) = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    else {
+        return Vec::new();
+    };
+    rt.block_on(async {
+        crate::discovery::discover_all()
+            .await
+            .iter()
+            .map(|s| s.device().clone())
+            .collect()
+    })
+    // rt dropped here, before eframe::run_native
+}
+
 /// Opens the settings window. Blocks until the user closes it.
 pub fn run() -> anyhow::Result<()> {
     let config = config::load();
+    let devices = discover_devices();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([420.0, 400.0])
@@ -135,9 +206,59 @@ pub fn run() -> anyhow::Result<()> {
             cc.egui_ctx.set_theme(egui::ThemePreference::System);
             Ok(Box::new(SettingsApp {
                 config,
+                devices,
                 saved_at: None,
             }))
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shown_after_toggle_all_checked_collapses_to_empty() {
+        let all = vec!["mouse".to_string(), "keyboard".to_string()];
+        let checked: HashSet<String> = all.iter().cloned().collect();
+        assert!(shown_after_toggle(&all, &checked).is_empty());
+    }
+
+    #[test]
+    fn shown_after_toggle_partial_returns_checked_names() {
+        let all = vec![
+            "mouse".to_string(),
+            "keyboard".to_string(),
+            "headset".to_string(),
+        ];
+        let checked: HashSet<String> = ["mouse".to_string(), "headset".to_string()]
+            .into_iter()
+            .collect();
+        let result = shown_after_toggle(&all, &checked);
+        assert_eq!(result, vec!["mouse".to_string(), "headset".to_string()]);
+    }
+
+    #[test]
+    fn shown_after_toggle_none_checked_returns_empty_vec() {
+        let all = vec!["mouse".to_string(), "keyboard".to_string()];
+        let checked: HashSet<String> = HashSet::new();
+        let result = shown_after_toggle(&all, &checked);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn shown_after_toggle_preserves_order_from_all() {
+        let all = vec![
+            "mouse".to_string(),
+            "keyboard".to_string(),
+            "headset".to_string(),
+        ];
+        // checked in reverse insertion order — result must follow `all` order
+        let checked: HashSet<String> = ["headset".to_string(), "mouse".to_string()]
+            .into_iter()
+            .collect();
+        let result = shown_after_toggle(&all, &checked);
+        assert_eq!(result, vec!["mouse".to_string(), "headset".to_string()]);
+    }
 }
