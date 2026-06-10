@@ -27,6 +27,8 @@ mod tests {
         DeviceInfo {
             name: name.into(),
             kind: DeviceKind::Other,
+            transport: crate::domain::Transport::Sysfs,
+            locator: None,
         }
     }
 

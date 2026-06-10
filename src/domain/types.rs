@@ -87,10 +87,33 @@ pub enum ChargeState {
     Full,
 }
 
+/// How rigbat reaches a device. Distinguishes otherwise same-named duplicates
+/// (e.g. a mouse seen over both sysfs/HID++ and Bluetooth).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Sysfs,
+    Bluetooth,
+    Hidraw,
+}
+
+impl Transport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Transport::Sysfs => "sysfs",
+            Transport::Bluetooth => "bluetooth",
+            Transport::Hidraw => "hidraw",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub name: String,
     pub kind: DeviceKind,
+    pub transport: Transport,
+    /// Source-specific stable locator for debugging: BlueZ MAC, sysfs power_supply
+    /// directory name, or hidraw node path. None if the source cannot provide one.
+    pub locator: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

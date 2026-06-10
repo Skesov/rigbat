@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Context as _;
 
-use crate::domain::{BatteryReading, ChargeState, DeviceInfo, guess_kind};
+use crate::domain::{BatteryReading, ChargeState, DeviceInfo, Transport, guess_kind};
 
 use super::{BatteryBackend, BatterySource};
 
@@ -59,9 +59,12 @@ impl SysfsSource {
                 }
             };
 
+            let locator = entry.file_name().to_string_lossy().into_owned();
             let info = DeviceInfo {
                 kind: guess_kind(&name),
                 name,
+                transport: Transport::Sysfs,
+                locator: Some(locator),
             };
 
             sources.push(SysfsSource {

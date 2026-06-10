@@ -422,6 +422,8 @@ mod tests {
         DeviceInfo {
             name: name.to_string(),
             kind: DeviceKind::Mouse,
+            transport: crate::domain::Transport::Sysfs,
+            locator: None,
         }
     }
 

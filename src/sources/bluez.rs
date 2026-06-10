@@ -11,7 +11,7 @@
 use anyhow::Context as _;
 use zbus::zvariant::OwnedObjectPath;
 
-use crate::domain::{BatteryReading, ChargeState, DeviceInfo, guess_kind};
+use crate::domain::{BatteryReading, ChargeState, DeviceInfo, Transport, guess_kind};
 
 use super::{BatteryBackend, BatterySource};
 
@@ -112,9 +112,18 @@ async fn discover_inner() -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
 
         let display_name = device_name(alias.as_deref(), name_prop.as_deref(), &addr_fallback);
 
+        // Locator is the bare MAC for debugging (greppable in bluetoothctl); strip the
+        // `dev:` prefix left over from the object-path component `dev_XX_XX_…`.
+        let locator = addr_fallback
+            .strip_prefix("dev:")
+            .unwrap_or(&addr_fallback)
+            .to_owned();
+
         let info = DeviceInfo {
             kind: guess_kind(&display_name),
             name: display_name,
+            transport: Transport::Bluetooth,
+            locator: Some(locator),
         };
 
         sources.push(Box::new(BluezSource {

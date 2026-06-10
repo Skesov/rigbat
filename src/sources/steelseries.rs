@@ -20,7 +20,7 @@ use anyhow::Context as _;
 use nix::libc;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
-use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
+use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind, Transport};
 
 use super::{BatteryBackend, BatterySource};
 
@@ -144,6 +144,8 @@ fn try_node(node_name: &str, sources: &mut Vec<Box<dyn BatterySource>>) -> anyho
         info: DeviceInfo {
             name: device_desc.name.to_owned(),
             kind: device_desc.kind,
+            transport: Transport::Hidraw,
+            locator: Some(node_name.to_owned()),
         },
         dev_path,
     }));

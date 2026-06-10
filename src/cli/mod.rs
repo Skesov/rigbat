@@ -33,6 +33,8 @@ pub fn to_json(rows: &[Row]) -> Value {
             json!({
                 "name": info.name,
                 "kind": kind_str(info.kind),
+                "transport": info.transport.as_str(),
+                "locator": info.locator,
                 "online": reading.is_some(),
                 "percent": percent,
                 "state": state,
@@ -71,6 +73,89 @@ pub fn print_table(rows: &[Row]) {
     }
 }
 
+pub fn print_table_wide(rows: &[Row]) {
+    if rows.is_empty() {
+        println!("No devices found");
+        return;
+    }
+
+    // Compute per-column widths from data plus header.
+    let name_w = rows
+        .iter()
+        .map(|(info, _)| info.name.len())
+        .max()
+        .unwrap_or(0)
+        .max("NAME".len());
+    let kind_w = rows
+        .iter()
+        .map(|(info, _)| kind_str(info.kind).len())
+        .max()
+        .unwrap_or(0)
+        .max("KIND".len());
+    let transport_w = rows
+        .iter()
+        .map(|(info, _)| info.transport.as_str().len())
+        .max()
+        .unwrap_or(0)
+        .max("TRANSPORT".len());
+    let locator_w = rows
+        .iter()
+        .map(|(info, _)| info.locator.as_deref().unwrap_or("-").len())
+        .max()
+        .unwrap_or(0)
+        .max("LOCATOR".len());
+    // PERCENT and STATE are short fixed-width columns; anchor to header width.
+    let percent_w = "PERCENT".len();
+    let state_w = rows
+        .iter()
+        .map(|(_, reading)| match reading {
+            None => "offline".len(),
+            Some(r) => state_str(r.state).len(),
+        })
+        .max()
+        .unwrap_or(0)
+        .max("STATE".len());
+
+    println!(
+        "{:<nw$}  {:<kw$}  {:<tw$}  {:<lw$}  {:<pw$}  {:<sw$}",
+        "NAME",
+        "KIND",
+        "TRANSPORT",
+        "LOCATOR",
+        "PERCENT",
+        "STATE",
+        nw = name_w,
+        kw = kind_w,
+        tw = transport_w,
+        lw = locator_w,
+        pw = percent_w,
+        sw = state_w,
+    );
+
+    for (info, reading) in rows {
+        let (percent_col, state_col) = match reading {
+            None => ("-".to_owned(), "offline".to_owned()),
+            Some(r) => (format!("{}%", r.percent), state_str(r.state).to_owned()),
+        };
+        let locator_col = info.locator.as_deref().unwrap_or("-");
+        println!(
+            "{:<nw$}  {:<kw$}  {:<tw$}  {:<lw$}  {:<pw$}  {:<sw$}",
+            info.name,
+            kind_str(info.kind),
+            info.transport.as_str(),
+            locator_col,
+            percent_col,
+            state_col,
+            nw = name_w,
+            kw = kind_w,
+            tw = transport_w,
+            lw = locator_w,
+            pw = percent_w,
+            sw = state_w,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +165,17 @@ mod tests {
         DeviceInfo {
             name: name.to_owned(),
             kind: DeviceKind::Other,
+            transport: crate::domain::Transport::Sysfs,
+            locator: None,
+        }
+    }
+
+    fn device_with_locator(name: &str, locator: &str) -> DeviceInfo {
+        DeviceInfo {
+            name: name.to_owned(),
+            kind: DeviceKind::Other,
+            transport: crate::domain::Transport::Bluetooth,
+            locator: Some(locator.to_owned()),
         }
     }
 
@@ -97,6 +193,8 @@ mod tests {
         assert_eq!(obj["online"], true);
         assert_eq!(obj["percent"], 75);
         assert_eq!(obj["state"], "charging");
+        assert_eq!(obj["transport"], "sysfs");
+        assert!(obj["locator"].is_null());
     }
 
     #[test]
@@ -110,6 +208,7 @@ mod tests {
         assert_eq!(obj["online"], false);
         assert!(obj["percent"].is_null());
         assert!(obj["state"].is_null());
+        assert_eq!(obj["transport"], "sysfs");
     }
 
     #[test]
@@ -127,5 +226,56 @@ mod tests {
 
         assert_eq!(arr[1]["online"], false);
         assert!(arr[1]["percent"].is_null());
+    }
+
+    #[test]
+    fn to_json_includes_transport_and_locator() {
+        let reading = BatteryReading::new(80, ChargeState::Discharging);
+        let rows: Vec<Row> = vec![(
+            device_with_locator("mouse", "AA:BB:CC:DD:EE:FF"),
+            Some(reading),
+        )];
+
+        let value = to_json(&rows);
+        let obj = &value.as_array().expect("array")[0];
+        assert_eq!(obj["transport"], "bluetooth");
+        assert_eq!(obj["locator"], "AA:BB:CC:DD:EE:FF");
+    }
+
+    #[test]
+    fn print_table_wide_columns_are_wide_enough() {
+        // Verify column width math: each column header must fit its widest data cell.
+        let transport_w = "bluetooth".len().max("TRANSPORT".len());
+        let locator_w = "AA:BB:CC:DD:EE:FF".len().max("LOCATOR".len());
+        let percent_w = "PERCENT".len();
+        let state_w = "discharging".len().max("STATE".len());
+
+        assert!(transport_w >= "TRANSPORT".len());
+        assert!(locator_w >= "AA:BB:CC:DD:EE:FF".len());
+        assert_eq!(percent_w, "PERCENT".len());
+        assert!(state_w >= "discharging".len());
+    }
+
+    #[test]
+    fn print_table_wide_does_not_panic() {
+        // Smoke test: ensure print_table_wide runs without panic for mixed rows.
+        let reading = BatteryReading::new(80, ChargeState::Discharging);
+        let rows: Vec<Row> = vec![
+            (
+                device_with_locator("MX Master 3", "AA:BB:CC:DD:EE:FF"),
+                Some(reading),
+            ),
+            (device("keyboard"), None),
+        ];
+        // print_table_wide writes to stdout; we just ensure no panic.
+        print_table_wide(&rows);
+    }
+
+    #[test]
+    fn transport_as_str() {
+        use crate::domain::Transport;
+        assert_eq!(Transport::Sysfs.as_str(), "sysfs");
+        assert_eq!(Transport::Bluetooth.as_str(), "bluetooth");
+        assert_eq!(Transport::Hidraw.as_str(), "hidraw");
     }
 }

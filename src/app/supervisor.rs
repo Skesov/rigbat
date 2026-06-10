@@ -154,6 +154,8 @@ mod tests {
         DeviceInfo {
             name: name.to_owned(),
             kind: DeviceKind::Other,
+            transport: crate::domain::Transport::Sysfs,
+            locator: None,
         }
     }
 
