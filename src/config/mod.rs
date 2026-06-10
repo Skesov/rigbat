@@ -33,6 +33,9 @@ pub struct Config {
     pub notifications_enabled: bool,
     /// Whether to show one tray icon per visible device or one aggregate icon.
     pub tray_mode: TrayMode,
+    /// User-chosen device for the aggregate (PrimaryOnly) icon.
+    /// None = automatic (first connected among shown devices).
+    pub primary_device: Option<String>,
 }
 
 impl Default for Config {
@@ -42,6 +45,7 @@ impl Default for Config {
             shown_devices: Vec::new(),
             notifications_enabled: true,
             tray_mode: TrayMode::PrimaryOnly,
+            primary_device: None,
         }
     }
 }
@@ -204,6 +208,7 @@ mod tests {
             shown_devices: vec!["mouse".to_string(), "keyboard".to_string()],
             notifications_enabled: false,
             tray_mode: TrayMode::PerDevice,
+            primary_device: Some("mouse".to_string()),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: Config = serde_json::from_str(&json).unwrap();
@@ -220,6 +225,12 @@ mod tests {
     fn empty_json_notifications_enabled_defaults_true() {
         let cfg: Config = serde_json::from_str("{}").unwrap();
         assert!(cfg.notifications_enabled);
+    }
+
+    #[test]
+    fn empty_json_primary_device_defaults_none() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.primary_device, None);
     }
 
     #[test]
@@ -250,6 +261,7 @@ mod tests {
             shown_devices: vec!["mouse".to_string()],
             notifications_enabled: true,
             tray_mode: TrayMode::PrimaryOnly,
+            primary_device: None,
         };
         assert!(cfg.is_shown("mouse"));
         assert!(!cfg.is_shown("keyboard"));

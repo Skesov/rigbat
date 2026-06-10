@@ -7,7 +7,7 @@ use tokio::sync::{Notify, watch};
 use crate::app::supervisor::TrayState;
 use crate::appearance::ColorScheme;
 use crate::config::{Config, TrayMode};
-use crate::domain::{PrimaryStatus, classify, freedesktop_icon_name};
+use crate::domain::{BatteryReading, DeviceInfo, PrimaryStatus, classify, freedesktop_icon_name};
 use crate::tray::format_device_entry;
 use crate::tray::icon::{IconRenderer, Theme, TinySkiaRenderer};
 
@@ -36,6 +36,34 @@ pub fn desired_keys(mode: TrayMode, shown: &[String]) -> Vec<Option<String>> {
         // One icon per shown device.
         (TrayMode::PerDevice, _) => shown.iter().map(|n| Some(n.clone())).collect(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// featured_name — the device the aggregate icon represents
+// ---------------------------------------------------------------------------
+
+/// Returns the device the single (aggregate) icon represents.
+///
+/// Priority: explicit user choice (if still shown) → first connected shown
+/// device → first shown device → None.
+fn featured_name(state: &crate::app::supervisor::TrayState, cfg: &Config) -> Option<String> {
+    let shown: Vec<&(DeviceInfo, Option<BatteryReading>)> = state
+        .devices
+        .iter()
+        .filter(|(i, _)| cfg.is_shown(&i.name))
+        .collect();
+
+    if let Some(name) = &cfg.primary_device
+        && shown.iter().any(|(i, _)| &i.name == name)
+    {
+        return Some(name.clone());
+    }
+
+    shown
+        .iter()
+        .find(|(_, r)| r.is_some())
+        .or_else(|| shown.first())
+        .map(|(i, _)| i.name.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +115,14 @@ impl Tray for RigbatTray {
                     .map(|(_, reading)| classify(*reading, crate::app::supervisor::LOW_THRESHOLD))
                     .unwrap_or(PrimaryStatus::Offline)
             }
-            None => self.rx.borrow().primary_status,
+            None => {
+                let state = self.rx.borrow();
+                let cfg = self.config.borrow();
+                featured_name(&state, &cfg)
+                    .and_then(|n| state.devices.iter().find(|(i, _)| i.name == n).cloned())
+                    .map(|(_, reading)| classify(reading, crate::app::supervisor::LOW_THRESHOLD))
+                    .unwrap_or(PrimaryStatus::Offline)
+            }
         };
         self.renderer.render(status, &theme, mode)
     }
@@ -105,15 +140,11 @@ impl Tray for RigbatTray {
             }
             None => {
                 let state = self.rx.borrow();
-                if let Some(idx) = state.primary {
-                    state
-                        .devices
-                        .get(idx)
-                        .map(|(info, reading)| format_device_entry(info, *reading))
-                        .unwrap_or_else(|| "No devices".into())
-                } else {
-                    "No devices".into()
-                }
+                let cfg = self.config.borrow();
+                featured_name(&state, &cfg)
+                    .and_then(|n| state.devices.iter().find(|(i, _)| i.name == n))
+                    .map(|(info, reading)| format_device_entry(info, *reading))
+                    .unwrap_or_else(|| "No devices".into())
             }
         };
         ToolTip {
@@ -126,21 +157,18 @@ impl Tray for RigbatTray {
         // Build the full-roster menu shared by both PrimaryOnly and PerDevice modes.
         // Collect all data from borrows before building menu items (borrows are sync,
         // no await here, but keeping scopes tight documents intent).
-        let (rows, highlight) = {
+        let rows = {
             let state = self.rx.borrow();
             let cfg = self.config.borrow();
 
             // Determine which device name to mark with the bullet.
             let highlight: Option<String> = match &self.key {
-                Some(name) => Some(name.clone()),
-                None => state
-                    .primary
-                    .and_then(|idx| state.devices.get(idx))
-                    .map(|(info, _)| info.name.clone()),
+                Some(k) => Some(k.clone()),
+                None => featured_name(&state, &cfg),
             };
 
-            // Collect (label, icon_name) for each shown device.
-            let rows: Vec<(String, String)> = state
+            // Collect (dev_name, label, icon_name) for each shown device.
+            let rows: Vec<(String, String, String)> = state
                 .devices
                 .iter()
                 .filter(|(info, _)| cfg.is_shown(&info.name))
@@ -153,14 +181,13 @@ impl Tray for RigbatTray {
                     let entry = format_device_entry(info, *reading);
                     let label = format!("{prefix}{entry}");
                     let icon = freedesktop_icon_name(info.kind).to_owned();
-                    (label, icon)
+                    (info.name.clone(), label, icon)
                 })
                 .collect();
 
-            (rows, highlight)
+            rows
         };
         // All watch borrows are released here.
-        let _ = highlight; // used only inside the borrow scope
 
         let mut items: Vec<MenuItem<Self>> = Vec::new();
 
@@ -171,11 +198,29 @@ impl Tray for RigbatTray {
                 ..ksni::menu::StandardItem::default()
             }));
         } else {
-            for (label, icon_name) in rows {
+            for (dev_name, label, icon_name) in rows {
+                // Read-modify-write: load the latest on-disk config and change only
+                // primary_device, so other fields set by the settings window are not
+                // clobbered. Concurrent edits while the settings window is open can
+                // cause a lost-update on primary_device — rare and low-severity.
+                let name = dev_name.clone();
                 items.push(MenuItem::Standard(ksni::menu::StandardItem {
                     label,
                     icon_name,
-                    enabled: false,
+                    enabled: true,
+                    activate: Box::new(move |_: &mut Self| {
+                        let mut cfg = crate::config::load();
+                        cfg.primary_device = if cfg.primary_device.as_deref() == Some(name.as_str())
+                        {
+                            // Clicking the featured device returns to automatic.
+                            None
+                        } else {
+                            Some(name.clone())
+                        };
+                        if let Err(e) = crate::config::save(&cfg) {
+                            eprintln!("rigbat: failed to save tray device selection: {e}");
+                        }
+                    }),
                     ..ksni::menu::StandardItem::default()
                 }));
             }
@@ -315,8 +360,10 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{desired_keys, sanitize};
-    use crate::config::TrayMode;
+    use super::{desired_keys, featured_name, sanitize};
+    use crate::app::supervisor::TrayState;
+    use crate::config::{Config, TrayMode};
+    use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
 
     // --- sanitize -----------------------------------------------------------
 
@@ -367,5 +414,98 @@ mod tests {
     fn desired_keys_empty_shown_returns_one_none_regardless_of_mode() {
         assert_eq!(desired_keys(TrayMode::PrimaryOnly, &[]), vec![None]);
         assert_eq!(desired_keys(TrayMode::PerDevice, &[]), vec![None]);
+    }
+
+    // --- featured_name -------------------------------------------------------
+
+    fn make_info(name: &str) -> DeviceInfo {
+        DeviceInfo {
+            name: name.to_string(),
+            kind: DeviceKind::Mouse,
+        }
+    }
+
+    fn make_reading(percent: u8) -> BatteryReading {
+        BatteryReading::new(percent, ChargeState::Discharging)
+    }
+
+    fn make_state(devices: Vec<(DeviceInfo, Option<BatteryReading>)>) -> TrayState {
+        use crate::domain::PrimaryStatus;
+        TrayState {
+            primary: if devices.is_empty() { None } else { Some(0) },
+            primary_status: PrimaryStatus::Offline,
+            devices,
+        }
+    }
+
+    fn cfg_with_primary(primary: Option<&str>) -> Config {
+        Config {
+            primary_device: primary.map(|s| s.to_string()),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn featured_name_explicit_shown_returns_that_name() {
+        let state = make_state(vec![
+            (make_info("mouse"), Some(make_reading(80))),
+            (make_info("keyboard"), Some(make_reading(50))),
+        ]);
+        let cfg = cfg_with_primary(Some("keyboard"));
+        assert_eq!(featured_name(&state, &cfg), Some("keyboard".to_string()));
+    }
+
+    #[test]
+    fn featured_name_explicit_hidden_falls_back_to_first_connected() {
+        // "gamepad" is not in shown_devices, so the explicit choice is ignored.
+        let mut cfg = cfg_with_primary(Some("gamepad"));
+        cfg.shown_devices = vec!["mouse".to_string(), "keyboard".to_string()];
+        let state = make_state(vec![
+            (make_info("mouse"), Some(make_reading(80))),
+            (make_info("keyboard"), Some(make_reading(50))),
+            (make_info("gamepad"), Some(make_reading(30))),
+        ]);
+        // "gamepad" is not shown, so falls back to first connected shown: "mouse"
+        assert_eq!(featured_name(&state, &cfg), Some("mouse".to_string()));
+    }
+
+    #[test]
+    fn featured_name_no_explicit_returns_first_connected_shown() {
+        let state = make_state(vec![
+            (make_info("mouse"), None),
+            (make_info("keyboard"), Some(make_reading(60))),
+        ]);
+        let cfg = cfg_with_primary(None);
+        assert_eq!(featured_name(&state, &cfg), Some("keyboard".to_string()));
+    }
+
+    #[test]
+    fn featured_name_no_connected_returns_first_shown() {
+        let state = make_state(vec![
+            (make_info("mouse"), None),
+            (make_info("keyboard"), None),
+        ]);
+        let cfg = cfg_with_primary(None);
+        // No connected device; falls back to first shown.
+        assert_eq!(featured_name(&state, &cfg), Some("mouse".to_string()));
+    }
+
+    #[test]
+    fn featured_name_no_devices_returns_none() {
+        let state = make_state(vec![]);
+        let cfg = cfg_with_primary(None);
+        assert_eq!(featured_name(&state, &cfg), None);
+    }
+
+    #[test]
+    fn featured_name_all_filtered_by_shown_returns_none() {
+        let mut cfg = cfg_with_primary(None);
+        cfg.shown_devices = vec!["trackpad".to_string()];
+        let state = make_state(vec![
+            (make_info("mouse"), Some(make_reading(80))),
+            (make_info("keyboard"), Some(make_reading(50))),
+        ]);
+        // None of the devices match the whitelist.
+        assert_eq!(featured_name(&state, &cfg), None);
     }
 }
