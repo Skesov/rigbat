@@ -26,6 +26,50 @@ impl SettingsApp {
         ui.strong(title);
         ui.add_space(4.0);
     }
+
+    /// Saves the current config and flashes the "Changes saved." status for
+    /// `SAVED_VISIBLE_SECS`. Logs on failure; the status line stays unchanged.
+    fn persist(&mut self, ui: &egui::Ui) {
+        match config::save(&self.config) {
+            Ok(()) => {
+                self.saved_at = Some(Instant::now());
+                ui.ctx()
+                    .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
+            }
+            Err(e) => eprintln!("rigbat settings: failed to save config: {e}"),
+        }
+    }
+
+    /// Renders the per-device checkboxes that drive `shown_devices`. Each checkbox
+    /// toggles whether that device gets a tray icon (PerDevice) or appears in the
+    /// menu (PrimaryOnly). Unchecking a duplicate (e.g. the BT copy of a mouse that
+    /// is also seen over USB) removes that one icon.
+    fn render_device_picker(&mut self, ui: &mut egui::Ui) {
+        if self.devices.is_empty() {
+            ui.label(egui::RichText::new("No devices found. Connect a device and reopen.").weak());
+            return;
+        }
+
+        let all_names: Vec<String> = self.devices.iter().map(|d| d.name.clone()).collect();
+        for name in &all_names {
+            let mut checked = self.config.is_shown(name);
+            if ui.checkbox(&mut checked, name).changed() {
+                // Rebuild the checked set after this toggle.
+                let mut checked_set: HashSet<String> = all_names
+                    .iter()
+                    .filter(|n| self.config.is_shown(n))
+                    .cloned()
+                    .collect();
+                if checked {
+                    checked_set.insert(name.clone());
+                } else {
+                    checked_set.remove(name.as_str());
+                }
+                self.config.shown_devices = shown_after_toggle(&all_names, &checked_set);
+                self.persist(ui);
+            }
+        }
+    }
 }
 
 impl eframe::App for SettingsApp {
@@ -53,14 +97,7 @@ impl SettingsApp {
                 .changed()
             {
                 // Persist immediately; the tray watches the file and re-renders.
-                if let Err(e) = config::save(&self.config) {
-                    eprintln!("rigbat settings: failed to save config: {e}");
-                } else {
-                    self.saved_at = Some(Instant::now());
-                    // Ensure the frame repaints after 2 s so the status text clears.
-                    ui.ctx()
-                        .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
-                }
+                self.persist(ui);
             }
         }
 
@@ -75,51 +112,16 @@ impl SettingsApp {
             } else {
                 TrayMode::PrimaryOnly
             };
-            if let Err(e) = config::save(&self.config) {
-                eprintln!("rigbat settings: failed to save config: {e}");
-            } else {
-                self.saved_at = Some(Instant::now());
-                ui.ctx()
-                    .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
-            }
+            self.persist(ui);
         }
 
-        // ── Visible devices ───────────────────────────────────────────────────
-        ui.add_space(16.0);
-        Self::section_header(ui, "Visible devices");
-
-        if self.devices.is_empty() {
-            ui.label(egui::RichText::new("No devices found. Connect a device and reopen.").weak());
-        } else {
-            ui.label(egui::RichText::new("All shown if none are selected.").weak());
-
-            let all_names: Vec<String> = self.devices.iter().map(|d| d.name.clone()).collect();
-
-            for device in &self.devices {
-                let name = &device.name;
-                let mut checked = self.config.is_shown(name);
-                if ui.checkbox(&mut checked, name).changed() {
-                    // Rebuild the checked set after this toggle.
-                    let mut checked_set: HashSet<String> = all_names
-                        .iter()
-                        .filter(|n| self.config.is_shown(n))
-                        .cloned()
-                        .collect();
-                    if checked {
-                        checked_set.insert(name.clone());
-                    } else {
-                        checked_set.remove(name.as_str());
-                    }
-                    self.config.shown_devices = shown_after_toggle(&all_names, &checked_set);
-                    if let Err(e) = config::save(&self.config) {
-                        eprintln!("rigbat settings: failed to save config: {e}");
-                    } else {
-                        self.saved_at = Some(Instant::now());
-                        ui.ctx()
-                            .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
-                    }
-                }
-            }
+        if per_device {
+            ui.indent("tray_device_picker", |ui| {
+                ui.add_space(4.0);
+                ui.strong("Devices in tray");
+                ui.label(egui::RichText::new("Uncheck a device to remove its tray icon.").weak());
+                self.render_device_picker(ui);
+            });
         }
 
         // ── Notifications ─────────────────────────────────────────────────────
@@ -132,13 +134,7 @@ impl SettingsApp {
             )
             .changed()
         {
-            if let Err(e) = config::save(&self.config) {
-                eprintln!("rigbat settings: failed to save config: {e}");
-            } else {
-                self.saved_at = Some(Instant::now());
-                ui.ctx()
-                    .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
-            }
+            self.persist(ui);
         }
 
         // ── Startup ───────────────────────────────────────────────────────────
