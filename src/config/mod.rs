@@ -137,6 +137,22 @@ fn event_touches(event: &notify::Event, target: &Path) -> bool {
     event.paths.iter().any(|p| p.file_name() == name)
 }
 
+/// True for events that can change the config file's content or identity
+/// (create, data write, rename). Excludes `Access` (open/read/close) and
+/// metadata-only events — our own `load()` reads otherwise generate Access
+/// events on the watched file and feed an infinite inotify loop.
+fn is_content_change(kind: &notify::EventKind) -> bool {
+    use notify::EventKind;
+    use notify::event::ModifyKind;
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Modify(ModifyKind::Data(_))
+            | EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Modify(ModifyKind::Any)
+    )
+}
+
 /// Watches the config file's parent directory and pushes a fresh [`Config`] into
 /// `tx` whenever the file changes on disk. Quietly does nothing if the path or
 /// the watcher is unavailable (config watching is best-effort, never fatal).
@@ -175,7 +191,7 @@ pub fn watch_file(tx: tokio::sync::watch::Sender<Config>) {
         // Keep `watcher` alive for the lifetime of this loop.
         for result in raw_rx {
             let Ok(event) = result else { continue };
-            if event_touches(&event, &path) {
+            if is_content_change(&event.kind) && event_touches(&event, &path) {
                 let cfg = load();
                 tx.send_if_modified(|cur| {
                     if *cur != cfg {
@@ -292,6 +308,50 @@ mod tests {
         assert_eq!(DisplayMode::IconOnly.label(), "Battery icon only");
         assert_eq!(DisplayMode::PercentOnly.label(), "Percentage as text");
         assert_eq!(DisplayMode::PercentInIcon.label(), "Percentage inside icon");
+    }
+
+    #[test]
+    fn is_content_change_access_read_is_false() {
+        let kind = notify::EventKind::Access(notify::event::AccessKind::Read);
+        assert!(!is_content_change(&kind));
+    }
+
+    #[test]
+    fn is_content_change_access_open_is_false() {
+        let kind = notify::EventKind::Access(notify::event::AccessKind::Open(
+            notify::event::AccessMode::Any,
+        ));
+        assert!(!is_content_change(&kind));
+    }
+
+    #[test]
+    fn is_content_change_modify_data_is_true() {
+        let kind = notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Any,
+        ));
+        assert!(is_content_change(&kind));
+    }
+
+    #[test]
+    fn is_content_change_modify_name_to_is_true() {
+        let kind = notify::EventKind::Modify(notify::event::ModifyKind::Name(
+            notify::event::RenameMode::To,
+        ));
+        assert!(is_content_change(&kind));
+    }
+
+    #[test]
+    fn is_content_change_create_file_is_true() {
+        let kind = notify::EventKind::Create(notify::event::CreateKind::File);
+        assert!(is_content_change(&kind));
+    }
+
+    #[test]
+    fn is_content_change_modify_metadata_is_false() {
+        let kind = notify::EventKind::Modify(notify::event::ModifyKind::Metadata(
+            notify::event::MetadataKind::AccessTime,
+        ));
+        assert!(!is_content_change(&kind));
     }
 
     #[test]
