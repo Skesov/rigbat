@@ -11,6 +11,14 @@ pub enum DisplayMode {
     PercentInIcon,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayMode {
+    #[default]
+    PrimaryOnly, // one aggregate icon (default)
+    PerDevice, // one icon per shown device
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -23,6 +31,8 @@ pub struct Config {
     /// Defaults to true; old config files without this key load as true
     /// because `#[serde(default)]` on the struct fills missing fields from Default.
     pub notifications_enabled: bool,
+    /// Whether to show one tray icon per visible device or one aggregate icon.
+    pub tray_mode: TrayMode,
 }
 
 impl Default for Config {
@@ -31,6 +41,7 @@ impl Default for Config {
             display_mode: DisplayMode::IconOnly,
             shown_devices: Vec::new(),
             notifications_enabled: true,
+            tray_mode: TrayMode::PrimaryOnly,
         }
     }
 }
@@ -192,10 +203,17 @@ mod tests {
             display_mode: DisplayMode::PercentInIcon,
             shown_devices: vec!["mouse".to_string(), "keyboard".to_string()],
             notifications_enabled: false,
+            tray_mode: TrayMode::PerDevice,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg, restored);
+    }
+
+    #[test]
+    fn empty_json_tray_mode_defaults_primary_only() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.tray_mode, TrayMode::PrimaryOnly);
     }
 
     #[test]
@@ -231,6 +249,7 @@ mod tests {
             display_mode: DisplayMode::IconOnly,
             shown_devices: vec!["mouse".to_string()],
             notifications_enabled: true,
+            tray_mode: TrayMode::PrimaryOnly,
         };
         assert!(cfg.is_shown("mouse"));
         assert!(!cfg.is_shown("keyboard"));

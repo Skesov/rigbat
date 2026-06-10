@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::autostart;
-use crate::config::{self, Config, DisplayMode};
+use crate::config::{self, Config, DisplayMode, TrayMode};
 use crate::domain::DeviceInfo;
 
 /// Seconds the "Changes saved." status line remains visible after a save.
@@ -61,6 +61,26 @@ impl SettingsApp {
                     ui.ctx()
                         .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
                 }
+            }
+        }
+
+        ui.add_space(8.0);
+        let mut per_device = self.config.tray_mode == TrayMode::PerDevice;
+        if ui
+            .checkbox(&mut per_device, "Show one icon per device")
+            .changed()
+        {
+            self.config.tray_mode = if per_device {
+                TrayMode::PerDevice
+            } else {
+                TrayMode::PrimaryOnly
+            };
+            if let Err(e) = config::save(&self.config) {
+                eprintln!("rigbat settings: failed to save config: {e}");
+            } else {
+                self.saved_at = Some(Instant::now());
+                ui.ctx()
+                    .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
             }
         }
 
