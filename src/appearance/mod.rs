@@ -19,7 +19,15 @@ pub fn spawn() -> watch::Receiver<ColorScheme> {
         };
 
         if let Ok(cs) = settings.color_scheme().await {
-            let _ = tx.send(map_scheme(cs));
+            let scheme = map_scheme(cs);
+            tx.send_if_modified(|cur| {
+                if *cur != scheme {
+                    *cur = scheme;
+                    true
+                } else {
+                    false
+                }
+            });
         }
 
         let mut stream = match settings.receive_color_scheme_changed().await {
@@ -28,7 +36,22 @@ pub fn spawn() -> watch::Receiver<ColorScheme> {
         };
 
         while let Some(cs) = stream.next().await {
-            if tx.send(map_scheme(cs)).is_err() {
+            let scheme = map_scheme(cs);
+            // Notify receivers only when the scheme actually changes; repeated
+            // portal signals (known COSMIC portal bug) must not wake the tray loop.
+            let changed = tx.send_if_modified(|cur| {
+                if *cur != scheme {
+                    *cur = scheme;
+                    true
+                } else {
+                    false
+                }
+            });
+            if changed {
+                eprintln!("rigbat: color scheme -> {scheme:?}");
+            }
+            // All receivers gone (tray exited) — stop the task.
+            if tx.is_closed() {
                 break;
             }
         }
