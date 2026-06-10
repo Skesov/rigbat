@@ -1,0 +1,30 @@
+# systemd user service for the rigbat tray daemon.
+#
+# Install: make service && make enable    (see the Makefile / README)
+# Logs:    journalctl --user -u rigbat -f
+#
+# This is a *user* service: the tray needs the graphical session and the
+# session D-Bus bus. Your desktop environment must import the session
+# environment (WAYLAND_DISPLAY/DISPLAY, DBUS_SESSION_BUS_ADDRESS) into the
+# systemd user manager at login — modern systemd desktops (GNOME, KDE,
+# COSMIC) do this automatically.
+#
+# Do not run this service together with the settings "Startup" toggle
+# (~/.config/autostart/rigbat.desktop): both launch `rigbat tray` and you
+# would get two instances. Pick one.
+
+[Unit]
+Description=rigbat — battery tray for gaming peripherals
+Documentation=https://github.com/Skesov/rigbat
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# Installed by `cargo install --path .` (CARGO_HOME defaults to ~/.cargo).
+ExecStart=%h/.cargo/bin/rigbat tray
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
