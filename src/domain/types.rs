@@ -89,7 +89,7 @@ pub enum ChargeState {
 
 /// How rigbat reaches a device. Distinguishes otherwise same-named duplicates
 /// (e.g. a mouse seen over both sysfs/HID++ and Bluetooth).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Transport {
     Sysfs,
     Bluetooth,
@@ -106,6 +106,10 @@ impl Transport {
     }
 }
 
+/// Stable identity for a device: (name, transport, locator).
+/// Two sources with the same DeviceId are treated as the same physical device.
+pub type DeviceId = (String, Transport, Option<String>);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub name: String,
@@ -114,6 +118,12 @@ pub struct DeviceInfo {
     /// Source-specific stable locator for debugging: BlueZ MAC, sysfs power_supply
     /// directory name, or hidraw node path. None if the source cannot provide one.
     pub locator: Option<String>,
+}
+
+impl DeviceInfo {
+    pub fn id(&self) -> DeviceId {
+        (self.name.clone(), self.transport, self.locator.clone())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

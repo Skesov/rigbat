@@ -1,6 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
+pub const DEFAULT_LOW_THRESHOLD: u8 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -9,6 +13,15 @@ pub enum DisplayMode {
     IconOnly,
     PercentOnly,
     PercentInIcon,
+}
+
+/// Per-device poll interval and low-threshold overrides.
+/// Missing fields fall back to the global `Config` values.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DeviceSettings {
+    pub poll_interval_secs: Option<u64>,
+    pub low_threshold: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -36,6 +49,12 @@ pub struct Config {
     /// User-chosen device for the aggregate (PrimaryOnly) icon.
     /// None = automatic (first connected among shown devices).
     pub primary_device: Option<String>,
+    /// Global poll interval in seconds. Applies to all devices unless overridden.
+    pub poll_interval_secs: u64,
+    /// Global low-battery threshold (percent). Applies to all devices unless overridden.
+    pub low_threshold: u8,
+    /// Per-device overrides keyed by device name.
+    pub device_overrides: HashMap<String, DeviceSettings>,
 }
 
 impl Default for Config {
@@ -46,6 +65,9 @@ impl Default for Config {
             notifications_enabled: true,
             tray_mode: TrayMode::PrimaryOnly,
             primary_device: None,
+            poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+            low_threshold: DEFAULT_LOW_THRESHOLD,
+            device_overrides: HashMap::new(),
         }
     }
 }
@@ -74,6 +96,23 @@ impl Config {
     #[allow(dead_code)]
     pub fn is_shown(&self, name: &str) -> bool {
         self.shown_devices.is_empty() || self.shown_devices.iter().any(|n| n == name)
+    }
+
+    /// Effective poll interval for `name`: device override → global → clamp to at least 1.
+    pub fn effective_poll_interval_secs(&self, name: &str) -> u64 {
+        self.device_overrides
+            .get(name)
+            .and_then(|d| d.poll_interval_secs)
+            .unwrap_or(self.poll_interval_secs)
+            .max(1)
+    }
+
+    /// Effective low-battery threshold for `name`: device override → global.
+    pub fn effective_low_threshold(&self, name: &str) -> u8 {
+        self.device_overrides
+            .get(name)
+            .and_then(|d| d.low_threshold)
+            .unwrap_or(self.low_threshold)
     }
 }
 
@@ -225,6 +264,7 @@ mod tests {
             notifications_enabled: false,
             tray_mode: TrayMode::PerDevice,
             primary_device: Some("mouse".to_string()),
+            ..Config::default()
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: Config = serde_json::from_str(&json).unwrap();
@@ -278,6 +318,7 @@ mod tests {
             notifications_enabled: true,
             tray_mode: TrayMode::PrimaryOnly,
             primary_device: None,
+            ..Config::default()
         };
         assert!(cfg.is_shown("mouse"));
         assert!(!cfg.is_shown("keyboard"));
@@ -388,5 +429,110 @@ mod tests {
             attrs: Default::default(),
         };
         assert!(!event_touches(&event, &target));
+    }
+
+    // --- effective_poll_interval_secs ---------------------------------------
+
+    #[test]
+    fn effective_poll_interval_secs_global_default_when_no_override() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.effective_poll_interval_secs("mouse"),
+            DEFAULT_POLL_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn effective_poll_interval_secs_override_wins() {
+        let mut cfg = Config::default();
+        cfg.device_overrides.insert(
+            "mouse".to_string(),
+            DeviceSettings {
+                poll_interval_secs: Some(30),
+                low_threshold: None,
+            },
+        );
+        assert_eq!(cfg.effective_poll_interval_secs("mouse"), 30);
+        // Other devices still use global.
+        assert_eq!(
+            cfg.effective_poll_interval_secs("keyboard"),
+            DEFAULT_POLL_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn effective_poll_interval_secs_zero_clamped_to_one() {
+        let mut cfg = Config::default();
+        cfg.device_overrides.insert(
+            "mouse".to_string(),
+            DeviceSettings {
+                poll_interval_secs: Some(0),
+                low_threshold: None,
+            },
+        );
+        assert_eq!(cfg.effective_poll_interval_secs("mouse"), 1);
+    }
+
+    #[test]
+    fn effective_poll_interval_secs_global_zero_clamped_to_one() {
+        let cfg = Config {
+            poll_interval_secs: 0,
+            ..Config::default()
+        };
+        assert_eq!(cfg.effective_poll_interval_secs("mouse"), 1);
+    }
+
+    // --- effective_low_threshold --------------------------------------------
+
+    #[test]
+    fn effective_low_threshold_global_default_when_no_override() {
+        let cfg = Config::default();
+        assert_eq!(cfg.effective_low_threshold("mouse"), DEFAULT_LOW_THRESHOLD);
+    }
+
+    #[test]
+    fn effective_low_threshold_override_wins() {
+        let mut cfg = Config::default();
+        cfg.device_overrides.insert(
+            "mouse".to_string(),
+            DeviceSettings {
+                poll_interval_secs: None,
+                low_threshold: Some(10),
+            },
+        );
+        assert_eq!(cfg.effective_low_threshold("mouse"), 10);
+        assert_eq!(
+            cfg.effective_low_threshold("keyboard"),
+            DEFAULT_LOW_THRESHOLD
+        );
+    }
+
+    // --- serde with device_overrides ----------------------------------------
+
+    #[test]
+    fn serde_round_trip_with_device_overrides() {
+        let mut cfg = Config {
+            poll_interval_secs: 30,
+            low_threshold: 15,
+            ..Config::default()
+        };
+        cfg.device_overrides.insert(
+            "mouse".to_string(),
+            DeviceSettings {
+                poll_interval_secs: Some(10),
+                low_threshold: Some(5),
+            },
+        );
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg, restored);
+    }
+
+    #[test]
+    fn empty_json_poll_interval_and_threshold_default() {
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
+        assert_eq!(cfg.low_threshold, DEFAULT_LOW_THRESHOLD);
+        assert!(cfg.device_overrides.is_empty());
     }
 }

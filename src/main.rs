@@ -76,16 +76,11 @@ async fn async_main(mode: &str, opts: CliOpts) {
 }
 
 async fn run_tray() {
-    let sources = discovery::discover_all().await;
-
-    let n = sources.len();
-    println!("rigbat tray: {n} device(s)");
-
-    let (rx, refresh) = app::supervisor::Supervisor::spawn(sources);
+    let config = crate::config::load();
+    let (rx, refresh) = app::supervisor::Supervisor::spawn(config.clone());
     crate::session::watch_resume(refresh.clone());
     let theme_rx = appearance::spawn();
 
-    let config = crate::config::load();
     // Route config through a watch channel so the filesystem watcher and
     // manager can receive updates independently.
     let (config_tx, _config_rx) = tokio::sync::watch::channel(config);
@@ -93,12 +88,8 @@ async fn run_tray() {
     // whenever config.json changes on disk (best-effort, never fatal).
     crate::config::watch_file(config_tx.clone());
     // Spawn the notifier after config_tx is available so it can receive the
-    // notifications_enabled flag via a config receiver.
-    crate::notifications::spawn(
-        rx.clone(),
-        config_tx.subscribe(),
-        app::supervisor::LOW_THRESHOLD,
-    );
+    // notifications_enabled flag and per-device thresholds via a config receiver.
+    crate::notifications::spawn(rx.clone(), config_tx.subscribe());
 
     tray::manager::run(rx, theme_rx, config_tx.subscribe(), refresh).await;
 }

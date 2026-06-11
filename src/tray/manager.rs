@@ -7,7 +7,9 @@ use tokio::sync::{Notify, watch};
 use crate::app::supervisor::TrayState;
 use crate::appearance::ColorScheme;
 use crate::config::{Config, TrayMode};
-use crate::domain::{BatteryReading, DeviceInfo, PrimaryStatus, classify, freedesktop_icon_name};
+use crate::domain::{
+    BatteryReading, DeviceInfo, DeviceKind, PrimaryStatus, classify, freedesktop_icon_name,
+};
 use crate::tray::format_device_entry;
 use crate::tray::icon::{IconRenderer, Theme, TinySkiaRenderer};
 
@@ -104,27 +106,48 @@ impl Tray for RigbatTray {
         };
         let mode = self.config.borrow().display_mode;
 
-        let status = match &self.key {
+        let (status, kind): (PrimaryStatus, Option<DeviceKind>) = match &self.key {
             Some(name) => {
-                // Build owned data, drop the borrow before any await.
+                // Build owned data, drop the borrows before any await.
                 let state = self.rx.borrow();
-                state
+                let cfg = self.config.borrow();
+                let found = state
                     .devices
                     .iter()
                     .find(|(info, _)| &info.name == name)
-                    .map(|(_, reading)| classify(*reading, crate::app::supervisor::LOW_THRESHOLD))
-                    .unwrap_or(PrimaryStatus::Offline)
+                    .map(|(info, reading)| {
+                        (
+                            classify(*reading, cfg.effective_low_threshold(name)),
+                            info.kind,
+                        )
+                    });
+                match found {
+                    Some((s, k)) => (s, Some(k)),
+                    None => (PrimaryStatus::Offline, None),
+                }
             }
             None => {
                 let state = self.rx.borrow();
                 let cfg = self.config.borrow();
-                featured_name(&state, &cfg)
-                    .and_then(|n| state.devices.iter().find(|(i, _)| i.name == n).cloned())
-                    .map(|(_, reading)| classify(reading, crate::app::supervisor::LOW_THRESHOLD))
-                    .unwrap_or(PrimaryStatus::Offline)
+                let featured = featured_name(&state, &cfg);
+                match featured.and_then(|n| {
+                    state
+                        .devices
+                        .iter()
+                        .find(|(i, _)| i.name == n)
+                        .map(|(info, reading)| {
+                            (
+                                classify(*reading, cfg.effective_low_threshold(&info.name)),
+                                info.kind,
+                            )
+                        })
+                }) {
+                    Some((s, k)) => (s, Some(k)),
+                    None => (PrimaryStatus::Offline, None),
+                }
             }
         };
-        self.renderer.render(status, &theme, mode)
+        self.renderer.render(status, kind, &theme, mode)
     }
 
     fn tool_tip(&self) -> ToolTip {

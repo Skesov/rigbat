@@ -60,11 +60,7 @@ impl LowTracker {
 ///
 /// The task exits quietly if the session bus or the Notifications service is
 /// unavailable — battery monitoring continues unaffected.
-pub fn spawn(
-    mut rx: watch::Receiver<TrayState>,
-    config_rx: watch::Receiver<Config>,
-    threshold: u8,
-) {
+pub fn spawn(mut rx: watch::Receiver<TrayState>, config_rx: watch::Receiver<Config>) {
     tokio::spawn(async move {
         let Ok(conn) = zbus::Connection::session().await else {
             return;
@@ -75,15 +71,16 @@ pub fn spawn(
         let mut tracker = LowTracker::default();
 
         loop {
-            // Collect pending notifications and read the enabled flag while
-            // holding borrows, then drop both refs before any .await so no
-            // watch::Ref crosses an await point.
+            // Collect pending notifications and read config while holding borrows,
+            // then drop all refs before any .await so no watch::Ref crosses an await point.
             let (pending, enabled): (Vec<(String, u8)>, bool) = {
                 let state = rx.borrow_and_update();
+                let cfg = config_rx.borrow();
                 let pending = state
                     .devices
                     .iter()
                     .filter_map(|(info, reading)| {
+                        let threshold = cfg.effective_low_threshold(&info.name);
                         let is_low =
                             matches!(classify(*reading, threshold), PrimaryStatus::Low { .. });
                         if tracker.observe(&info.name, is_low) {
@@ -94,7 +91,7 @@ pub fn spawn(
                         }
                     })
                     .collect();
-                let enabled = config_rx.borrow().notifications_enabled;
+                let enabled = cfg.notifications_enabled;
                 (pending, enabled)
             };
 
