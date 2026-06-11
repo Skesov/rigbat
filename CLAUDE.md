@@ -1,6 +1,6 @@
 # rigbat
 
-System tray battery monitor for gaming peripherals (Linux). Rust port of the proven Python utility `universal-battery-tray`.
+System tray battery monitor for gaming peripherals (Linux), written in Rust.
 
 ## Status
 
@@ -44,7 +44,7 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
 ## Key decisions
 
 - **Concurrency:** `tokio`, message-passing, no `Mutex` on shared data. Supervisor owns state; data flows through `mpsc` (readings) and `watch` (to tray). Each source is a separate task with its own interval; failure of one does not crash the others.
-- **Source port:** `trait BatterySource { async fn poll(&mut self) -> Result<BatteryReading> }`. Source holds an open handle for its entire lifetime (does not reopen on each poll — fixes deadlocks in the original).
+- **Source port:** `trait BatterySource { async fn poll(&mut self) -> Result<BatteryReading> }`. Source holds an open handle for its entire lifetime (does not reopen on each poll — reopening per poll can deadlock the device).
 - **Tray:** `ksni`, SNI-only. XEmbed is not embedded — closed by external `snixembed`. No GTK dependency.
 - **Icon:** render behind the `IconRenderer -> Vec<ksni::Icon>` port (multiple sizes for HiDPI). Implementation in `tiny-skia`; migration to SVG/resvg is a new implementation behind the same port.
 - **Extensibility:** sources are built-in adapters behind a trait, no dlopen plugins (YAGNI).

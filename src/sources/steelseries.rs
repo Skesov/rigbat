@@ -7,8 +7,6 @@
 //!
 //! Discovery: `/sys/class/hidraw/hidrawN/device/uevent` contains
 //! `HID_ID=0003:VVVVVVVV:PPPPPPPP`; canonicalize device → segment `:1.N` → interface N.
-//!
-//! Reverse reference: original Python driver universal-battery-tray.
 
 use std::{
     io::{Read as _, Write as _},

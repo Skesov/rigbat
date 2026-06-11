@@ -44,8 +44,8 @@ trait in an inner layer — with the concrete dependency living in the implement
 
 - **`BatterySource`** (`sources`): `async fn poll(&mut self) -> Result<BatteryReading>` and
   `fn device(&self) -> &DeviceInfo`. One source = one device. A source opens its handle once and
-  holds it for its whole lifetime — it does not reopen per poll (reopening per poll deadlocked
-  the original Python tool).
+  holds it for its whole lifetime — it does not reopen per poll (reopening per poll can
+  deadlock the device).
 - **`BatteryBackend`** (`sources`): `async fn discover(&self) -> Vec<Box<dyn BatterySource>>`.
   Finds devices and constructs sources. Backends are listed in `discovery::registry::backends()`.
 - **`IconRenderer`** (`tray`): `render(status, kind, theme, mode) -> Vec<ksni::Icon>`. The tray
