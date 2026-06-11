@@ -4,17 +4,31 @@ System tray battery monitor for gaming peripherals (Linux). Rust port of the pro
 
 ## Status
 
-Working: `rigbat list` / `--json` / `tray`. Sources: sysfs, bluez, steelseries (via
-`discovery::discover_all`). Tray: left-click menu, light/dark theme, display modes, config
-persistence.
+Working: `rigbat list` / `--json` / `--wide` / `tray`. Sources: sysfs, bluez, steelseries (via
+`discovery::discover_all`, re-discovered live so hotplugged devices appear). Tray: left-click
+menu, device-type corner glyph, light/dark theme, display modes, low-battery notifications,
+separate settings window, per-device poll intervals/thresholds, config persistence.
+
+## Compatibility
+
+DE-agnostic — runs on any desktop with a StatusNotifierItem tray host: KDE Plasma (native),
+GNOME (AppIndicator extension), Waybar/wlroots, XFCE (via `snixembed`), COSMIC. All integration
+is standard freedesktop: SNI (`ksni`), xdg-desktop-portal appearance, logind resume,
+`org.freedesktop.Notifications`; battery data comes from BlueZ/sysfs/hidraw at the kernel level.
+No DE-specific dependencies. COSMIC is the primary development/test environment and the strictest
+SNI host, which is why the workarounds below are framed around it.
 
 ## Launch modes
 
-One binary, two output adapters over a common headless core (`domain` + `sources`):
+One binary, three surfaces over a common headless core (`domain` + `sources`); `main.rs`
+dispatches on the first argument and builds the tokio runtime only for the non-GUI modes.
 
-- `rigbat` / `rigbat list` — one-shot table of charge levels (`app::poll_once`).
+- `rigbat` / `rigbat list` — one-shot table of charge levels (`app::poll_once`); `--wide` adds
+  transport/locator columns.
 - `rigbat --json` — machine-readable output.
-- `rigbat tray` — SNI daemon (`Supervisor` + `ksni`).
+- `rigbat tray` — SNI daemon (`Supervisor` + `ksni`), the long-running mode.
+- `rigbat settings` — GTK-free eframe/egui settings window in a SEPARATE process with no tokio
+  runtime (the tray spawns it). It edits `config.json`; the tray applies changes via the file watch.
 
 ## Toolchain and commands
 
@@ -35,19 +49,24 @@ One binary, two output adapters over a common headless core (`domain` + `sources
 - **Icon:** render behind the `IconRenderer -> Vec<ksni::Icon>` port (multiple sizes for HiDPI). Implementation in `tiny-skia`; migration to SVG/resvg is a new implementation behind the same port.
 - **Extensibility:** sources are built-in adapters behind a trait, no dlopen plugins (YAGNI).
 
-## Module structure (target)
+Full rationale, data flow, and contracts: [`docs/architecture.md`](docs/architecture.md).
+
+## Module structure
 
 ```text
 src/
-├── domain/      # types, classify, guess_kind, freedesktop_icon_name  [exists]
-├── sources/     # BatterySource + BatteryBackend; sysfs/bluez/steelseries [exists]
-├── discovery/   # discover_all + registry::backends()                 [exists]
-├── cli/         # output adapter: table / --json                      [exists]
-├── tray/        # ksni + IconRenderer (tiny-skia)                     [exists]
-├── appearance/  # theme from xdg-portal (light/dark)                  [exists]
-├── session/     # logind PrepareForSleep → resume re-poll             [exists]
-├── app/         # poll_once + Supervisor + wiring                     [exists]
-└── config/      # XDG ~/.config/rigbat/config.json                    [exists]
+├── domain/        # types, classify, guess_kind, freedesktop_icon_name
+├── sources/       # BatterySource + BatteryBackend; sysfs/bluez/steelseries
+├── discovery/     # discover_all + registry::backends()
+├── cli/           # output adapter: table / --json / --wide
+├── tray/          # ksni + IconRenderer (tiny-skia) + device-type corner glyph
+├── appearance/    # theme from xdg-portal (light/dark)
+├── notifications/ # low-battery desktop notifications (zbus)
+├── session/       # logind PrepareForSleep → resume re-poll
+├── settings/      # eframe/egui settings window (separate process)
+├── autostart/     # ~/.config/autostart/rigbat.desktop
+├── app/           # poll_once + Supervisor (owns discovery) + wiring
+└── config/        # XDG ~/.config/rigbat/config.json
 ```
 
 Dependencies point inward: `domain` does not import `zbus`/`tiny-skia`/`nix`.
@@ -55,16 +74,33 @@ Dependencies point inward: `domain` does not import `zbus`/`tiny-skia`/`nix`.
 ## Conventions
 
 - English-only repo content (comments, docs). Domain types, not stringly-typed.
-- New device support: see `CONTRIBUTING.md` — add a row to a backend's device table, or a
-  new `sources/<vendor>.rs` + one line in `discovery::registry::backends()`.
+- No `unwrap`/`expect` in non-test code — return `anyhow::Result` with context.
 - HID via `/dev/hidraw` directly (no C `libhidapi`); BlueZ via `zbus` (no `bluer`/libdbus).
-- No `unwrap`/`expect` in non-test code. Gates: fmt/build/test/`clippy --all-targets -D warnings`.
+
+## Development
+
+- Gates (must pass before commit): `cargo fmt`, `cargo build`, `cargo test`,
+  `cargo clippy --all-targets -- -D warnings`.
+- Adding infrastructure (a new D-Bus/HID/GUI dependency): put it behind a port (a trait) plus
+  an implementation; never import it into `domain` — dependency direction stays inward.
+- Where to change what: new device → `CONTRIBUTING.md`; CLI flag → `main.rs` dispatch + `cli/`;
+  icon rendering → behind the `IconRenderer` port in `tray/`; persisted settings → `config/`
+  (serde, `#[serde(default)]` so old config files keep loading).
+- Commits: Conventional Commits — `type(scope): description` (e.g. `feat(tray): …`).
 
 ## Platform gotchas
 
-- SNI hosts (COSMIC) fit the icon into a square slot — keep pixmaps square, fill them.
-- tiny-skia can panic on thin anti-aliased rects — all paints use `anti_alias = false`.
-- ksni `RadioGroup`/nested submenus drop clicks on COSMIC — use `StandardItem` for actions;
+General — apply on every host:
+
+- Most SNI hosts fit the icon into a square slot — keep pixmaps square and fill them.
+- `tiny-skia` can panic on thin anti-aliased rects — all paints use `anti_alias = false`. Pure
+  rendering, unrelated to any desktop.
+- `ksni` does not re-publish the icon after a menu event — menu actions that change the icon must
+  route config through the `watch` channel so the main loop calls `handle.update`.
+
+COSMIC-specific — the strictest SNI host; these workarounds are safe everywhere:
+
+- No hover tooltip for tray icons, so the icon image and the menu are the only identification
+  channels (drives the device-type corner glyph and the full-roster menu).
+- `ksni` `RadioGroup`/nested submenus drop clicks — use plain `StandardItem` for actions;
   left-click opens the menu via `const MENU_ON_ACTIVATE: bool = true`.
-- Menu actions changing the icon must route config through the `watch` channel so the main
-  loop calls `handle.update` (ksni does not re-publish the icon after a menu event).
