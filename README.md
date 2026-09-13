@@ -28,18 +28,26 @@ System tray battery monitor for gaming peripherals.
 The `Makefile` standardizes the local flow. Run `make` for the full target list.
 
 ```sh
-make install   # cargo install --path . --force → ~/.cargo/bin/rigbat
-make run       # run the tray in the foreground (quick look, Ctrl-C to stop)
+make install       # cargo install --path . --force --locked → ~/.cargo/bin/rigbat
+make run           # run the tray in the foreground (quick look, Ctrl-C to stop)
+sudo make udev-install   # USB HID permissions — see Permissions below
 ```
 
-`make install` puts `rigbat` on your `PATH` (assuming `~/.cargo/bin` is on it).
-Run modes:
+`make install` puts `rigbat` on your `PATH` (assuming `~/.cargo/bin` is on it), and installs
+a desktop entry and icon (`packaging/rigbat.desktop`, `packaging/icons/`) so `rigbat settings`
+gets an application menu entry and a taskbar icon instead of a generic placeholder. `--locked`
+builds against the committed `Cargo.lock` — a dependency fix released after the lockfile was
+written is not picked up until the lockfile is updated. Run modes:
 
 ```sh
 rigbat            # one-shot battery table
+rigbat --wide     # one-shot table with transport and locator columns
 rigbat --json     # machine-readable
+rigbat --waybar   # one JSON line for a waybar custom module — see Status bars below
 rigbat tray       # tray daemon
 rigbat settings   # settings window
+rigbat --help     # show usage (-h)
+rigbat --version  # show the version (-V)
 ```
 
 ## Run as a systemd user service
@@ -53,7 +61,7 @@ make enable    # systemctl --user enable --now rigbat.service
 make logs      # journalctl --user -u rigbat -f
 make status    # service status
 make restart   # after reinstalling the binary
-make uninstall # stop, remove the unit and the binary
+make uninstall # stop, remove the unit, udev rule, autostart entry and the binary
 ```
 
 The service needs the session environment (Wayland/X display, session D-Bus),
@@ -63,3 +71,81 @@ at login automatically.
 Use the service **or** the in-app "Startup" toggle (which writes an XDG autostart
 entry), not both — each launches `rigbat tray`, so enabling both starts two
 instances.
+
+## Permissions
+
+`/dev/hidraw*` nodes are root-only by default on most distros, so a USB HID device
+(e.g. a SteelSeries mouse) shows as `offline` until you install the udev rule:
+
+```sh
+sudo make udev-install
+```
+
+This installs `packaging/70-rigbat.rules` to `/etc/udev/rules.d/` and reloads udev. The
+rule grants the logged-in user access, scoped to the specific vendor/product ids rigbat
+supports (`TAG+="uaccess"` via logind) — not a blanket grant to every HID device. `make
+install`/`make service` never need root; only this step does, since it writes to `/etc`.
+
+Bluetooth and sysfs (kernel power_supply) devices need no rule — only USB HID access is
+gated by permissions. A device already plugged in when you run `udev-install` is
+re-triggered automatically; if it still shows `offline`, replug it.
+
+Config lives at `~/.config/rigbat/config.json`. `make uninstall` leaves it in place —
+remove it yourself if you want a clean slate.
+
+## Status bars
+
+rigbat's tray is a StatusNotifierItem, which does not cover wlroots compositors running
+Waybar/Polybar instead of an SNI host.
+
+### Waybar
+
+`rigbat --waybar` prints one `custom` module JSON line describing the featured device — the
+same device the aggregate tray icon shows. Add to `~/.config/waybar/config`:
+
+```jsonc
+"custom/rigbat": {
+  "exec": "rigbat --waybar",
+  "return-type": "json",
+  "interval": 30
+}
+```
+
+`class` is one of `charging`, `low`, `ok`, `offline` — style it in `~/.config/waybar/style.css`:
+
+```css
+#custom-rigbat.low {
+  color: #e06c75;
+}
+```
+
+A device may carry a retained reading while unreachable (asleep, switched off, out of range).
+`--waybar` cannot see that history — it runs one poll and exits — so a failed poll always maps to
+`offline` with no `percentage` key, rather than guessing at a stale value.
+
+### Polybar
+
+Polybar's `custom/script` consumes plain text, not JSON, so `--waybar` does not serve it. Pipe
+`rigbat --json` through `jq` instead:
+
+```sh
+rigbat --json | jq -r '.[0] | if .online then "\(.percent)% \(.name)" else "\(.name) offline" end'
+```
+
+## Troubleshooting / logs
+
+Diagnostics go to stderr via `tracing`; `journalctl` captures that stream for the
+systemd service. No journald transport is linked in, so levels show up in the
+message text rather than as journald priorities:
+
+```sh
+journalctl --user -u rigbat -f
+```
+
+Raise verbosity with `RIGBAT_LOG` (falls back to `RUST_LOG`), default `info`
+for `tray`/`settings` and `warn` for the one-shot CLI modes:
+
+```sh
+RIGBAT_LOG=debug rigbat tray
+RIGBAT_LOG=rigbat::sources=trace rigbat tray   # one module only
+```

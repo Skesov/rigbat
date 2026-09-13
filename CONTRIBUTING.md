@@ -30,7 +30,7 @@ pub fn backends() -> Vec<Box<dyn BatteryBackend>> {
 ### 1. New device, vendor already supported
 
 If the vendor backend uses a device table (e.g. `src/sources/steelseries.rs`), add one
-row to its `DEVICES` array with the USB product id and metadata. No other change needed.
+row to its `DEVICES` array with the USB product id and metadata.
 
 ```rust
 const DEVICES: &[SteelSeriesDevice] = &[
@@ -38,6 +38,10 @@ const DEVICES: &[SteelSeriesDevice] = &[
     SteelSeriesDevice { product_id: 0x____, name: "Your device",                 kind: DeviceKind::Mouse }, // ← add
 ];
 ```
+
+If the device talks over USB HID (not Bluetooth or sysfs), also add a matching line to
+`packaging/70-rigbat.rules` — see [docs/adding-a-device.md](docs/adding-a-device.md#permissions).
+Without it the device reads as `offline` because `/dev/hidraw*` is root-only by default.
 
 ### 2. New vendor or transport
 

@@ -4,10 +4,13 @@ System tray battery monitor for gaming peripherals (Linux), written in Rust.
 
 ## Status
 
-Working: `rigbat list` / `--json` / `--wide` / `tray`. Sources: sysfs, bluez, steelseries (via
-`discovery::discover_all`, re-discovered live so hotplugged devices appear). Tray: left-click
-menu, device-type corner glyph, light/dark theme, display modes, low-battery notifications,
-separate settings window, per-device poll intervals/thresholds, config persistence.
+Working: `rigbat list` / `--json` / `--wide` / `--waybar` / `tray` / `settings`. Sources: sysfs,
+bluez, steelseries (via `discovery::discover_all`, re-discovered live so hotplugged devices
+appear; BlueZ signals debounced). Devices retain their last reading across drops (`Presence`:
+Online/Unreachable/Disconnected). Tray: left-click menu with a hint, device-type corner glyph,
+light/dark theme, display modes, time-remaining estimate, low-battery notifications, separate
+settings window, per-device poll intervals/thresholds, config persistence. Diagnostics via
+`tracing`. Packaging: udev rule, desktop entry, systemd user service.
 
 ## Compatibility
 
@@ -22,10 +25,12 @@ SNI host, which is why the workarounds below are framed around it.
 
 One binary, three surfaces over a common headless core (`domain` + `sources`); `main.rs`
 dispatches on the first argument and builds the tokio runtime only for the non-GUI modes.
+`-h`/`--help` and `-V`/`--version` print and exit before that dispatch.
 
 - `rigbat` / `rigbat list` — one-shot table of charge levels (`app::poll_once`); `--wide` adds
   transport/locator columns.
 - `rigbat --json` — machine-readable output.
+- `rigbat --waybar` — one waybar custom-module JSON line for the featured device.
 - `rigbat tray` — SNI daemon (`Supervisor` + `ksni`), the long-running mode.
 - `rigbat settings` — GTK-free eframe/egui settings window in a SEPARATE process with no tokio
   runtime (the tray spawns it). It edits `config.json`; the tray applies changes via the file watch.
@@ -43,7 +48,7 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
 
 ## Key decisions
 
-- **Concurrency:** `tokio`, message-passing, no `Mutex` on shared data. Supervisor owns state; data flows through `mpsc` (readings) and `watch` (to tray). Each source is a separate task with its own interval; failure of one does not crash the others.
+- **Concurrency:** `tokio`, message-passing, no `Mutex` on shared data. Supervisor owns state; data flows through `mpsc` (readings) and `watch` (to tray, and for the refresh signal — a generation counter, `app::refresh::RefreshSignal`, not `Notify`, whose `notify_waiters()` drops triggers fired mid-poll). Each source is a separate task with its own interval; a panicking source is detected on the next discovery sweep (`is_finished()`) and respawned, not left silently dead.
 - **Source port:** `trait BatterySource { async fn poll(&mut self) -> Result<BatteryReading> }`. Source holds an open handle for its entire lifetime (does not reopen on each poll — reopening per poll can deadlock the device).
 - **Tray:** `ksni`, SNI-only. XEmbed is not embedded — closed by external `snixembed`. No GTK dependency.
 - **Icon:** render behind the `IconRenderer -> Vec<ksni::Icon>` port (multiple sizes for HiDPI). Implementation in `tiny-skia`; migration to SVG/resvg is a new implementation behind the same port.
@@ -55,17 +60,17 @@ Full rationale, data flow, and contracts: [`docs/architecture.md`](docs/architec
 
 ```text
 src/
-├── domain/        # types, classify, guess_kind, freedesktop_icon_name
+├── domain/        # types, classify, guess_kind, freedesktop_icon_name, estimate
 ├── sources/       # BatterySource + BatteryBackend; sysfs/bluez/steelseries
 ├── discovery/     # discover_all + registry::backends()
-├── cli/           # output adapter: table / --json / --wide
+├── cli/           # output adapter: table / --json / --wide / --waybar
 ├── tray/          # ksni + IconRenderer (tiny-skia) + device-type corner glyph
 ├── appearance/    # theme from xdg-portal (light/dark)
 ├── notifications/ # low-battery desktop notifications (zbus)
 ├── session/       # logind PrepareForSleep → resume re-poll
 ├── settings/      # eframe/egui settings window (separate process)
 ├── autostart/     # ~/.config/autostart/rigbat.desktop
-├── app/           # poll_once + Supervisor (owns discovery) + wiring
+├── app/           # poll_once + Supervisor (owns discovery) + refresh signal + wiring
 └── config/        # XDG ~/.config/rigbat/config.json
 ```
 
@@ -76,6 +81,9 @@ Dependencies point inward: `domain` does not import `zbus`/`tiny-skia`/`nix`.
 - English-only repo content (comments, docs). Domain types, not stringly-typed.
 - No `unwrap`/`expect` in non-test code — return `anyhow::Result` with context.
 - HID via `/dev/hidraw` directly (no C `libhidapi`); BlueZ via `zbus` (no `bluer`/libdbus).
+- Diagnostics go through `tracing`; `println!` is reserved for CLI output on stdout.
+- These rules (plus no `unsafe`) are enforced by `[lints]` in `Cargo.toml` and `clippy.toml`, not
+  only by review — `cargo clippy --all-targets -- -D warnings` fails the gate on a violation.
 
 ## Development
 
@@ -97,6 +105,9 @@ General — apply on every host:
   rendering, unrelated to any desktop.
 - `ksni` does not re-publish the icon after a menu event — menu actions that change the icon must
   route config through the `watch` channel so the main loop calls `handle.update`.
+- A udev rule granting `TAG+="uaccess"` must sort lexically before `73-seat-late.rules` — that
+  file applies the ACL for tagged devices, and a rule numbered `99-` installs and verifies
+  cleanly but silently grants no access. The shipped rule is `70-rigbat.rules`.
 
 COSMIC-specific — the strictest SNI host; these workarounds are safe everywhere:
 

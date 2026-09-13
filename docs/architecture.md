@@ -9,7 +9,7 @@ data flows through each of the three surfaces. For build/test/lint and conventio
 rigbat reads battery levels from peripherals and presents them. One binary, three surfaces over
 a shared headless core:
 
-- **CLI** — `rigbat list` / `--json` / `--wide`: a one-shot poll printed and exit.
+- **CLI** — `rigbat list` / `--json` / `--wide` / `--waybar`: a one-shot poll printed and exit.
 - **Tray** — `rigbat tray`: a long-running StatusNotifierItem daemon.
 - **Settings** — `rigbat settings`: a small GUI window, launched as a separate process.
 
@@ -24,7 +24,7 @@ reverse.
 
 ```text
         domain            pure types + logic (DeviceInfo, BatteryReading, PrimaryStatus,
-          ▲               classify, guess_kind, freedesktop_icon_name, DeviceId)
+          ▲               classify, guess_kind, freedesktop_icon_name, DeviceId, estimate)
           │
         sources           BatterySource / BatteryBackend traits + sysfs/bluez/steelseries impls
           ▲
@@ -57,30 +57,53 @@ trait in an inner layer — with the concrete dependency living in the implement
 `tokio`, message-passing, **no `Mutex` on shared data**. The `Supervisor` owns all state; data
 flows out through channels.
 
-- `Supervisor::spawn(config)` starts a **manager task** that owns the device set
-  (`order`/`infos`/`readings`) and a map of per-device task handles. It owns discovery: it runs
-  `discover_all()` at start, every 30 s, and on every `refresh` notification.
+- `Supervisor::spawn(config_rx)` starts a **manager task** holding a `DeviceRegistry` — the
+  device order, infos, readings and per-device task handles, keyed by `DeviceId`. It owns
+  discovery: it runs `discover_all()` at start, every 30 s, and on every refresh request.
 - Each discovered device gets its own **source task** that polls on that device's effective
   interval and sends `(DeviceId, reading)` to the manager over an `mpsc` channel. One failing
   source never affects the others.
-- The manager publishes a `TrayState { devices, primary, primary_status }` snapshot through a
-  `watch` channel after each reading or discovery change.
+- **Refresh** ("re-poll and re-discover now") is a `RefreshSignal`: a `watch` channel carrying a
+  generation counter, not a `Notify`. `Notify::notify_waiters` wakes only the waiters registered
+  at that instant, so a refresh fired while a task sat in `poll().await` or mid-discovery was
+  lost. A `watch` retains the bump, so a busy task observes it on its next wait.
+- Config reaches the supervisor as a `watch::Receiver<Config>`, not a snapshot. A source task
+  re-reads its interval every iteration and wakes on `config_rx.changed()`, so a changed poll
+  interval applies without restarting the tray.
+- The manager publishes a `TrayState { devices }` snapshot through a `watch` channel after each
+  reading or discovery change. `TrayState` carries raw observations only — which device is
+  featured and whether it is low is decided by each consumer against the live config, so there
+  is exactly one interpretation path instead of two that can disagree.
 - **Re-discovery / reconcile**: on each discovery sweep the manager diffs the live set against
-  running tasks by `DeviceId = (name, transport, locator)`. New devices get a task; vanished
-  devices have their task aborted; stable devices keep running untouched (their just-opened
-  transient discovery handle is dropped). This is how hotplugged devices appear without a
-  restart, and why the tray menu's **Refresh** re-discovers.
+  running tasks by `DeviceId` (`name` + `transport` + `locator`). New devices get a task;
+  vanished devices have their task aborted; stable devices keep running untouched (their
+  just-opened transient discovery handle is dropped). This is how hotplugged devices appear
+  without a restart, and why the tray menu's **Refresh** re-discovers.
+- **Presence and retention**: each device carries a `Presence`
+  (`Online`/`Unreachable`/`Disconnected`) alongside its last reading. A source that starts
+  erroring flips to `Unreachable` without discarding that reading, so consumers can render
+  "88% offline (2h ago)" instead of losing the value; `Disconnected` is reserved for a device
+  reconcile no longer sees at all. The same sweep also inspects each task's
+  `JoinHandle::is_finished()` — a task that panicked (as opposed to one reconcile aborted
+  itself for a vanished device) is demoted to `Unreachable` and respawned rather than left
+  silently dead.
+- **Estimate**: on every reading the manager derives a time-remaining estimate
+  (`domain::estimate`) from the device's percent-change history, refusing rather than guessing
+  when the evidence is thin (coarse-bucket readings, a short window, an uneven step rate — see
+  the module doc for why). The tray menu renders it via `format_coarse` as e.g. "left" appended
+  to the device line.
 
 ## Data flow per surface
 
 ```text
 CLI:       main → discover_all() → poll_once() (poll all in parallel) → cli::print_*  → exit
 
-Tray:      main → Supervisor::spawn(config) ──watch<TrayState>──▶ tray::manager::run
+Tray:      main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶ tray::manager::run
                                                                     │ reconciles ksni items,
                                                                     │ renders icons (IconRenderer)
            appearance (xdg portal) ──watch<ColorScheme>────────────┘
-           session (logind PrepareForSleep) ──Arc<Notify> refresh──▶ Supervisor (re-poll + re-discover)
+           session (logind PrepareForSleep) ──RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
+           bluez D-Bus signals (debounced) ────RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
            config file watch ──watch<Config>──▶ manager + notifications (live)
            notifications task ◀── TrayState + Config (edge-triggered low-battery)
 
@@ -110,12 +133,31 @@ AT-SPI/zbus bridge would panic without a runtime). It communicates with the tray
 
 - **appearance** — reads `org.freedesktop.appearance` color-scheme from xdg-desktop-portal and
   publishes light/dark through a `watch` channel; the tray re-renders on change.
-- **session** — listens to logind `PrepareForSleep`; on resume it fires the shared `refresh`
-  notify so all sources re-poll and the manager re-discovers.
+- **session** — listens to logind `PrepareForSleep`; on resume it fires the shared
+  `RefreshSignal` so all sources re-poll and the manager re-discovers.
+- **bluez event watcher** — BlueZ is a push interface, so it is not polled for change detection.
+  `bluez::watch_events` subscribes to `InterfacesAdded`/`InterfacesRemoved` and to
+  `PropertiesChanged` (`Battery1` always, `Device1` filtered to `Connected` — `Device1` emits
+  constant RSSI noise) and fires the same `RefreshSignal`, debounced to at most one trigger per
+  5 s because a refresh wakes every source task, including the blocking hidraw one. It is an
+  optimisation, never a dependency: the 30 s discovery sweep remains the safety net.
 - **notifications** — a hand-rolled `zbus` `org.freedesktop.Notifications` proxy; an
   edge-triggered tracker fires once per low-battery crossing, using each device's effective
   threshold, gated by `notifications_enabled`.
 - **autostart** — writes/removes `~/.config/autostart/rigbat.desktop`.
+
+## Diagnostics
+
+Diagnostics go through `tracing` to **stderr**; `println!` is reserved for CLI output on stdout,
+so `rigbat --json` stays machine-parseable at any verbosity. The filter comes from `RIGBAT_LOG`,
+falling back to `RUST_LOG`, defaulting to `warn` for the one-shot CLI modes and `info` for
+`tray` and `settings`. Under systemd the journal captures stderr directly, so no journald
+transport is linked in.
+
+Level policy: `error` when the user loses a feature and must act; `warn` for degraded but
+self-healing or optional behaviour (portal, logind, notifications or the config watcher being
+unavailable); `info` for lifecycle events worth keeping in the journal; `debug` for per-poll and
+per-discovery detail; `trace` for raw protocol bytes.
 
 ## Compatibility and platform constraints
 

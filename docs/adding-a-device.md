@@ -75,10 +75,23 @@ Then add a row to `backends()` in `src/discovery/registry.rs`.
 
 ## Permissions
 
-Reading `/dev/hidraw*` may require a udev rule granting your user access. If `cargo run
--- list` shows the device as `offline` but it is awake, check `ls -l /dev/hidrawN`.
-Packaging will ship udev rules; for development, a rule like
-`KERNEL=="hidraw*", MODE="0660", TAG+="uaccess"` works.
+Reading `/dev/hidraw*` requires a udev rule granting your user access — `/dev/hidraw*`
+nodes are root-only by default on most distros. `packaging/70-rigbat.rules` ships one
+line per supported USB HID device, scoped by vendor/product id; `sudo make
+udev-install` installs it (see the README's Permissions section). When you add a device
+to a vendor's `DEVICES` table, add a matching `ATTRS{idVendor}`/`ATTRS{idProduct}` line
+to `packaging/70-rigbat.rules` too.
+
+For a quick local check while reverse-engineering, without installing the rule, a
+development-only shortcut works:
+
+```
+KERNEL=="hidraw*", MODE="0660", TAG+="uaccess"
+```
+
+**Do not install this as a rule.** It matches every `hidraw` node — every HID device on
+the system, keyboards included — which is a keylogging surface. Use it only as a
+temporary local snippet while probing, then remove it.
 
 ## Multiple batteries
 
