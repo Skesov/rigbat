@@ -9,9 +9,10 @@
 //! `HID_ID=0003:VVVVVVVV:PPPPPPPP`; canonicalize device → segment `:1.N` → interface N.
 
 use std::{
+    fs::File,
     io::{Read as _, Write as _},
     os::unix::fs::OpenOptionsExt as _,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::Context as _;
@@ -53,6 +54,10 @@ pub struct SteelSeriesBackend;
 pub struct SteelSeriesSource {
     info: DeviceInfo,
     dev_path: PathBuf, // /dev/hidrawN
+    /// Open `/dev/hidrawN`, kept for the source's lifetime. `None` before the first
+    /// successful poll and after an I/O error invalidated it (the node is recreated
+    /// with a new minor when the device re-enumerates, so a stale fd must be dropped).
+    handle: Option<File>,
 }
 
 #[async_trait::async_trait]
@@ -63,7 +68,7 @@ impl BatteryBackend for SteelSeriesBackend {
 
     async fn discover(&self) -> Vec<Box<dyn BatterySource>> {
         discover_inner().unwrap_or_else(|e| {
-            eprintln!("rigbat steelseries: {e:#}");
+            tracing::warn!("steelseries discovery failed: {e:#}");
             Vec::new()
         })
     }
@@ -84,7 +89,7 @@ fn discover_inner() -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("rigbat steelseries: skipping hidraw entry: {e}");
+                tracing::warn!("skipping hidraw entry: {e}");
                 continue;
             }
         };
@@ -146,6 +151,7 @@ fn try_node(node_name: &str, sources: &mut Vec<Box<dyn BatterySource>>) -> anyho
             locator: Some(node_name.to_owned()),
         },
         dev_path,
+        handle: None,
     }));
 
     Ok(())
@@ -161,23 +167,58 @@ impl BatterySource for SteelSeriesSource {
 
     async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
         let path = self.dev_path.clone();
-        // Move blocking I/O out of the async context.
-        tokio::task::spawn_blocking(move || poll_device(&path))
-            .await
-            .context("spawn_blocking")?
+        let handle = self.handle.take();
+
+        // Blocking I/O: nix::poll() parks the thread. Move the handle in and back out
+        // so a healthy descriptor survives across polls.
+        //
+        // If DeviceRegistry::reconcile aborts this task while this closure is
+        // in flight, AbortHandle::abort() cancels the enclosing task future
+        // but not the spawn_blocking closure itself: the OS thread keeps
+        // running poll_device to completion (bounded by POLL_TIMEOUT_MS)
+        // before the descriptor is dropped.
+        let (result, handle) = tokio::task::spawn_blocking(move || {
+            let mut handle = handle;
+            let result = poll_device(&path, &mut handle);
+            (result, handle)
+        })
+        .await
+        .context("spawn_blocking")?;
+
+        self.handle = handle;
+        if let Ok(reading) = &result {
+            tracing::debug!(device = %self.info.name, percent = reading.percent, "steelseries poll");
+        }
+        result
     }
 }
 
-/// Synchronous polling of the device via /dev/hidrawN.
-fn poll_device(dev_path: &std::path::Path) -> anyhow::Result<BatteryReading> {
+/// Synchronous polling of the device via /dev/hidrawN, reusing `handle` when present.
+fn poll_device(dev_path: &Path, handle: &mut Option<File>) -> anyhow::Result<BatteryReading> {
+    let result = poll_device_inner(dev_path, handle);
+    // hidraw minor numbers are not stable across re-enumeration, so a cached fd for a
+    // device that came back is pointing at a dead character device — clear it and let
+    // the next poll reopen by node name instead of retrying a stale descriptor forever.
+    clear_handle_on_error(handle, &result);
+    result
+}
+
+fn poll_device_inner(dev_path: &Path, handle: &mut Option<File>) -> anyhow::Result<BatteryReading> {
     use std::os::fd::AsFd as _;
 
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(dev_path)
-        .with_context(|| format!("opening {}", dev_path.display()))?;
+    if handle.is_none() {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(dev_path)
+            .with_context(|| format!("opening {}", dev_path.display()))?;
+        *handle = Some(file);
+    }
+
+    let file = handle
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("handle unexpectedly empty after open"))?;
 
     // Send battery query request.
     file.write_all(&[0x00, BATTERY_QUERY])
@@ -223,6 +264,14 @@ fn poll_device(dev_path: &std::path::Path) -> anyhow::Result<BatteryReading> {
             return Ok(reading);
         }
         // Not the expected response — continue draining.
+    }
+}
+
+/// Clears `handle` when `result` is `Err`, so a poll failure always drops the descriptor
+/// instead of relying on each error path to remember to do it.
+fn clear_handle_on_error<T, U>(handle: &mut Option<T>, result: &anyhow::Result<U>) {
+    if result.is_err() {
+        *handle = None;
     }
 }
 
@@ -285,6 +334,39 @@ pub fn parse_battery_response(buf: &[u8]) -> Option<BatteryReading> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // SteelSeriesSource construction
+
+    #[test]
+    fn new_source_has_no_open_handle() {
+        let source = SteelSeriesSource {
+            info: DeviceInfo {
+                name: "test".to_owned(),
+                kind: DeviceKind::Mouse,
+                transport: Transport::Hidraw,
+                locator: Some("hidraw0".to_owned()),
+            },
+            dev_path: PathBuf::from("/dev/hidraw0"),
+            handle: None,
+        };
+        assert!(source.handle.is_none());
+    }
+
+    // clear_handle_on_error
+
+    #[test]
+    fn clear_handle_on_error_keeps_handle_on_ok() {
+        let mut handle = Some(42);
+        clear_handle_on_error(&mut handle, &Ok(()));
+        assert_eq!(handle, Some(42));
+    }
+
+    #[test]
+    fn clear_handle_on_error_clears_handle_on_err() {
+        let mut handle = Some(42);
+        clear_handle_on_error(&mut handle, &Err::<(), _>(anyhow::anyhow!("boom")));
+        assert_eq!(handle, None);
+    }
 
     // parse_hid_id
 

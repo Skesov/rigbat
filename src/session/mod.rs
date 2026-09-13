@@ -1,7 +1,6 @@
-use std::sync::Arc;
-
 use futures_util::StreamExt as _;
-use tokio::sync::Notify;
+
+use crate::app::refresh::RefreshSignal;
 
 /// zbus proxy for the logind Manager interface.
 /// Used only for the PrepareForSleep signal.
@@ -19,22 +18,35 @@ trait LogindManager {
 /// Spawns a background task that fires `refresh` whenever the system resumes.
 /// Quietly exits if logind is unavailable so the main binary still works in
 /// environments without systemd (e.g. containers, BSDs).
-pub fn watch_resume(refresh: Arc<Notify>) {
+pub fn watch_resume(refresh: RefreshSignal) {
     tokio::spawn(async move {
-        let Ok(conn) = zbus::Connection::system().await else {
-            return;
+        let conn = match zbus::Connection::system().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("logind unavailable: {e}; no re-poll after suspend");
+                return;
+            }
         };
-        let Ok(manager) = LogindManagerProxy::new(&conn).await else {
-            return;
+        let manager = match LogindManagerProxy::new(&conn).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("logind unavailable: {e}; no re-poll after suspend");
+                return;
+            }
         };
-        let Ok(mut stream) = manager.receive_prepare_for_sleep().await else {
-            return;
+        let mut stream = match manager.receive_prepare_for_sleep().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("logind unavailable: {e}; no re-poll after suspend");
+                return;
+            }
         };
         while let Some(signal) = stream.next().await {
             if let Ok(args) = signal.args() {
                 // start == false: the system has finished resuming from sleep.
                 if !args.start {
-                    refresh.notify_waiters();
+                    tracing::info!("resumed from suspend, triggering re-poll");
+                    refresh.trigger();
                 }
             }
         }

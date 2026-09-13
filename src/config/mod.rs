@@ -37,8 +37,6 @@ pub enum TrayMode {
 pub struct Config {
     pub display_mode: DisplayMode,
     /// Device names to display as icons. Empty list = show all.
-    // wired in D2 (Visible devices) / U4b (multi-icon)
-    #[allow(dead_code)]
     pub shown_devices: Vec<String>,
     /// Whether to send desktop notifications for low-battery crossings.
     /// Defaults to true; old config files without this key load as true
@@ -92,8 +90,6 @@ impl DisplayMode {
 
 impl Config {
     /// Returns true if the device should be shown (empty list = show all).
-    // wired in D2 (Visible devices) / U4b (multi-icon)
-    #[allow(dead_code)]
     pub fn is_shown(&self, name: &str) -> bool {
         self.shown_devices.is_empty() || self.shown_devices.iter().any(|n| n == name)
     }
@@ -138,7 +134,7 @@ pub fn load() -> Config {
     match serde_json::from_str::<Config>(&data) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("rigbat: config parse error ({path:?}): {e}");
+            tracing::warn!("config parse error ({path:?}): {e}; using defaults");
             Config::default()
         }
     }
@@ -196,8 +192,16 @@ fn is_content_change(kind: &notify::EventKind) -> bool {
 /// `tx` whenever the file changes on disk. Quietly does nothing if the path or
 /// the watcher is unavailable (config watching is best-effort, never fatal).
 pub fn watch_file(tx: tokio::sync::watch::Sender<Config>) {
-    let Some(path) = config_path() else { return };
+    let Some(path) = config_path() else {
+        tracing::warn!(
+            "no config directory available; settings changes will not apply until restart"
+        );
+        return;
+    };
     let Some(dir) = path.parent().map(|p| p.to_path_buf()) else {
+        tracing::warn!(
+            "config path {path:?} has no parent directory; settings changes will not apply until restart"
+        );
         return;
     };
 
@@ -214,16 +218,21 @@ pub fn watch_file(tx: tokio::sync::watch::Sender<Config>) {
             let _ = raw_tx.send(ev);
         }) {
             Ok(w) => w,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(
+                    "failed to create config file watcher: {e}; settings changes will not apply until restart"
+                );
+                return;
+            }
         };
 
         // Watch the parent directory non-recursively so rename-based atomic
         // writes (temp file → rename) are captured.
         use notify::Watcher as _;
-        if watcher
-            .watch(&dir, notify::RecursiveMode::NonRecursive)
-            .is_err()
-        {
+        if let Err(e) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+            tracing::warn!(
+                "failed to watch config directory {dir:?}: {e}; settings changes will not apply until restart"
+            );
             return;
         }
 
@@ -232,7 +241,7 @@ pub fn watch_file(tx: tokio::sync::watch::Sender<Config>) {
             let Ok(event) = result else { continue };
             if is_content_change(&event.kind) && event_touches(&event, &path) {
                 let cfg = load();
-                tx.send_if_modified(|cur| {
+                let applied = tx.send_if_modified(|cur| {
                     if *cur != cfg {
                         *cur = cfg;
                         true
@@ -240,6 +249,9 @@ pub fn watch_file(tx: tokio::sync::watch::Sender<Config>) {
                         false
                     }
                 });
+                if applied {
+                    tracing::debug!("config reload applied");
+                }
             }
         }
     });

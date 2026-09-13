@@ -1,3 +1,7 @@
+use std::time::Instant;
+
+use crate::domain::estimate::Estimate;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
     Mouse,
@@ -67,6 +71,20 @@ pub fn guess_kind(name: &str) -> DeviceKind {
     DeviceKind::Other
 }
 
+impl DeviceKind {
+    /// Canonical string spelling of the variant. Part of the `--json` CLI contract
+    /// (the "kind" field) — changing these values changes that output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeviceKind::Mouse => "mouse",
+            DeviceKind::Keyboard => "keyboard",
+            DeviceKind::Headset => "headset",
+            DeviceKind::Controller => "controller",
+            DeviceKind::Other => "other",
+        }
+    }
+}
+
 /// Returns the freedesktop icon-theme name for a device kind.
 ///
 /// The returned string can be used directly as a `gtk::Image` icon name.
@@ -106,9 +124,15 @@ impl Transport {
     }
 }
 
-/// Stable identity for a device: (name, transport, locator).
-/// Two sources with the same DeviceId are treated as the same physical device.
-pub type DeviceId = (String, Transport, Option<String>);
+/// Stable identity of a device: the tuple that distinguishes two entries the
+/// project deliberately does not deduplicate (e.g. one mouse seen over both
+/// sysfs/HID++ and Bluetooth is shown twice; rigbat does not merge them).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeviceId {
+    pub name: String,
+    pub transport: Transport,
+    pub locator: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
@@ -122,7 +146,11 @@ pub struct DeviceInfo {
 
 impl DeviceInfo {
     pub fn id(&self) -> DeviceId {
-        (self.name.clone(), self.transport, self.locator.clone())
+        DeviceId {
+            name: self.name.clone(),
+            transport: self.transport,
+            locator: self.locator.clone(),
+        }
     }
 }
 
@@ -140,6 +168,40 @@ impl BatteryReading {
             state,
         }
     }
+}
+
+/// How reachable a device currently is. `last_reading` is retained across all
+/// three states, so a device that is asleep or switched off still shows the
+/// charge it last reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// Polling succeeds.
+    Online,
+    /// Still discovered, but the last few polls failed. Wireless peripherals
+    /// drop telemetry packets as normal behaviour, so a single failure is not
+    /// treated as a state change.
+    Unreachable,
+    /// Gone from discovery entirely: powered off, or switched to another host.
+    Disconnected,
+}
+
+/// A device's presence and last-known reading, retained across polling gaps
+/// and disconnects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceState {
+    pub info: DeviceInfo,
+    /// Last successful reading. Survives going Unreachable or Disconnected.
+    pub last_reading: Option<BatteryReading>,
+    /// When `last_reading` was taken. `None` if the device has never answered.
+    /// `Instant`, not `SystemTime`: the only consumer is a relative age
+    /// ("2h ago"), a monotonic clock cannot be thrown off by an NTP step or a
+    /// suspend/resume jump, and nothing here is persisted across restarts.
+    pub last_seen: Option<Instant>,
+    pub presence: Presence,
+    /// Remaining-time estimate derived from this device's recorded
+    /// percent-change history (kept in the supervisor, not here — see
+    /// `push_reading` in `app::supervisor`).
+    pub estimate: Estimate,
 }
 
 #[cfg(test)]
@@ -205,5 +267,42 @@ mod tests {
     #[test]
     fn freedesktop_icon_name_other() {
         assert_eq!(freedesktop_icon_name(DeviceKind::Other), "battery");
+    }
+
+    #[test]
+    fn device_kind_as_str_exhaustive() {
+        assert_eq!(DeviceKind::Mouse.as_str(), "mouse");
+        assert_eq!(DeviceKind::Keyboard.as_str(), "keyboard");
+        assert_eq!(DeviceKind::Headset.as_str(), "headset");
+        assert_eq!(DeviceKind::Controller.as_str(), "controller");
+        assert_eq!(DeviceKind::Other.as_str(), "other");
+    }
+
+    fn info(name: &str, transport: Transport) -> DeviceInfo {
+        DeviceInfo {
+            name: name.to_owned(),
+            kind: DeviceKind::Other,
+            transport,
+            locator: None,
+        }
+    }
+
+    #[test]
+    fn device_id_differs_by_transport() {
+        let sysfs = info("mouse", Transport::Sysfs);
+        let bluetooth = info("mouse", Transport::Bluetooth);
+        assert_ne!(sysfs.id(), bluetooth.id());
+    }
+
+    #[test]
+    fn device_id_equal_for_identical_inputs_and_hashes_equal() {
+        let a = info("mouse", Transport::Sysfs);
+        let b = info("mouse", Transport::Sysfs);
+        assert_eq!(a.id(), b.id());
+
+        let mut set = std::collections::HashSet::new();
+        set.insert(a.id());
+        set.insert(b.id());
+        assert_eq!(set.len(), 1);
     }
 }

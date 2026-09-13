@@ -1,0 +1,4 @@
+# unwrap/expect are idiomatic in tests; the project's no-unwrap rule targets
+# non-test code, enforced by clippy::unwrap_used/expect_used in [lints.clippy].
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

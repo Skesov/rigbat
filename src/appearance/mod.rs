@@ -15,7 +15,10 @@ pub fn spawn() -> watch::Receiver<ColorScheme> {
     tokio::spawn(async move {
         let settings = match ashpd::desktop::settings::Settings::new().await {
             Ok(s) => s,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!("xdg-portal settings unavailable: {e}; theme stays at its default");
+                return;
+            }
         };
 
         if let Ok(cs) = settings.color_scheme().await {
@@ -32,7 +35,12 @@ pub fn spawn() -> watch::Receiver<ColorScheme> {
 
         let mut stream = match settings.receive_color_scheme_changed().await {
             Ok(s) => s,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(
+                    "xdg-portal color-scheme signal unavailable: {e}; theme stays at its default"
+                );
+                return;
+            }
         };
 
         while let Some(cs) = stream.next().await {
@@ -48,7 +56,7 @@ pub fn spawn() -> watch::Receiver<ColorScheme> {
                 }
             });
             if changed {
-                eprintln!("rigbat: color scheme -> {scheme:?}");
+                tracing::debug!("color scheme -> {scheme:?}");
             }
             // All receivers gone (tray exited) — stop the task.
             if tx.is_closed() {

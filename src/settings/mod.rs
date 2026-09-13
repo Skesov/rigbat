@@ -1,14 +1,22 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 
 use crate::autostart;
-use crate::config::{self, Config, DisplayMode, TrayMode};
+use crate::config::{self, Config, DeviceSettings, DisplayMode, TrayMode};
 use crate::domain::DeviceInfo;
 
 /// Seconds the "Changes saved." status line remains visible after a save.
 const SAVED_VISIBLE_SECS: u64 = 2;
+
+/// Global low-battery threshold range, percent. Below 5% the warning fires too
+/// late to matter; above 50% it stops meaning "low".
+const LOW_THRESHOLD_RANGE: std::ops::RangeInclusive<u8> = 5..=50;
+
+/// Global poll interval range, seconds. The lower bound guards against waking
+/// a HID device every second, which drains the battery it is meant to monitor.
+const POLL_INTERVAL_RANGE: std::ops::RangeInclusive<u64> = 10..=3600;
 
 struct SettingsApp {
     config: Config,
@@ -27,16 +35,35 @@ impl SettingsApp {
         ui.add_space(4.0);
     }
 
+    /// Copies the fields this window owns onto `target`, leaving everything
+    /// else (in particular `primary_device`, owned by the tray menu) untouched.
+    fn apply_to(&self, target: &mut Config) {
+        target.display_mode = self.config.display_mode;
+        target.tray_mode = self.config.tray_mode;
+        target.shown_devices = self.config.shown_devices.clone();
+        target.notifications_enabled = self.config.notifications_enabled;
+        target.poll_interval_secs = self.config.poll_interval_secs;
+        target.low_threshold = self.config.low_threshold;
+        target.device_overrides = self.config.device_overrides.clone();
+    }
+
     /// Saves the current config and flashes the "Changes saved." status for
     /// `SAVED_VISIBLE_SECS`. Logs on failure; the status line stays unchanged.
+    ///
+    /// Re-reads the on-disk config first and merges only the fields this window
+    /// owns into it: the tray menu also writes `primary_device` on every device
+    /// click, and a stale in-memory snapshot here would silently revert that.
     fn persist(&mut self, ui: &egui::Ui) {
-        match config::save(&self.config) {
+        let mut on_disk = config::load();
+        self.apply_to(&mut on_disk);
+        match config::save(&on_disk) {
             Ok(()) => {
+                self.config = on_disk;
                 self.saved_at = Some(Instant::now());
                 ui.ctx()
                     .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
             }
-            Err(e) => eprintln!("rigbat settings: failed to save config: {e}"),
+            Err(e) => tracing::error!("failed to save config: {e}"),
         }
     }
 
@@ -66,6 +93,79 @@ impl SettingsApp {
                     checked_set.remove(name.as_str());
                 }
                 self.config.shown_devices = shown_after_toggle(&all_names, &checked_set);
+                self.persist(ui);
+            }
+        }
+    }
+
+    /// Renders one CollapsingHeader per discovered device with optional
+    /// threshold/interval overrides. Persists only on release (drag_stopped /
+    /// lost_focus) or checkbox toggle, never on every dragged pixel.
+    fn render_device_overrides(&mut self, ui: &mut egui::Ui) {
+        if self.devices.is_empty() {
+            ui.label(egui::RichText::new("No devices found. Connect a device and reopen.").weak());
+            return;
+        }
+
+        let default_threshold = self.config.low_threshold;
+        let default_interval = self.config.poll_interval_secs;
+        let names: Vec<String> = self.devices.iter().map(|d| d.name.clone()).collect();
+
+        for name in &names {
+            let existing = self.config.device_overrides.get(name).cloned();
+            let mut threshold_on = existing.as_ref().is_some_and(|d| d.low_threshold.is_some());
+            let mut threshold = existing
+                .as_ref()
+                .and_then(|d| d.low_threshold)
+                .unwrap_or(default_threshold);
+            let mut interval_on = existing
+                .as_ref()
+                .is_some_and(|d| d.poll_interval_secs.is_some());
+            let mut interval = existing
+                .as_ref()
+                .and_then(|d| d.poll_interval_secs)
+                .unwrap_or(default_interval);
+
+            let mut save = false;
+            egui::CollapsingHeader::new(name)
+                .id_salt(name)
+                .show(ui, |ui| {
+                    if ui
+                        .checkbox(&mut threshold_on, "Override low battery threshold")
+                        .changed()
+                    {
+                        save = true;
+                    }
+                    if threshold_on {
+                        let resp = ui.add(
+                            egui::Slider::new(&mut threshold, LOW_THRESHOLD_RANGE).suffix("%"),
+                        );
+                        save |= resp.drag_stopped() || resp.lost_focus();
+                    }
+
+                    if ui
+                        .checkbox(&mut interval_on, "Override poll interval")
+                        .changed()
+                    {
+                        save = true;
+                    }
+                    if interval_on {
+                        let resp = ui.add(
+                            egui::Slider::new(&mut interval, POLL_INTERVAL_RANGE).suffix(" s"),
+                        );
+                        save |= resp.drag_stopped() || resp.lost_focus();
+                    }
+                });
+
+            if save {
+                apply_device_override(
+                    &mut self.config.device_overrides,
+                    name,
+                    threshold_on.then_some(threshold),
+                    interval_on.then_some(interval),
+                    default_threshold,
+                    default_interval,
+                );
                 self.persist(ui);
             }
         }
@@ -124,6 +224,40 @@ impl SettingsApp {
             });
         }
 
+        // ── Battery ───────────────────────────────────────────────────────────
+        ui.add_space(16.0);
+        Self::section_header(ui, "Battery");
+
+        let mut threshold = self.config.low_threshold;
+        let resp = ui.add(
+            egui::Slider::new(&mut threshold, LOW_THRESHOLD_RANGE)
+                .text("Low battery threshold")
+                .suffix("%"),
+        );
+        if resp.drag_stopped() || resp.lost_focus() {
+            self.config.low_threshold = threshold;
+            self.persist(ui);
+        }
+
+        let mut interval = self.config.poll_interval_secs;
+        let resp = ui
+            .add(
+                egui::Slider::new(&mut interval, POLL_INTERVAL_RANGE)
+                    .text("Check every")
+                    .suffix(" s"),
+            )
+            .on_hover_text(
+                "Polling more often than this wakes the device constantly and drains its battery.",
+            );
+        if resp.drag_stopped() || resp.lost_focus() {
+            self.config.poll_interval_secs = interval;
+            self.persist(ui);
+        }
+
+        ui.add_space(8.0);
+        ui.strong("Per-device overrides");
+        self.render_device_overrides(ui);
+
         // ── Notifications ─────────────────────────────────────────────────────
         ui.add_space(16.0);
         Self::section_header(ui, "Notifications");
@@ -151,7 +285,7 @@ impl SettingsApp {
                         .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
                 }
                 Err(e) => {
-                    eprintln!("rigbat settings: failed to update autostart: {e}");
+                    tracing::warn!("failed to update autostart: {e}");
                     // Revert the checkbox so it reflects the real filesystem state.
                     self.autostart_enabled = !self.autostart_enabled;
                 }
@@ -185,6 +319,35 @@ impl SettingsApp {
                 }
             });
         });
+    }
+}
+
+/// Applies a device's desired threshold/interval override to `overrides`.
+///
+/// A `None` field means "no override for that field"; a value equal to its
+/// global default is treated the same as `None` so the config never carries a
+/// redundant override. The device's entry is removed once both fields resolve
+/// to "no override", keeping `device_overrides` free of empty placeholders.
+fn apply_device_override(
+    overrides: &mut HashMap<String, DeviceSettings>,
+    name: &str,
+    threshold: Option<u8>,
+    interval: Option<u64>,
+    default_threshold: u8,
+    default_interval: u64,
+) {
+    let threshold = threshold.filter(|&t| t != default_threshold);
+    let interval = interval.filter(|&i| i != default_interval);
+    if threshold.is_none() && interval.is_none() {
+        overrides.remove(name);
+    } else {
+        overrides.insert(
+            name.to_string(),
+            DeviceSettings {
+                poll_interval_secs: interval,
+                low_threshold: threshold,
+            },
+        );
     }
 }
 
@@ -228,8 +391,8 @@ pub fn run() -> anyhow::Result<()> {
     let devices = discover_devices();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([420.0, 400.0])
-            .with_min_inner_size([360.0, 240.0])
+            .with_inner_size([460.0, 560.0])
+            .with_min_inner_size([380.0, 320.0])
             .with_title("rigbat")
             .with_app_id("rigbat"),
         ..Default::default()
@@ -255,6 +418,107 @@ pub fn run() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settings_app_with(config: Config) -> SettingsApp {
+        SettingsApp {
+            config,
+            devices: Vec::new(),
+            saved_at: None,
+            autostart_enabled: false,
+        }
+    }
+
+    #[test]
+    fn apply_to_preserves_primary_device() {
+        let app = settings_app_with(Config {
+            primary_device: None,
+            ..Config::default()
+        });
+        let mut target = Config {
+            primary_device: Some("mouse".to_string()),
+            ..Config::default()
+        };
+        app.apply_to(&mut target);
+        assert_eq!(target.primary_device, Some("mouse".to_string()));
+    }
+
+    #[test]
+    fn apply_to_overwrites_owned_fields() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "mouse".to_string(),
+            DeviceSettings {
+                poll_interval_secs: Some(30),
+                low_threshold: Some(10),
+            },
+        );
+        let app = settings_app_with(Config {
+            display_mode: DisplayMode::PercentInIcon,
+            shown_devices: vec!["mouse".to_string()],
+            notifications_enabled: false,
+            tray_mode: TrayMode::PerDevice,
+            poll_interval_secs: 45,
+            low_threshold: 15,
+            device_overrides: overrides.clone(),
+            ..Config::default()
+        });
+        let mut target = Config::default();
+        app.apply_to(&mut target);
+        assert_eq!(target.display_mode, DisplayMode::PercentInIcon);
+        assert_eq!(target.tray_mode, TrayMode::PerDevice);
+        assert_eq!(target.shown_devices, vec!["mouse".to_string()]);
+        assert!(!target.notifications_enabled);
+        assert_eq!(target.poll_interval_secs, 45);
+        assert_eq!(target.low_threshold, 15);
+        assert_eq!(target.device_overrides, overrides);
+    }
+
+    #[test]
+    fn apply_device_override_sets_both_fields() {
+        let mut overrides = HashMap::new();
+        apply_device_override(&mut overrides, "mouse", Some(10), Some(30), 20, 60);
+        assert_eq!(
+            overrides.get("mouse"),
+            Some(&DeviceSettings {
+                poll_interval_secs: Some(30),
+                low_threshold: Some(10),
+            })
+        );
+    }
+
+    #[test]
+    fn apply_device_override_clearing_removes_key() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "mouse".to_string(),
+            DeviceSettings {
+                poll_interval_secs: Some(30),
+                low_threshold: Some(10),
+            },
+        );
+        apply_device_override(&mut overrides, "mouse", None, None, 20, 60);
+        assert!(!overrides.contains_key("mouse"));
+    }
+
+    #[test]
+    fn apply_device_override_equal_to_default_removes_key() {
+        let mut overrides = HashMap::new();
+        apply_device_override(&mut overrides, "mouse", Some(20), Some(60), 20, 60);
+        assert!(!overrides.contains_key("mouse"));
+    }
+
+    #[test]
+    fn apply_device_override_partial_keeps_only_non_default_field() {
+        let mut overrides = HashMap::new();
+        apply_device_override(&mut overrides, "mouse", Some(15), Some(60), 20, 60);
+        assert_eq!(
+            overrides.get("mouse"),
+            Some(&DeviceSettings {
+                poll_interval_secs: None,
+                low_threshold: Some(15),
+            })
+        );
+    }
 
     #[test]
     fn shown_after_toggle_all_checked_collapses_to_empty() {

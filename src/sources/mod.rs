@@ -15,8 +15,6 @@ pub trait BatterySource: Send {
 /// Transport layer: discovers devices and creates battery sources.
 #[async_trait::async_trait]
 pub trait BatteryBackend: Send + Sync {
-    // used by dedup, Phase E
-    #[allow(dead_code)]
     fn name(&self) -> &'static str;
     async fn discover(&self) -> Vec<Box<dyn BatterySource>>;
 }

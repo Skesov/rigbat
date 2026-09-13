@@ -1,0 +1,6 @@
+# Pins the toolchain channel and the components the project gates on
+# (`cargo fmt`, `cargo clippy`), so every contributor and CI runner uses the
+# same tooling. MSRV is declared separately as `rust-version` in Cargo.toml.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

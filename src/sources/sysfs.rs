@@ -23,8 +23,12 @@ impl SysfsSource {
     pub fn enumerate() -> Vec<SysfsSource> {
         let base = PathBuf::from("/sys/class/power_supply");
 
-        let Ok(entries) = std::fs::read_dir(&base) else {
-            return Vec::new();
+        let entries = match std::fs::read_dir(&base) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!("reading {}: {e}", base.display());
+                return Vec::new();
+            }
         };
 
         let mut sources = Vec::new();
@@ -97,6 +101,7 @@ impl BatterySource for SysfsSource {
 
         let state = parse_status(&status_str);
 
+        tracing::debug!(device = %self.info.name, percent, "sysfs poll");
         Ok(BatteryReading::new(percent, state))
     }
 }

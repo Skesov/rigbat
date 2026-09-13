@@ -430,9 +430,6 @@ fn draw_glyph_keyboard(pixmap: &mut Pixmap, x0: u32, y0: u32, g: u32, color: Col
 ///   stems   : x = x0, x0+g-1, y = y0+1 .. y0+⌊g/2⌋  (left and right earcup)
 fn draw_glyph_headset(pixmap: &mut Pixmap, x0: u32, y0: u32, g: u32, color: Color) {
     let paint = solid_paint(color);
-    if g < 4 {
-        return;
-    }
     // Headband: top row from x+1 to x+g-2 (leave corner pixels transparent)
     let bar_x = x0 + 1;
     let bar_w = g.saturating_sub(2);
@@ -462,9 +459,6 @@ fn draw_glyph_headset(pixmap: &mut Pixmap, x0: u32, y0: u32, g: u32, color: Colo
 ///   bumps : 1px×2px block on left (x=0) and right (x=g) at vertical centre
 fn draw_glyph_controller(pixmap: &mut Pixmap, x0: u32, y0: u32, g: u32, color: Color) {
     let paint = solid_paint(color);
-    if g < 4 {
-        return;
-    }
     let bx = x0 + 1;
     let by = y0 + g / 4;
     let bw = g.saturating_sub(2);
@@ -1117,5 +1111,329 @@ mod tests {
             battery_body_has_opaque(&icons[0], 22),
             "battery body must remain non-transparent outside the corner box"
         );
+    }
+
+    // --- offline + corner glyph (render_offline_battery calls maybe_draw_kind_glyph) ---
+
+    #[test]
+    fn offline_glyph_has_corner_pixels_for_each_drawable_kind() {
+        let kinds = [
+            crate::domain::DeviceKind::Mouse,
+            crate::domain::DeviceKind::Keyboard,
+            crate::domain::DeviceKind::Headset,
+            crate::domain::DeviceKind::Controller,
+        ];
+        for kind in kinds {
+            let renderer = TinySkiaRenderer { sizes: vec![22] };
+            let icons = renderer.render(
+                PrimaryStatus::Offline,
+                Some(kind),
+                &Theme::dark(),
+                DisplayMode::IconOnly,
+            );
+            assert!(!icons.is_empty());
+            assert!(
+                corner_has_opaque(&icons[0], 22),
+                "offline {kind:?} glyph missing at 22px"
+            );
+        }
+    }
+
+    // --- glyph + digit coexistence in PercentOnly / PercentInIcon ---
+    //
+    // `battery_body_has_opaque` asserts opaque pixels outside the corner box —
+    // for these two modes that region is where the centred digit block lives,
+    // so it doubles as the "digit area still has content" check.
+
+    #[test]
+    fn percent_only_with_glyph_has_both_corner_and_digit_content() {
+        let renderer = TinySkiaRenderer { sizes: vec![22] };
+        let icons = renderer.render(
+            PrimaryStatus::Ok { percent: 42 },
+            Some(crate::domain::DeviceKind::Mouse),
+            &Theme::dark(),
+            DisplayMode::PercentOnly,
+        );
+        assert!(!icons.is_empty());
+        assert!(
+            corner_has_opaque(&icons[0], 22),
+            "PercentOnly: glyph missing from corner"
+        );
+        assert!(
+            battery_body_has_opaque(&icons[0], 22),
+            "PercentOnly: digit block missing outside the corner box"
+        );
+    }
+
+    #[test]
+    fn percent_in_icon_with_glyph_has_both_corner_and_digit_content() {
+        let renderer = TinySkiaRenderer { sizes: vec![22] };
+        let icons = renderer.render(
+            PrimaryStatus::Ok { percent: 42 },
+            Some(crate::domain::DeviceKind::Mouse),
+            &Theme::dark(),
+            DisplayMode::PercentInIcon,
+        );
+        assert!(!icons.is_empty());
+        assert!(
+            corner_has_opaque(&icons[0], 22),
+            "PercentInIcon: glyph missing from corner"
+        );
+        assert!(
+            battery_body_has_opaque(&icons[0], 22),
+            "PercentInIcon: digit block missing outside the corner box"
+        );
+    }
+
+    // --- Fix 4 regression: draw_glyph_headset/draw_glyph_controller no longer
+    // guard `g < 4`; the sole caller (maybe_draw_kind_glyph) always computes
+    // glyph = max(6, ...), but confirm a canvas smaller than the glyph box
+    // still cannot panic. ---
+
+    // --- structural invariants (T16): assert what the icon draws, not just its size ---
+    //
+    // Premultiplied-alpha handling: `Pixmap` stores premultiplied RGBA and
+    // `icon_to_rgba` does not un-premultiply. For the fully opaque theme
+    // colours (alpha 255) that is a no-op, but `Theme::offline` (alpha 180)
+    // is stored premultiplied. Rather than un-premultiply the rendered
+    // buffer (which would need to replicate tiny-skia's internal rounding
+    // to avoid off-by-one false negatives), these tests premultiply the
+    // *expected* theme colour with the same tiny-skia API the renderer
+    // itself uses (`Color::premultiply().to_color_u8()`) and compare against
+    // that. This is an equality check against the library's own conversion,
+    // not a hardcoded byte value.
+
+    /// Distinct opaque `(r,g,b,a)` colours present in the icon, in the same
+    /// (premultiplied) byte representation the pixmap stores.
+    fn opaque_colors(icon: &ksni::Icon) -> std::collections::HashSet<(u8, u8, u8, u8)> {
+        icon_to_rgba(icon)
+            .chunks_exact(4)
+            .filter(|px| px[3] != 0)
+            .map(|px| (px[0], px[1], px[2], px[3]))
+            .collect()
+    }
+
+    /// Number of opaque pixels in the icon.
+    fn opaque_pixel_count(icon: &ksni::Icon) -> usize {
+        icon_to_rgba(icon)
+            .chunks_exact(4)
+            .filter(|px| px[3] != 0)
+            .count()
+    }
+
+    /// A straight-alpha theme colour, converted to the premultiplied bytes it
+    /// is stored as once drawn — via the same tiny-skia conversion the
+    /// renderer's `solid_paint` goes through.
+    fn theme_color_as_drawn(c: [u8; 4]) -> (u8, u8, u8, u8) {
+        let p = Color::from_rgba8(c[0], c[1], c[2], c[3])
+            .premultiply()
+            .to_color_u8();
+        (p.red(), p.green(), p.blue(), p.alpha())
+    }
+
+    #[test]
+    fn ok_status_uses_normal_and_not_low_or_charging() {
+        let renderer = TinySkiaRenderer { sizes: vec![22] };
+        let theme = Theme::dark();
+        let icons = renderer.render(
+            PrimaryStatus::Ok { percent: 80 },
+            None,
+            &theme,
+            DisplayMode::IconOnly,
+        );
+        let colors = opaque_colors(&icons[0]);
+        assert!(
+            colors.contains(&theme_color_as_drawn(theme.normal)),
+            "Ok must render using theme.normal"
+        );
+        assert!(
+            !colors.contains(&theme_color_as_drawn(theme.low)),
+            "Ok must not contain theme.low"
+        );
+        assert!(
+            !colors.contains(&theme_color_as_drawn(theme.charging)),
+            "Ok must not contain theme.charging"
+        );
+    }
+
+    #[test]
+    fn low_status_uses_low_and_not_normal() {
+        let renderer = TinySkiaRenderer { sizes: vec![22] };
+        let theme = Theme::dark();
+        let icons = renderer.render(
+            PrimaryStatus::Low { percent: 10 },
+            None,
+            &theme,
+            DisplayMode::IconOnly,
+        );
+        let colors = opaque_colors(&icons[0]);
+        assert!(
+            colors.contains(&theme_color_as_drawn(theme.low)),
+            "Low must render using theme.low"
+        );
+        assert!(
+            !colors.contains(&theme_color_as_drawn(theme.normal)),
+            "Low must not contain theme.normal"
+        );
+    }
+
+    #[test]
+    fn charging_status_uses_charging_color() {
+        let renderer = TinySkiaRenderer { sizes: vec![22] };
+        let theme = Theme::dark();
+        let icons = renderer.render(
+            PrimaryStatus::Charging { percent: 40 },
+            None,
+            &theme,
+            DisplayMode::IconOnly,
+        );
+        let colors = opaque_colors(&icons[0]);
+        assert!(
+            colors.contains(&theme_color_as_drawn(theme.charging)),
+            "Charging must render using theme.charging"
+        );
+    }
+
+    #[test]
+    fn offline_status_uses_offline_color() {
+        let renderer = TinySkiaRenderer { sizes: vec![22] };
+        let theme = Theme::dark();
+        let icons = renderer.render(PrimaryStatus::Offline, None, &theme, DisplayMode::IconOnly);
+        let colors = opaque_colors(&icons[0]);
+        assert!(
+            colors.contains(&theme_color_as_drawn(theme.offline)),
+            "Offline must render using theme.offline"
+        );
+    }
+
+    #[test]
+    fn fill_pixel_count_increases_with_percent() {
+        let renderer = TinySkiaRenderer { sizes: vec![22] };
+        let theme = Theme::dark();
+        let count_for = |percent: u8| {
+            let icons = renderer.render(
+                PrimaryStatus::Ok { percent },
+                None,
+                &theme,
+                DisplayMode::IconOnly,
+            );
+            opaque_pixel_count(&icons[0])
+        };
+
+        let c0 = count_for(0);
+        let c50 = count_for(50);
+        let c100 = count_for(100);
+        assert!(
+            c0 < c50,
+            "0% must have fewer opaque pixels than 50% ({c0} vs {c50})"
+        );
+        assert!(
+            c50 < c100,
+            "50% must have fewer opaque pixels than 100% ({c50} vs {c100})"
+        );
+    }
+
+    #[test]
+    fn percent_only_digits_are_value_sensitive() {
+        let renderer = TinySkiaRenderer { sizes: vec![22] };
+        let theme = Theme::dark();
+        let render = |percent: u8| {
+            renderer
+                .render(
+                    PrimaryStatus::Ok { percent },
+                    None,
+                    &theme,
+                    DisplayMode::PercentOnly,
+                )
+                .remove(0)
+        };
+
+        let a1 = render(42);
+        let a2 = render(42);
+        let b = render(87);
+        assert_eq!(
+            a1.data, a2.data,
+            "PercentOnly: rendering the same value twice must be identical"
+        );
+        assert_ne!(
+            a1.data, b.data,
+            "PercentOnly: rendering a different value must change the buffer"
+        );
+    }
+
+    #[test]
+    fn percent_in_icon_digits_are_value_sensitive() {
+        let renderer = TinySkiaRenderer { sizes: vec![22] };
+        let theme = Theme::dark();
+        let render = |percent: u8| {
+            renderer
+                .render(
+                    PrimaryStatus::Ok { percent },
+                    None,
+                    &theme,
+                    DisplayMode::PercentInIcon,
+                )
+                .remove(0)
+        };
+
+        let a1 = render(42);
+        let a2 = render(42);
+        let b = render(87);
+        assert_eq!(
+            a1.data, a2.data,
+            "PercentInIcon: rendering the same value twice must be identical"
+        );
+        assert_ne!(
+            a1.data, b.data,
+            "PercentInIcon: rendering a different value must change the buffer"
+        );
+    }
+
+    #[test]
+    fn offline_is_visually_distinct_from_empty_battery() {
+        let renderer = TinySkiaRenderer { sizes: vec![22] };
+        let theme = Theme::dark();
+        let offline = renderer.render(PrimaryStatus::Offline, None, &theme, DisplayMode::IconOnly);
+        let empty = renderer.render(
+            PrimaryStatus::Ok { percent: 0 },
+            None,
+            &theme,
+            DisplayMode::IconOnly,
+        );
+        assert_ne!(
+            offline[0].data, empty[0].data,
+            "offline (crossed battery) must differ from an empty online battery"
+        );
+    }
+
+    #[test]
+    fn ok_status_theme_reaches_the_pixels() {
+        let renderer = TinySkiaRenderer { sizes: vec![22] };
+        let status = PrimaryStatus::Ok { percent: 50 };
+        let dark = renderer.render(status, None, &Theme::dark(), DisplayMode::IconOnly);
+        let light = renderer.render(status, None, &Theme::light(), DisplayMode::IconOnly);
+        assert_ne!(
+            dark[0].data, light[0].data,
+            "Ok uses theme.normal, which differs between dark and light themes"
+        );
+    }
+
+    #[test]
+    fn headset_and_controller_glyphs_do_not_panic_on_1px_and_2px_canvas() {
+        for size in [1, 2] {
+            for kind in [
+                crate::domain::DeviceKind::Headset,
+                crate::domain::DeviceKind::Controller,
+            ] {
+                let renderer = TinySkiaRenderer { sizes: vec![size] };
+                let icons = renderer.render(
+                    PrimaryStatus::Ok { percent: 50 },
+                    Some(kind),
+                    &Theme::dark(),
+                    DisplayMode::IconOnly,
+                );
+                assert_eq!(icons.len(), 1, "size {size}: {kind:?} did not render");
+            }
+        }
     }
 }
