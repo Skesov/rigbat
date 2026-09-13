@@ -372,8 +372,28 @@ fn spawn_source_task(
     let mut waiter = ctx.refresh.waiter();
 
     let handle = tokio::spawn(async move {
+        // Counts failures in a row so a permanently absent device (a mouse left
+        // switched off) reports its reason once at `warn` instead of every interval
+        // forever. Local to the task: the registry's own failure count drives
+        // presence, not diagnostics, and is not visible from here.
+        let mut failures_in_a_row: u32 = 0;
+
         loop {
-            let reading = src.poll().await.ok();
+            let reading = match src.poll().await {
+                Ok(r) => {
+                    failures_in_a_row = 0;
+                    Some(r)
+                }
+                Err(e) => {
+                    if failures_in_a_row == 0 {
+                        tracing::warn!(device = %name, "poll failed: {e:#}");
+                    } else {
+                        tracing::debug!(device = %name, failures = failures_in_a_row, "poll failed: {e:#}");
+                    }
+                    failures_in_a_row = failures_in_a_row.saturating_add(1);
+                    None
+                }
+            };
             if tx.send((id.clone(), reading)).await.is_err() {
                 return;
             }

@@ -15,7 +15,16 @@ pub async fn poll_once(
 
     for mut s in sources {
         set.spawn(async move {
-            let reading = s.poll().await.ok();
+            let reading = match s.poll().await {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    // `{e:#}` prints the whole anyhow context chain. Without this the
+                    // reason a device reads as offline — no permission, a STALLed
+                    // write, a D-Bus error, a timeout — is indistinguishable to a user.
+                    tracing::warn!(device = %s.device().name, "poll failed: {e:#}");
+                    None
+                }
+            };
             (s.device().clone(), reading)
         });
     }

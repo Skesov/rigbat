@@ -172,21 +172,26 @@ fn init_logging(invocation: &Invocation) {
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
-/// The two logging defaults an `Invocation` maps to: the daemons (`tray`,
-/// `settings`) run chatty by default, one-shot CLI output stays quiet.
+/// The logging defaults an `Invocation` maps to: the daemons (`tray`, `settings`)
+/// run chatty, one-shot CLI output stays quiet, and the repeatedly-polled
+/// `--waybar` mode stays quieter still.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogProfile {
     Daemon,
     OneShot,
+    /// `--waybar` is re-invoked by the bar every few seconds, and each process
+    /// exits with no state to debounce against, so an absent device would emit a
+    /// `warn` line per tick indefinitely. `RIGBAT_LOG` still overrides.
+    Polled,
 }
 
 impl From<&Invocation> for LogProfile {
     fn from(invocation: &Invocation) -> Self {
         match invocation {
             Invocation::Tray | Invocation::Settings => LogProfile::Daemon,
+            Invocation::Waybar => LogProfile::Polled,
             Invocation::List { .. }
             | Invocation::Json
-            | Invocation::Waybar
             | Invocation::Help
             | Invocation::Version
             | Invocation::Unknown(_)
@@ -201,6 +206,7 @@ fn default_filter_level(profile: LogProfile) -> &'static str {
     match profile {
         LogProfile::Daemon => "info",
         LogProfile::OneShot => "warn",
+        LogProfile::Polled => "error",
     }
 }
 
@@ -391,6 +397,22 @@ mod tests {
         assert_eq!(
             default_filter_level(LogProfile::from(&Invocation::Json)),
             "warn"
+        );
+    }
+
+    #[test]
+    fn default_filter_level_waybar_is_error() {
+        assert_eq!(
+            default_filter_level(LogProfile::from(&Invocation::Waybar)),
+            "error"
+        );
+    }
+
+    #[test]
+    fn rigbat_log_still_overrides_the_waybar_default() {
+        assert_eq!(
+            resolve_filter_directive(LogProfile::Polled, Some("debug"), None),
+            "debug"
         );
     }
 
