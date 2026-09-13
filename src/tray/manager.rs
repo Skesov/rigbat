@@ -136,8 +136,6 @@ fn resolve_for(key: Option<&str>, state: &TrayState, cfg: &Config) -> Option<Res
 // RigbatTray — unified SNI item for both aggregate and per-device icons
 // ---------------------------------------------------------------------------
 
-const MENU_HINT: &str = "Click a device to feature it";
-
 pub struct RigbatTray {
     /// `Some(name)` = per-device icon; `None` = aggregate/primary icon.
     pub key: Option<String>,
@@ -248,34 +246,15 @@ impl Tray for RigbatTray {
                 ..ksni::menu::StandardItem::default()
             }));
         } else {
-            items.push(MenuItem::Standard(ksni::menu::StandardItem {
-                label: MENU_HINT.into(),
-                enabled: false,
-                ..ksni::menu::StandardItem::default()
-            }));
-            for (dev_name, label, icon_name) in rows {
-                // Read-modify-write: load the latest on-disk config and change only
-                // primary_device, so other fields set by the settings window are not
-                // clobbered. Concurrent edits while the settings window is open can
-                // cause a lost-update on primary_device — rare and low-severity.
-                let name = dev_name.clone();
+            // Device rows report status; they are not controls. Clicking one used
+            // to write `primary_device`, which only the aggregate icon consumes —
+            // in TrayMode::PerDevice there is no aggregate icon, so the click wrote
+            // to disk and changed nothing a user could see.
+            for (_dev_name, label, icon_name) in rows {
                 items.push(MenuItem::Standard(ksni::menu::StandardItem {
                     label,
                     icon_name,
-                    enabled: true,
-                    activate: Box::new(move |_: &mut Self| {
-                        let mut cfg = crate::config::load();
-                        cfg.primary_device = if cfg.primary_device.as_deref() == Some(name.as_str())
-                        {
-                            // Clicking the featured device returns to automatic.
-                            None
-                        } else {
-                            Some(name.clone())
-                        };
-                        if let Err(e) = crate::config::save(&cfg) {
-                            tracing::error!("failed to save tray device selection: {e}");
-                        }
-                    }),
+                    enabled: false,
                     ..ksni::menu::StandardItem::default()
                 }));
             }
@@ -293,11 +272,22 @@ impl Tray for RigbatTray {
         items.push(MenuItem::Standard(ksni::menu::StandardItem {
             label: "Settings\u{2026}".into(),
             activate: Box::new(|_: &mut Self| match std::env::current_exe() {
-                Ok(exe) => {
-                    if let Err(e) = std::process::Command::new(exe).arg("settings").spawn() {
-                        tracing::error!("failed to launch settings window: {e}");
+                Ok(exe) => match std::process::Command::new(exe).arg("settings").spawn() {
+                    // `Child` has no `Drop` that reaps, so dropping the handle
+                    // leaves the exited settings process as a zombie for the
+                    // tray's whole lifetime — one per click. Reap it on a
+                    // throwaway thread, which lives exactly as long as the
+                    // window does. A blocking wait must not run on the tray's
+                    // own thread, and this closure is not on the tokio runtime.
+                    Ok(mut child) => {
+                        std::thread::spawn(move || {
+                            if let Err(e) = child.wait() {
+                                tracing::warn!("settings process could not be reaped: {e}");
+                            }
+                        });
                     }
-                }
+                    Err(e) => tracing::error!("failed to launch settings window: {e}"),
+                },
                 Err(e) => tracing::error!("cannot find own executable: {e}"),
             }),
             ..ksni::menu::StandardItem::default()
@@ -417,19 +407,12 @@ pub async fn run(
 mod tests {
     use std::time::Instant;
 
-    use super::{MENU_HINT, desired_keys, featured_name, resolve_for, sanitize, select_featured};
+    use super::{desired_keys, featured_name, resolve_for, sanitize, select_featured};
     use crate::app::supervisor::TrayState;
     use crate::config::{Config, TrayMode};
     use crate::domain::{
         BatteryReading, ChargeState, DeviceInfo, DeviceKind, DeviceState, Presence, PrimaryStatus,
     };
-
-    // --- menu hint ------------------------------------------------------------
-
-    #[test]
-    fn menu_hint_text_is_exact() {
-        assert_eq!(MENU_HINT, "Click a device to feature it");
-    }
 
     // --- sanitize -----------------------------------------------------------
 
