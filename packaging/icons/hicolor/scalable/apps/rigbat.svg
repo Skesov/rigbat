@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- Battery body: rounded rect, matching the tray icon's outline geometry
+       (src/tray/icon.rs battery_geometry: body ~0.76 width, nub on the right). -->
+  <rect x="2" y="6" width="16" height="12" rx="2.5" ry="2.5" fill="#4c566a"/>
+  <!-- Terminal nub. -->
+  <rect x="19" y="9.5" width="2.6" height="5" rx="0.8" ry="0.8" fill="#4c566a"/>
+  <!-- Charge level, drawn as a lighter inset bar so the icon reads as a
+       battery rather than a plain rounded box at small sizes. -->
+  <rect x="4.5" y="8.5" width="9" height="7" rx="1" ry="1" fill="#eceff4"/>
+</svg>

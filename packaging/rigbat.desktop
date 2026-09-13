@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=rigbat
+Comment=Battery monitor for gaming peripherals
+Exec=rigbat settings
+Icon=rigbat
+Terminal=false
+Categories=System;HardwareSettings;
+StartupWMClass=rigbat
+NoDisplay=false

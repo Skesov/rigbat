@@ -1,0 +1,19 @@
+# udev rule granting the logged-in user read/write access to the USB HID devices
+# rigbat supports, via systemd-logind's per-seat ACL mechanism (TAG+="uaccess").
+#
+# One line is needed per supported device. When adding a device to a vendor
+# backend's DEVICES table (see CONTRIBUTING.md), add the matching
+# ATTRS{idVendor}/ATTRS{idProduct} line here too.
+#
+# Filename note: this file must sort lexically *before*
+# /usr/lib/udev/rules.d/73-seat-late.rules — that file runs the builtin which
+# actually applies the ACL for devices tagged "uaccess", and udev processes
+# all rules files in one lexically-sorted sequence regardless of directory.
+# A rule numbered 73 or higher would add the tag too late to take effect.
+# Hence "70-", not "99-".
+#
+# Bluetooth and sysfs (kernel power_supply) devices need no rule here — only
+# USB HID (hidraw) access is gated by permissions.
+
+# SteelSeries Aerox 5 Wireless (vendor 0x1038, product 0x1852)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1852", TAG+="uaccess"

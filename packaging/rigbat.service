@@ -25,6 +25,54 @@ Type=simple
 ExecStart=%h/.cargo/bin/rigbat tray
 Restart=on-failure
 RestartSec=2
+# Uncomment to raise log verbosity (see journalctl --user -u rigbat -f).
+#Environment=RIGBAT_LOG=debug
+
+# --- Hardening -------------------------------------------------------------
+# The daemon needs: /dev/hidraw* (SteelSeries HID), the session AND system
+# D-Bus buses (BlueZ is on the system bus), ~/.config/rigbat (read/write) and
+# ~/.config/autostart (write, via the settings toggle), and the ability to
+# spawn `rigbat settings` as a GUI child with access to the Wayland/X11
+# socket and the GPU. Directives that would break any of that (PrivateDevices,
+# ProtectHome, MemoryDenyWriteExecute, PrivateNetwork, a restrictive
+# SystemCallFilter, ProtectSystem=strict) are deliberately omitted.
+
+# Blocks privilege escalation via setuid/setgid/file capabilities. Does not
+# touch device, D-Bus, or GUI access.
+NoNewPrivileges=true
+# Gives the process a private /tmp; rigbat only writes under ~/.config, so
+# this affects nothing rigbat uses.
+PrivateTmp=true
+# Read-only /usr, /boot, /efi, /etc. `full` (not `strict`) so it does not
+# touch /home, /run, or /dev — /run holds the Wayland/D-Bus sockets and /dev
+# holds hidraw, both required.
+ProtectSystem=full
+# Blocks writes to /proc/sys, /sys, etc. rigbat never tunes kernel state.
+ProtectKernelTunables=true
+# Blocks access to the kernel log ring buffer (/dev/kmsg, /proc/kmsg).
+ProtectKernelLogs=true
+# Makes /sys/fs/cgroup read-only. rigbat does not manage cgroups.
+ProtectControlGroups=true
+# Blocks writes to the hardware/system clock. rigbat never sets the time.
+ProtectClock=true
+# Blocks acquiring realtime scheduling (SCHED_FIFO/RR/DEADLINE).
+RestrictRealtime=true
+# Blocks creating SUID/SGID files. rigbat never does.
+RestrictSUIDSGID=true
+# Blocks creating new Linux namespaces from within the unit's processes.
+# Does not affect the D-Bus session/system bus (AF_UNIX, not a namespace).
+RestrictNamespaces=true
+# Locks the process personality (execution domain). No legitimate use here.
+LockPersonality=true
+# Tightens permissions on files rigbat creates (~/.config/rigbat/config.json)
+# to owner-only instead of the inherited 0022.
+UMask=0077
+# rigbat never opens an AF_INET/AF_INET6 socket (all sources are HID/sysfs/
+# D-Bus); deny all IP traffic. Does not affect AF_UNIX (D-Bus, Wayland/X11).
+IPAddressDeny=any
+# Rejects non-native syscall ABIs (e.g. 32-bit compat) on this native amd64
+# binary. Does not remove or filter any specific syscall by name.
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=graphical-session.target
