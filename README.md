@@ -5,9 +5,9 @@ System tray battery monitor for gaming peripherals.
 ## What it does
 
 - Shows battery level of connected peripherals (mice, keyboards, headsets, controllers) in the system tray
-- Displays a single tray icon that reflects the charge state of the primary device
+- Displays one tray icon for every device, or a single icon for one chosen device
 - Automatically discovers connected devices on startup — no manual configuration required
-- Supports multiple devices simultaneously; switch the primary device from the tray menu
+- Supports multiple devices simultaneously; choose which ones appear in the settings window
 - Sends desktop notifications when battery is low
 - Works with wired, wireless, and Bluetooth devices
 
@@ -43,7 +43,7 @@ written is not picked up until the lockfile is updated. Run modes:
 rigbat            # one-shot battery table
 rigbat --wide     # one-shot table with transport and locator columns
 rigbat --json     # machine-readable
-rigbat --waybar   # one JSON line for a waybar custom module — see Status bars below
+rigbat --waybar   # long-lived waybar custom module (see Status bars below)
 rigbat tray       # tray daemon
 rigbat settings   # settings window
 rigbat --help     # show usage (-h)
@@ -100,14 +100,27 @@ Waybar/Polybar instead of an SNI host.
 
 ### Waybar
 
-`rigbat --waybar` prints one `custom` module JSON line describing the featured device — the
-same device the aggregate tray icon shows. Add to `~/.config/waybar/config`:
+`rigbat --waybar` is a long-lived process: it prints one `custom` module JSON line on startup
+and again on every state change, describing the featured device — the same device the aggregate
+tray icon shows. Add to `~/.config/waybar/config`, **omitting** `interval` — a script with no
+`interval` and no `signal` is expected to loop and push updates itself:
+
+```jsonc
+"custom/rigbat": {
+  "exec": "rigbat --waybar",
+  "return-type": "json"
+}
+```
+
+Setting `interval: 0` does **not** mean continuous — since Waybar issue #4522 (closed October
+2025), `interval: 0` disables polling entirely instead. If the process ever exits (crash, restart),
+add `restart-interval` so Waybar respawns it:
 
 ```jsonc
 "custom/rigbat": {
   "exec": "rigbat --waybar",
   "return-type": "json",
-  "interval": 30
+  "restart-interval": 30
 }
 ```
 
@@ -119,9 +132,11 @@ same device the aggregate tray icon shows. Add to `~/.config/waybar/config`:
 }
 ```
 
-A device may carry a retained reading while unreachable (asleep, switched off, out of range).
-`--waybar` cannot see that history — it runs one poll and exits — so a failed poll always maps to
-`offline` with no `percentage` key, rather than guessing at a stale value.
+`--waybar` retains the last reading of a device that goes unreachable (asleep, switched off, out
+of range), the same as the tray: the tooltip shows it with its age (e.g. "mouse: 88% offline
+(5m ago)") instead of losing the value. The featured device's own `text`/`class`/`percentage`
+still report a plain `offline` with no `percentage` key while it is unreachable — only the
+tooltip carries the retained value.
 
 ### Polybar
 
@@ -142,8 +157,8 @@ message text rather than as journald priorities:
 journalctl --user -u rigbat -f
 ```
 
-Raise verbosity with `RIGBAT_LOG` (falls back to `RUST_LOG`), default `info`
-for `tray`/`settings` and `warn` for the one-shot CLI modes:
+Raise verbosity with `RIGBAT_LOG` (falls back to `RUST_LOG`), default `info` for the daemons
+(`tray`, `settings`, `--waybar`) and `warn` for the one-shot CLI modes (`list`, `--json`):
 
 ```sh
 RIGBAT_LOG=debug rigbat tray

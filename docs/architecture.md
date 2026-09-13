@@ -9,7 +9,10 @@ data flows through each of the three surfaces. For build/test/lint and conventio
 rigbat reads battery levels from peripherals and presents them. One binary, three surfaces over
 a shared headless core:
 
-- **CLI** — `rigbat list` / `--json` / `--wide` / `--waybar`: a one-shot poll printed and exit.
+- **CLI** — `rigbat list` / `--json` / `--wide`: a one-shot poll printed and exit. `--waybar` is
+  the exception: it holds its own `Supervisor` and runs continuously, printing one line per
+  state change, so a retained reading survives a device going unreachable the same way it does
+  in the tray.
 - **Tray** — `rigbat tray`: a long-running StatusNotifierItem daemon.
 - **Settings** — `rigbat settings`: a small GUI window, launched as a separate process.
 
@@ -30,7 +33,7 @@ reverse.
           ▲
         discovery         registry of backends + discover_all()
           ▲
-          app             poll_once (CLI) and Supervisor (tray): orchestration
+          app             poll_once (list/--json) and Supervisor (tray, --waybar): orchestration
           ▲
    cli / tray / settings  output + input adapters (table/json, ksni icons, egui window)
    appearance / session / notifications / config / autostart   side services
@@ -98,6 +101,14 @@ flows out through channels.
 ```text
 CLI:       main → discover_all() → poll_once() (poll all in parallel) → cli::print_*  → exit
 
+Waybar:    main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶ run_waybar loop
+                                                                    │ cli::render_waybar_line,
+                                                                    │ printed only when the line
+                                                                    │ changes, no exit
+           session (logind PrepareForSleep) ──RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
+           bluez D-Bus signals (debounced) ────RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
+           config file watch ──watch<Config>──▶ loop (live primary_device/shown_devices)
+
 Tray:      main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶ tray::manager::run
                                                                     │ reconciles ksni items,
                                                                     │ renders icons (IconRenderer)
@@ -150,9 +161,9 @@ AT-SPI/zbus bridge would panic without a runtime). It communicates with the tray
 
 Diagnostics go through `tracing` to **stderr**; `println!` is reserved for CLI output on stdout,
 so `rigbat --json` stays machine-parseable at any verbosity. The filter comes from `RIGBAT_LOG`,
-falling back to `RUST_LOG`, defaulting to `warn` for the one-shot CLI modes and `info` for
-`tray` and `settings`. Under systemd the journal captures stderr directly, so no journald
-transport is linked in.
+falling back to `RUST_LOG`, defaulting to `warn` for the one-shot CLI modes (`list`, `--json`)
+and `info` for the daemons (`tray`, `settings`, `--waybar`). Under systemd the journal captures
+stderr directly, so no journald transport is linked in.
 
 Level policy: `error` when the user loses a feature and must act; `warn` for degraded but
 self-healing or optional behaviour (portal, logind, notifications or the config watcher being

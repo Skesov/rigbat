@@ -7,7 +7,7 @@ System tray battery monitor for gaming peripherals (Linux), written in Rust.
 Working: `rigbat list` / `--json` / `--wide` / `--waybar` / `tray` / `settings`. Sources: sysfs,
 bluez, steelseries (via `discovery::discover_all`, re-discovered live so hotplugged devices
 appear; BlueZ signals debounced). Devices retain their last reading across drops (`Presence`:
-Online/Unreachable/Disconnected). Tray: left-click menu with a hint, device-type corner glyph,
+Online/Unreachable/Disconnected). Tray: left-click menu listing device status, device-type glyph,
 light/dark theme, display modes, time-remaining estimate, low-battery notifications, separate
 settings window, per-device poll intervals/thresholds, config persistence. Diagnostics via
 `tracing`. Packaging: udev rule, desktop entry, systemd user service.
@@ -30,7 +30,9 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
 - `rigbat` / `rigbat list` — one-shot table of charge levels (`app::poll_once`); `--wide` adds
   transport/locator columns.
 - `rigbat --json` — machine-readable output.
-- `rigbat --waybar` — one waybar custom-module JSON line for the featured device.
+- `rigbat --waybar` — long-lived waybar custom-module: holds its own `Supervisor` and prints one
+  JSON line for the featured device on startup and on every state change (run with `interval`
+  omitted, not `tray`'s icon/notifications).
 - `rigbat tray` — SNI daemon (`Supervisor` + `ksni`), the long-running mode.
 - `rigbat settings` — GTK-free eframe/egui settings window in a SEPARATE process with no tokio
   runtime (the tray spawns it). It edits `config.json`; the tray applies changes via the file watch.
