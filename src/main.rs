@@ -17,7 +17,7 @@ rigbat — system tray battery monitor for peripherals
 Usage:
   rigbat [list] [--wide]   Print a one-shot battery table (default)
   rigbat --json            Print battery data as JSON
-  rigbat --waybar          Print one waybar custom-module JSON line (featured device)
+  rigbat --waybar          Stream waybar custom-module JSON lines (featured device)
   rigbat tray              Run the system tray daemon
   rigbat settings          Open the settings window
 
@@ -172,24 +172,19 @@ fn init_logging(invocation: &Invocation) {
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
-/// The logging defaults an `Invocation` maps to: the daemons (`tray`, `settings`)
-/// run chatty, one-shot CLI output stays quiet, and the repeatedly-polled
-/// `--waybar` mode stays quieter still.
+/// The logging defaults an `Invocation` maps to: the daemons (`tray`,
+/// `settings`, and now the long-lived `--waybar` module) run chatty, one-shot
+/// CLI output stays quiet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogProfile {
     Daemon,
     OneShot,
-    /// `--waybar` is re-invoked by the bar every few seconds, and each process
-    /// exits with no state to debounce against, so an absent device would emit a
-    /// `warn` line per tick indefinitely. `RIGBAT_LOG` still overrides.
-    Polled,
 }
 
 impl From<&Invocation> for LogProfile {
     fn from(invocation: &Invocation) -> Self {
         match invocation {
-            Invocation::Tray | Invocation::Settings => LogProfile::Daemon,
-            Invocation::Waybar => LogProfile::Polled,
+            Invocation::Tray | Invocation::Settings | Invocation::Waybar => LogProfile::Daemon,
             Invocation::List { .. }
             | Invocation::Json
             | Invocation::Help
@@ -206,7 +201,6 @@ fn default_filter_level(profile: LogProfile) -> &'static str {
     match profile {
         LogProfile::Daemon => "info",
         LogProfile::OneShot => "warn",
-        LogProfile::Polled => "error",
     }
 }
 
@@ -238,6 +232,10 @@ async fn async_main(invocation: Invocation) {
         run_tray().await;
         return;
     }
+    if invocation == Invocation::Waybar {
+        run_waybar().await;
+        return;
+    }
 
     let sources = discovery::discover_all().await;
 
@@ -245,9 +243,6 @@ async fn async_main(invocation: Invocation) {
 
     if invocation == Invocation::Json {
         cli::print_json(&rows);
-    } else if invocation == Invocation::Waybar {
-        let cfg = crate::config::load();
-        cli::print_waybar(&rows, &cfg);
     } else if opts.wide {
         cli::print_table_wide(&rows);
     } else {
@@ -285,6 +280,114 @@ async fn run_tray() {
     // dropped sender makes every source task's config_rx.changed() resolve
     // with an error instead of waiting, spinning that task's select loop.
     tray::manager::run(rx, theme_rx, config_tx.subscribe(), refresh).await;
+}
+
+/// Runs `--waybar` as a long-lived process instead of a one-shot poll, so a
+/// sleeping Bluetooth peripheral keeps showing its retained reading instead
+/// of `offline` on every bar tick — "If no interval or signal is defined, it
+/// is assumed that the out script loops itself" (`waybar-custom(5)`).
+///
+/// Modeled on `run_tray`, minus the icon/appearance/notifications stack: the
+/// bar has no icon to render, and the tray process already owns low-battery
+/// notifications, so spawning a second notifier here would double them up.
+/// How long `run_waybar` waits for a first battery reading before printing
+/// whatever state it has.
+const FIRST_SWEEP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+// See cli::print_json: the waybar module line is program output on stdout.
+#[allow(clippy::print_stdout)]
+fn print_line(line: &str) {
+    println!("{line}");
+}
+
+async fn run_waybar() {
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "starting rigbat waybar module"
+    );
+
+    let config = crate::config::load();
+    let (config_tx, config_rx) = tokio::sync::watch::channel(config);
+    crate::config::watch_file(config_tx.clone());
+
+    let (mut rx, refresh) = app::supervisor::Supervisor::spawn(config_rx);
+    crate::session::watch_resume(refresh.clone());
+    crate::sources::bluez::watch_events(refresh.clone());
+
+    // Separate from the receiver Supervisor::spawn consumed, so a
+    // primary_device/shown_devices edit is picked up even between two
+    // TrayState publications.
+    let mut cfg_rx = config_tx.subscribe();
+
+    // `Supervisor::spawn` publishes an empty `TrayState` before any backend has
+    // run, so printing straight away puts a false "no devices" frame on the bar
+    // until the first sweep lands. A device that has been discovered but not yet
+    // polled is indistinguishable in `TrayState` from one that is genuinely
+    // unreachable — both carry no reading — so waiting for the first publication
+    // is not enough: that one announces the roster, not its charge.
+    //
+    // Wait for a reading, bounded: an all-offline roster never produces one, and
+    // a module with no label at all is worse than a late one. An empty roster is
+    // already final and does not wait.
+    let _ = tokio::time::timeout(FIRST_SWEEP_WAIT, async {
+        // The value already in the channel is the placeholder the supervisor
+        // published before discovery ran; an empty roster there means "not yet",
+        // not "none". Take the first real publication before judging.
+        if rx.changed().await.is_err() {
+            return;
+        }
+        loop {
+            {
+                let state = rx.borrow();
+                let cfg = cfg_rx.borrow();
+                // Judge only the devices this config actually renders. A roster
+                // can carry the same mouse twice (sysfs and Bluetooth), and the
+                // hidden copy answering first says nothing about the featured
+                // one — the frame would still be built from an unpolled device.
+                let mut shown = state
+                    .devices
+                    .iter()
+                    .filter(|d| cfg.is_shown(&d.info.name))
+                    .peekable();
+                let settled = shown.peek().is_none() || shown.all(|d| d.last_reading.is_some());
+                if settled {
+                    return;
+                }
+            }
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    })
+    .await;
+
+    let mut last_line: Option<String> = None;
+
+    loop {
+        {
+            let state = rx.borrow();
+            let cfg = cfg_rx.borrow();
+            let line = cli::render_waybar_line(&state.devices, &cfg, std::time::Instant::now());
+            if last_line.as_deref() != Some(line.as_str()) {
+                print_line(&line);
+                last_line = Some(line);
+            }
+        }
+
+        // config_tx must outlive this loop for the same reason run_tray keeps
+        // its config_tx alive: it is the sole sender, and dropping it makes
+        // every source task's config_rx.changed() resolve with an error,
+        // spinning that task's select loop.
+        tokio::select! {
+            r = rx.changed() => if r.is_err() { break; },
+            r = cfg_rx.changed() => if r.is_err() { break; },
+        }
+    }
+
+    // Reached only when a sender is gone, which means the supervisor is no
+    // longer publishing. Waybar restarts the module after `restart-interval`;
+    // say why the line stopped so the restart is not a silent mystery.
+    tracing::error!("state channel closed, waybar module exiting");
 }
 
 #[cfg(test)]
@@ -401,18 +504,10 @@ mod tests {
     }
 
     #[test]
-    fn default_filter_level_waybar_is_error() {
+    fn default_filter_level_waybar_is_info() {
         assert_eq!(
             default_filter_level(LogProfile::from(&Invocation::Waybar)),
-            "error"
-        );
-    }
-
-    #[test]
-    fn rigbat_log_still_overrides_the_waybar_default() {
-        assert_eq!(
-            resolve_filter_directive(LogProfile::Polled, Some("debug"), None),
-            "debug"
+            "info"
         );
     }
 
