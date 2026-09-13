@@ -1,7 +1,8 @@
 //! SteelSeries HID backend — reads charge via a dedicated config interface.
 //!
 //! Protocol: vendor 0x1038, USB interface 3.
-//! Write output report `[0x00, 0xD2]`, read response:
+//! Write a full 64-byte output report prefixed by report ID `0x00` and starting
+//! with `0xD2` (`0x92` battery query | `0x40` wireless flag), read response:
 //! `resp[0] == 0xD2`, `resp[1]` bit 7 = charging, bits 0-6 = step (5% each),
 //! `percent = (step - 1) * 5`, clamp to 0..=100.
 //!
@@ -29,12 +30,21 @@ const VENDOR_ID: u16 = 0x1038;
 const BATTERY_INTERFACE: u8 = 3;
 const BATTERY_QUERY: u8 = 0xD2;
 
+/// Payload size of the output report on the config interface, from its report
+/// descriptor (`Report Size 8`, `Report Count 0x40`). The device STALLs a short write.
+const OUTPUT_REPORT_LEN: usize = 64;
+
 /// Response timeout from the device (milliseconds).
 const POLL_TIMEOUT_MS: u16 = 1000;
 
 // ── Device table ─────────────────────────────────────────────────────────────
 
-/// Description of a supported device. New model = +1 line in `DEVICES`.
+/// Description of a supported device. A new model is +1 line in `DEVICES` only
+/// while it shares this family's wire protocol: `BATTERY_QUERY`, `OUTPUT_REPORT_LEN`
+/// and `BATTERY_INTERFACE` are module-wide, not per-entry. A wired variant carries a
+/// different product ID and drops the `0x40` wireless flag from the query byte; a
+/// model whose config interface declares another report length needs a shorter write.
+/// Check the model's report descriptor before assuming one line is enough.
 struct SteelSeriesDevice {
     product_id: u16,
     name: &'static str,
@@ -220,8 +230,7 @@ fn poll_device_inner(dev_path: &Path, handle: &mut Option<File>) -> anyhow::Resu
         .as_mut()
         .ok_or_else(|| anyhow::anyhow!("handle unexpectedly empty after open"))?;
 
-    // Send battery query request.
-    file.write_all(&[0x00, BATTERY_QUERY])
+    file.write_all(&battery_query_report())
         .context("writing battery query")?;
 
     // Drain the buffer until we get the expected response with an overall timeout.
@@ -309,6 +318,16 @@ pub fn parse_usb_interface(real_path: &str) -> Option<u8> {
 /// Parses HID response: `buf[0] == 0xD2`, `buf[1]` bit 7 = charging, bits 0-6 = step.
 ///
 /// `percent = (step - 1) * 5`, clamped to 0..=100.
+/// Builds the battery query write: the report-ID byte `0x00` (the config
+/// interface's collection declares no report IDs) followed by the full 64-byte
+/// output report the descriptor declares (`Output (usage 0xF1), Report Size 8,
+/// Report Count 0x40`). A short write is STALLed with `EPIPE`.
+pub fn battery_query_report() -> [u8; 1 + OUTPUT_REPORT_LEN] {
+    let mut request = [0u8; 1 + OUTPUT_REPORT_LEN];
+    request[1] = BATTERY_QUERY;
+    request
+}
+
 pub fn parse_battery_response(buf: &[u8]) -> Option<BatteryReading> {
     if buf.len() < 2 || buf[0] != BATTERY_QUERY {
         return None;
@@ -421,6 +440,18 @@ mod tests {
     }
 
     // parse_battery_response
+
+    #[test]
+    fn battery_query_report_carries_the_full_output_report() {
+        let request = battery_query_report();
+        assert_eq!(request.len(), 65, "1 report-ID byte + a 64-byte payload");
+        assert_eq!(request[0], 0x00, "report ID for a collection with no IDs");
+        assert_eq!(request[1], BATTERY_QUERY);
+        assert!(
+            request[2..].iter().all(|&b| b == 0),
+            "the rest of the report must be zero padding"
+        );
+    }
 
     #[test]
     fn parse_battery_response_step1_is_0_percent() {
