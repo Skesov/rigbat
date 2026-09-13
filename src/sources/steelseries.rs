@@ -4,7 +4,8 @@
 //! Write a full 64-byte output report prefixed by report ID `0x00` and starting
 //! with `0xD2` (`0x92` battery query | `0x40` wireless flag), read response:
 //! `resp[0] == 0xD2`, `resp[1]` bit 7 = charging, bits 0-6 = step (5% each),
-//! `percent = (step - 1) * 5`, clamp to 0..=100.
+//! `percent = (step - 1) * 5`, clamp to 0..=100. A dongle whose device is asleep
+//! or off answers `40 ff` instead — the wireless flag with no data.
 //!
 //! Discovery: `/sys/class/hidraw/hidrawN/device/uevent` contains
 //! `HID_ID=0003:VVVVVVVV:PPPPPPPP`; canonicalize device → segment `:1.N` → interface N.
@@ -29,6 +30,14 @@ use super::{BatteryBackend, BatterySource};
 const VENDOR_ID: u16 = 0x1038;
 const BATTERY_INTERFACE: u8 = 3;
 const BATTERY_QUERY: u8 = 0xD2;
+
+/// The wireless flag on its own. A dongle whose mouse is asleep or switched off
+/// answers `40 ff` instead of echoing the command, so this marks "the dongle is
+/// there, the device is not".
+const WIRELESS_FLAG: u8 = 0x40;
+
+/// The level byte a dongle sends when it has no reading to report.
+const LEVEL_UNAVAILABLE: u8 = 0xFF;
 
 /// Payload size of the output report on the config interface, from its report
 /// descriptor (`Report Size 8`, `Report Count 0x40`). The device STALLs a short write.
@@ -269,10 +278,13 @@ fn poll_device_inner(dev_path: &Path, handle: &mut Option<File>) -> anyhow::Resu
             anyhow::bail!("EOF reading from {}", dev_path.display());
         }
 
-        if let Some(reading) = parse_battery_response(&buf[..n]) {
-            return Ok(reading);
+        match classify_response(&buf[..n]) {
+            Response::Reading(reading) => return Ok(reading),
+            Response::DeviceUnreachable => {
+                anyhow::bail!("device is asleep or off (dongle reported no battery data)")
+            }
+            Response::Unrelated => {}
         }
-        // Not the expected response — continue draining.
     }
 }
 
@@ -326,6 +338,30 @@ pub fn battery_query_report() -> [u8; 1 + OUTPUT_REPORT_LEN] {
     let mut request = [0u8; 1 + OUTPUT_REPORT_LEN];
     request[1] = BATTERY_QUERY;
     request
+}
+
+/// What a report read from the config interface turned out to be.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Response {
+    Reading(BatteryReading),
+    /// The dongle answered, but the device behind it has no data to give.
+    /// Distinguished from `Unrelated` so the caller stops instead of draining
+    /// until the timeout: a sleeping mouse is the common case, and waiting a
+    /// full `POLL_TIMEOUT_MS` for it blocks a `spawn_blocking` thread for a
+    /// second on every poll.
+    DeviceUnreachable,
+    /// Some other report on the same interface. Keep reading.
+    Unrelated,
+}
+
+pub fn classify_response(buf: &[u8]) -> Response {
+    if buf.len() >= 2 && buf[0] == WIRELESS_FLAG && buf[1] == LEVEL_UNAVAILABLE {
+        return Response::DeviceUnreachable;
+    }
+    match parse_battery_response(buf) {
+        Some(reading) => Response::Reading(reading),
+        None => Response::Unrelated,
+    }
 }
 
 pub fn parse_battery_response(buf: &[u8]) -> Option<BatteryReading> {
@@ -440,6 +476,40 @@ mod tests {
     }
 
     // parse_battery_response
+
+    #[test]
+    fn classify_response_reports_a_sleeping_device_instead_of_draining() {
+        // Observed from an Aerox 5 Wireless dongle with the mouse switched off.
+        let mut buf = [0u8; 64];
+        buf[0] = WIRELESS_FLAG;
+        buf[1] = LEVEL_UNAVAILABLE;
+        assert_eq!(classify_response(&buf), Response::DeviceUnreachable);
+    }
+
+    #[test]
+    fn classify_response_reads_an_awake_device() {
+        // Observed from the same dongle at 90%: step 19 -> (19 - 1) * 5.
+        let buf = [BATTERY_QUERY, 0x13];
+        assert_eq!(
+            classify_response(&buf),
+            Response::Reading(BatteryReading::new(90, ChargeState::Discharging))
+        );
+    }
+
+    #[test]
+    fn classify_response_keeps_draining_on_an_unrelated_report() {
+        assert_eq!(classify_response(&[0x01, 0x02, 0x03]), Response::Unrelated);
+        assert_eq!(classify_response(&[]), Response::Unrelated);
+    }
+
+    #[test]
+    fn classify_response_does_not_mistake_a_real_reading_for_unreachable() {
+        // 0xFF in the level byte only means "no data" behind the bare wireless
+        // flag; behind the command echo it would be a (nonsensical) reading, and
+        // must not short-circuit the drain loop on the wrong byte.
+        let buf = [BATTERY_QUERY, LEVEL_UNAVAILABLE];
+        assert_ne!(classify_response(&buf), Response::DeviceUnreachable);
+    }
 
     #[test]
     fn battery_query_report_carries_the_full_output_report() {
