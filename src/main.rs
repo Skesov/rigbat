@@ -11,6 +11,9 @@ mod settings;
 mod sources;
 mod tray;
 
+use crate::domain::Presence;
+use crate::tray::manager::select_featured;
+
 const USAGE: &str = "\
 rigbat — system tray battery monitor for peripherals
 
@@ -340,16 +343,26 @@ async fn run_waybar() {
             {
                 let state = rx.borrow();
                 let cfg = cfg_rx.borrow();
-                // Judge only the devices this config actually renders. A roster
-                // can carry the same mouse twice (sysfs and Bluetooth), and the
-                // hidden copy answering first says nothing about the featured
-                // one — the frame would still be built from an unpolled device.
-                let mut shown = state
+                // Judge the device the frame is actually built from, resolved the
+                // same way the renderer resolves it. A roster can carry the same
+                // mouse twice (sysfs and Bluetooth) and a hidden copy answering
+                // first says nothing about the visible one; conversely, requiring
+                // every shown device to answer never settles when one of them is
+                // permanently asleep, which is the normal state of a wireless
+                // mouse on its charger.
+                let shown: Vec<(&str, bool)> = state
                     .devices
                     .iter()
                     .filter(|d| cfg.is_shown(&d.info.name))
-                    .peekable();
-                let settled = shown.peek().is_none() || shown.all(|d| d.last_reading.is_some());
+                    .map(|d| (d.info.name.as_str(), d.presence == Presence::Online))
+                    .collect();
+                let settled = match select_featured(&shown, cfg.primary_device.as_deref()) {
+                    None => true,
+                    Some(name) => state
+                        .devices
+                        .iter()
+                        .any(|d| d.info.name == name && d.last_reading.is_some()),
+                };
                 if settled {
                     return;
                 }
