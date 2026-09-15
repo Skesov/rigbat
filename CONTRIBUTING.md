@@ -74,6 +74,15 @@ cargo clippy --all-targets -- -D warnings
 cargo run -- list      # your device should appear
 ```
 
+A few tests are marked `#[ignore]` because `cargo test` is the wrong place for them: two need a
+live system D-Bus, and `tray::icon::tests::dump_icons` is a debug helper that writes every icon
+variant to `/tmp` as PNG for visual inspection rather than asserting anything. `cargo test` skips
+all three; run them yourself on a desktop machine with:
+
+```sh
+make test-live         # cargo test -- --ignored
+```
+
 ## Figuring out the protocol
 
 See [docs/adding-a-device.md](docs/adding-a-device.md) for how to discover where a

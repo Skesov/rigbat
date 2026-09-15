@@ -14,12 +14,11 @@ settings window, per-device poll intervals/thresholds, config persistence. Diagn
 
 ## Compatibility
 
-DE-agnostic — runs on any desktop with a StatusNotifierItem tray host: KDE Plasma (native),
-GNOME (AppIndicator extension), Waybar/wlroots, XFCE (via `snixembed`), COSMIC. All integration
-is standard freedesktop: SNI (`ksni`), xdg-desktop-portal appearance, logind resume,
-`org.freedesktop.Notifications`; battery data comes from BlueZ/sysfs/hidraw at the kernel level.
-No DE-specific dependencies. COSMIC is the primary development/test environment and the strictest
-SNI host, which is why the workarounds below are framed around it.
+DE-agnostic: every integration is standard freedesktop (SNI, xdg-desktop-portal, logind,
+`org.freedesktop.Notifications`), so any StatusNotifierItem host works and no DE-specific
+dependency is linked in. COSMIC is the primary development/test environment and the strictest
+SNI host, which is why the workarounds below are framed around it. Host list and the full
+rationale: [`docs/architecture.md`](docs/architecture.md#compatibility-and-platform-constraints).
 
 ## Launch modes
 
@@ -34,8 +33,10 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
   JSON line for the featured device on startup and on every state change (run with `interval`
   omitted, not `tray`'s icon/notifications).
 - `rigbat tray` — SNI daemon (`Supervisor` + `ksni`), the long-running mode.
-- `rigbat settings` — GTK-free eframe/egui settings window in a SEPARATE process with no tokio
-  runtime (the tray spawns it). It edits `config.json`; the tray applies changes via the file watch.
+- `rigbat settings` — GTK-free eframe/egui settings window in a SEPARATE process (the tray spawns
+  it). It edits `config.json`; the tray applies changes via the file watch. It holds a tokio
+  runtime only to run device discovery off the UI thread — the winit event loop is never entered
+  from inside it, and eframe is built without accesskit for that reason.
 
 ## Toolchain and commands
 
@@ -64,7 +65,7 @@ Full rationale, data flow, and contracts: [`docs/architecture.md`](docs/architec
 src/
 ├── domain/        # types, classify, guess_kind, freedesktop_icon_name, estimate
 ├── sources/       # BatterySource + BatteryBackend; sysfs/bluez/steelseries
-├── discovery/     # discover_all + registry::backends()
+├── discovery/     # discover_all + registry::backends() + Context (shared system bus)
 ├── cli/           # output adapter: table / --json / --wide / --waybar
 ├── tray/          # ksni + IconRenderer (tiny-skia) + device-type corner glyph
 ├── appearance/    # theme from xdg-portal (light/dark)
@@ -84,8 +85,9 @@ Dependencies point inward: `domain` does not import `zbus`/`tiny-skia`/`nix`.
 - No `unwrap`/`expect` in non-test code — return `anyhow::Result` with context.
 - HID via `/dev/hidraw` directly (no C `libhidapi`); BlueZ via `zbus` (no `bluer`/libdbus).
 - Diagnostics go through `tracing`; `println!` is reserved for CLI output on stdout.
-- These rules (plus no `unsafe`) are enforced by `[lints]` in `Cargo.toml` and `clippy.toml`, not
-  only by review — `cargo clippy --all-targets -- -D warnings` fails the gate on a violation.
+- These rules (plus no `unsafe`) are enforced by `[lints.clippy]` in `Cargo.toml`, not only by
+  review — `cargo clippy --all-targets -- -D warnings` fails the gate on a violation.
+  (`clippy.toml` only exempts `#[cfg(test)]` code from the no-unwrap rule.)
 
 ## Development
 

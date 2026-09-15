@@ -49,8 +49,13 @@ trait in an inner layer — with the concrete dependency living in the implement
   `fn device(&self) -> &DeviceInfo`. One source = one device. A source opens its handle once and
   holds it for its whole lifetime — it does not reopen per poll (reopening per poll can
   deadlock the device).
-- **`BatteryBackend`** (`sources`): `async fn discover(&self) -> Vec<Box<dyn BatterySource>>`.
-  Finds devices and constructs sources. Backends are listed in `discovery::registry::backends()`.
+- **`BatteryBackend`** (`sources`): `async fn discover(&self, ctx: &discovery::Context) ->
+Vec<Box<dyn BatterySource>>`. Finds devices and constructs sources. Backends are listed in
+  `discovery::registry::backends()`. `Context` is the dependency container built at the
+  composition root: it holds the process-wide system-bus connection (`discovery/context.rs`),
+  opened lazily on first use and re-dialled if it has since closed, so a `dbus-daemon` restart
+  does not strand the BlueZ backend for the life of the process. A backend that needs no
+  infrastructure ignores the parameter.
 - **`IconRenderer`** (`tray`): `render(status, kind, theme, mode) -> Vec<ksni::Icon>`. The tray
   depends on this trait, not on the renderer. The implementation is `tiny-skia`; an SVG/resvg
   renderer would be a new implementation behind the same port.
@@ -86,7 +91,9 @@ flows out through channels.
   (`Online`/`Unreachable`/`Disconnected`) alongside its last reading. A source that starts
   erroring flips to `Unreachable` without discarding that reading, so consumers can render
   "88% offline (2h ago)" instead of losing the value; `Disconnected` is reserved for a device
-  reconcile no longer sees at all. The same sweep also inspects each task's
+  reconcile no longer sees at all; such an entry is pruned from the roster once it has been gone
+  for `DISCONNECTED_RETENTION` (24 h), or immediately if it never produced a reading. The same
+  sweep also inspects each task's
   `JoinHandle::is_finished()` — a task that panicked (as opposed to one reconcile aborted
   itself for a vanished device) is demoted to `Unreachable` and respawned rather than left
   silently dead.
@@ -123,10 +130,16 @@ Settings:  tray menu "Settings…" → spawn `rigbat settings` (separate process
            tray's config file watch reloads ──watch<Config>──▶ live update
 ```
 
-The settings window is a separate process on purpose: it owns the winit event loop and runs with
-**no tokio runtime** (eframe with `default-features = false`, glow backend, no accesskit — an
-AT-SPI/zbus bridge would panic without a runtime). It communicates with the tray only through
+The settings window is a separate process on purpose: it owns the winit event loop, and eframe is
+built with `default-features = false` (glow backend, no accesskit — an AT-SPI/zbus bridge assumes
+a runtime that eframe itself never enters). It communicates with the tray only through
 `config.json`; there is no IPC.
+
+It does hold a tokio runtime, but nothing on the UI thread ever enters it: device discovery is
+spawned onto it and the result arrives over an `mpsc` channel drained with `try_recv` at the top
+of the frame, so the "Rescan" button cannot block the event loop. The runtime is dropped when the
+window closes; that is safe because no `spawn_blocking` is reachable from `discover_all` — an
+in-flight scan is plain async work and is simply cancelled.
 
 ## Configuration and persistence
 
@@ -154,7 +167,14 @@ AT-SPI/zbus bridge would panic without a runtime). It communicates with the tray
   optimisation, never a dependency: the 30 s discovery sweep remains the safety net.
 - **notifications** — a hand-rolled `zbus` `org.freedesktop.Notifications` proxy; an
   edge-triggered tracker fires once per low-battery crossing, using each device's effective
-  threshold, gated by `notifications_enabled`.
+  threshold, gated by `notifications_enabled`. It re-arms when the device charges, rises back
+  above the threshold, or goes offline — so a device hovering at the threshold notifies once,
+  not on every poll. A crossing must be confirmed by `LOW_CONFIRMATIONS` (2) _distinct_ readings
+  before it fires — distinctness keyed on `last_seen`, because `TrayState` is republished on every
+  state change, not once per poll. One bad sample from a noisy BLE device therefore costs nothing;
+  a real low battery is announced one poll interval later than it used to be. The deliberate
+  consequence: a device that reports low exactly once and then dies or vanishes is never announced,
+  since a non-Online device is skipped and its streak can no longer advance.
 - **autostart** — writes/removes `~/.config/autostart/rigbat.desktop`.
 
 ## Diagnostics

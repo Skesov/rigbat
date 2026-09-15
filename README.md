@@ -5,7 +5,9 @@ System tray battery monitor for gaming peripherals.
 ## What it does
 
 - Shows battery level of connected peripherals (mice, keyboards, headsets, controllers) in the system tray
-- Displays one tray icon for every device, or a single icon for one chosen device
+- Displays one tray icon for every device, or a single aggregate icon (switch in the settings
+  window); the aggregate icon follows `primary_device` from the config if set, otherwise the
+  first connected device among the shown ones
 - Automatically discovers connected devices on startup — no manual configuration required
 - Supports multiple devices simultaneously; choose which ones appear in the settings window
 - Sends desktop notifications when battery is low
@@ -50,6 +52,9 @@ rigbat --help     # show usage (-h)
 rigbat --version  # show the version (-V)
 ```
 
+`--help` and `--version` exit 0. An unknown argument, or `--json` and `--waybar` passed together,
+prints usage to stderr and exits 2.
+
 ## Run as a systemd user service
 
 A systemd _user_ service runs the tray automatically with your graphical session
@@ -61,8 +66,13 @@ make enable    # systemctl --user enable --now rigbat.service
 make logs      # journalctl --user -u rigbat -f
 make status    # service status
 make restart   # after reinstalling the binary
-make uninstall # stop, remove the unit, udev rule, autostart entry and the binary
+make disable   # systemctl --user disable --now rigbat.service
+make uninstall # stop and remove everything installed (see below)
 ```
+
+`make uninstall` removes the unit, desktop entry, icon, autostart entry and the binary.
+It asks for `sudo` only if the udev rule is actually present, and every step is
+best-effort, so it finishes even on a session with no user D-Bus (a plain SSH login).
 
 The service needs the session environment (Wayland/X display, session D-Bus),
 which modern desktops (GNOME, KDE, COSMIC) import into the systemd user manager
@@ -89,6 +99,14 @@ install`/`make service` never need root; only this step does, since it writes to
 Bluetooth and sysfs (kernel power_supply) devices need no rule — only USB HID access is
 gated by permissions. A device already plugged in when you run `udev-install` is
 re-triggered automatically; if it still shows `offline`, replug it.
+
+## Settings
+
+`rigbat settings` opens the settings window. It edits the poll interval (10–3600 s, default
+60), the low-battery threshold (5–50%, default 20), the display mode, which devices are shown,
+whether one icon per device is used, whether notifications fire, whether rigbat starts with the
+session, and per-device overrides of the interval and threshold. Changes are written to
+`config.json` and the tray picks them up through a file watch — no restart.
 
 Config lives at `~/.config/rigbat/config.json`. `make uninstall` leaves it in place —
 remove it yourself if you want a clean slate.
