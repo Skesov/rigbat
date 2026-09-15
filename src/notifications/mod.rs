@@ -1,5 +1,5 @@
-use std::collections::HashSet;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
@@ -12,6 +12,12 @@ use crate::domain::{Presence, PrimaryStatus, classify};
 /// missed its purpose, so this bounds the notifier task's stall, not the
 /// D-Bus call itself.
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Consecutive distinct low readings required before a notification fires.
+/// Noisy BLE devices (e.g. the UGREEN HiTune Max5) have reported a single bad
+/// sample tens of percentage points below the surrounding readings; requiring
+/// confirmation costs one poll interval and rejects that kind of glitch.
+const LOW_CONFIRMATIONS: u8 = 2;
 
 /// zbus proxy for org.freedesktop.Notifications (session bus).
 #[zbus::proxy(
@@ -34,26 +40,68 @@ trait Notifications {
     ) -> zbus::Result<u32>;
 }
 
+/// A device's progress toward a confirmed low crossing: how many consecutive
+/// distinct low readings have been seen, and the `last_seen` of the most
+/// recent one counted (so a republished reading with the same timestamp does
+/// not advance the streak).
+struct LowStreak {
+    last_seen: Instant,
+    count: u8,
+}
+
 /// Tracks which devices have an outstanding low-battery notification, so each
-/// low crossing fires exactly once. A device re-arms when it leaves the low
-/// state (charges, rises above threshold, or goes offline).
+/// confirmed low crossing fires exactly once. A device re-arms when it leaves
+/// the low state (charges, rises above threshold, or goes offline).
+///
+/// A reading only counts toward a crossing if it is low AND it is a fresh
+/// reading — identified by `DeviceState::last_seen`, since `TrayState` is
+/// republished on every state change, not once per poll, and a republished
+/// reading must not be double-counted.
 #[derive(Default)]
 struct LowTracker {
     notified: HashSet<String>,
+    streaks: HashMap<String, LowStreak>,
 }
 
 impl LowTracker {
-    /// Records the latest low/not-low observation for `name`. Returns true iff a
-    /// notification should fire now (device is low and was not already notified).
-    fn observe(&mut self, name: &str, is_low: bool) -> bool {
-        if is_low {
-            // insert() returns true only when the value is newly added — exactly
-            // the "fire once per crossing" semantic we need.
-            self.notified.insert(name.to_owned())
-        } else {
+    /// Records the latest observation for `name`: whether it is low, and the
+    /// `last_seen` of the reading that produced it. Returns true iff a
+    /// notification should fire now — the device has reached
+    /// `LOW_CONFIRMATIONS` consecutive distinct low readings and was not
+    /// already notified.
+    fn observe(&mut self, name: &str, is_low: bool, last_seen: Option<Instant>) -> bool {
+        if !is_low {
+            self.streaks.remove(name);
             self.notified.remove(name);
-            false
+            return false;
         }
+        let Some(last_seen) = last_seen else {
+            // A device with no reading at all is never classified Low; handle it
+            // defensively rather than panicking on the missing timestamp.
+            return false;
+        };
+        let count = match self.streaks.get_mut(name) {
+            Some(streak) if streak.last_seen == last_seen => {
+                // Same reading republished — does not advance the streak.
+                streak.count
+            }
+            Some(streak) => {
+                streak.last_seen = last_seen;
+                streak.count = streak.count.saturating_add(1);
+                streak.count
+            }
+            None => {
+                self.streaks.insert(
+                    name.to_owned(),
+                    LowStreak {
+                        last_seen,
+                        count: 1,
+                    },
+                );
+                1
+            }
+        };
+        count >= LOW_CONFIRMATIONS && self.notified.insert(name.to_owned())
     }
 }
 
@@ -63,9 +111,15 @@ impl LowTracker {
 /// reading from a device that is asleep, unreachable or disconnected is a
 /// memory, not a live observation. Feeding it to the tracker would both fire
 /// a false alert for a device the user cannot act on right now, and consume
-/// the crossing — so the real alert would be lost when the device
-/// reconnects still low. A non-Online device is therefore skipped entirely,
-/// leaving its tracked state exactly as it was before it went away.
+/// a confirmation — so the real alert would be lost or delayed when the
+/// device reconnects still low. A non-Online device is therefore skipped
+/// entirely, leaving its tracked streak exactly as it was before it went
+/// away.
+///
+/// A device fires only after `LOW_CONFIRMATIONS` consecutive distinct low
+/// readings, identified by `DeviceState::last_seen` — `TrayState` is
+/// republished on every state change, not once per poll, so a republication
+/// of the same reading must not advance the streak.
 fn compute_pending(state: &TrayState, cfg: &Config, tracker: &mut LowTracker) -> Vec<(String, u8)> {
     state
         .devices
@@ -79,7 +133,7 @@ fn compute_pending(state: &TrayState, cfg: &Config, tracker: &mut LowTracker) ->
                 classify(d.last_reading, threshold),
                 PrimaryStatus::Low { .. }
             );
-            if tracker.observe(&d.info.name, is_low) {
+            if tracker.observe(&d.info.name, is_low, d.last_seen) {
                 let pct = d.last_reading.map(|r| r.percent).unwrap_or(0);
                 Some((d.info.name.clone(), pct))
             } else {
@@ -198,46 +252,104 @@ mod tests {
     }
 
     #[test]
-    fn first_low_fires_second_does_not() {
+    fn one_low_reading_does_not_notify() {
         let mut t = LowTracker::default();
-        assert!(t.observe("mouse", true));
-        assert!(!t.observe("mouse", true));
+        let t0 = Instant::now();
+        assert!(!t.observe("mouse", true, Some(t0)));
     }
 
     #[test]
-    fn rearm_after_not_low_fires_again() {
+    fn two_distinct_low_readings_notify_exactly_once() {
         let mut t = LowTracker::default();
-        assert!(t.observe("mouse", true));
-        t.observe("mouse", false);
-        assert!(t.observe("mouse", true));
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(60);
+        assert!(!t.observe("mouse", true, Some(t0)));
+        assert!(t.observe("mouse", true, Some(t1)));
+        // Already notified for this crossing — no second fire.
+        let t2 = t1 + Duration::from_secs(60);
+        assert!(!t.observe("mouse", true, Some(t2)));
     }
 
     #[test]
-    fn offline_rearms() {
+    fn republished_same_reading_does_not_notify() {
         let mut t = LowTracker::default();
-        assert!(t.observe("mouse", true));
-        // offline == is_low false
-        t.observe("mouse", false);
-        assert!(t.observe("mouse", true));
+        let t0 = Instant::now();
+        assert!(!t.observe("mouse", true, Some(t0)));
+        // Same last_seen — a republication of the same reading, not a new one.
+        assert!(!t.observe("mouse", true, Some(t0)));
+        assert!(!t.observe("mouse", true, Some(t0)));
+    }
+
+    #[test]
+    fn rearm_after_not_low_needs_two_fresh_confirmations() {
+        let mut t = LowTracker::default();
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(60);
+        assert!(!t.observe("mouse", true, Some(t0)));
+        assert!(t.observe("mouse", true, Some(t1)));
+
+        // Recovers, then goes low again — the old streak must not carry over.
+        t.observe("mouse", false, None);
+        let t2 = t1 + Duration::from_secs(120);
+        let t3 = t2 + Duration::from_secs(60);
+        assert!(!t.observe("mouse", true, Some(t2)));
+        assert!(t.observe("mouse", true, Some(t3)));
+    }
+
+    #[test]
+    fn going_offline_between_low_readings_leaves_streak_intact() {
+        let mut t = LowTracker::default();
+        let t0 = Instant::now();
+        // First low reading builds a streak of one.
+        assert!(!t.observe("mouse", true, Some(t0)));
+        // Device goes non-Online: compute_pending skips it entirely, so
+        // observe is simply not called — the streak is untouched.
+        let t1 = t0 + Duration::from_secs(60);
+        // Comes back Online, still low, with a fresh reading: streak reaches
+        // LOW_CONFIRMATIONS and fires.
+        assert!(t.observe("mouse", true, Some(t1)));
+    }
+
+    #[test]
+    fn missing_last_seen_does_not_panic_or_notify() {
+        let mut t = LowTracker::default();
+        assert!(!t.observe("mouse", true, None));
     }
 
     #[test]
     fn two_devices_tracked_independently() {
         let mut t = LowTracker::default();
-        assert!(t.observe("mouse", true));
-        assert!(t.observe("keyboard", true));
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(60);
+
+        assert!(!t.observe("mouse", true, Some(t0)));
+        assert!(!t.observe("keyboard", true, Some(t0)));
+        assert!(t.observe("mouse", true, Some(t1)));
+        assert!(t.observe("keyboard", true, Some(t1)));
         // mouse already notified — no second fire
-        assert!(!t.observe("mouse", true));
+        let t2 = t1 + Duration::from_secs(60);
+        assert!(!t.observe("mouse", true, Some(t2)));
         // keyboard re-arms after recovery
-        t.observe("keyboard", false);
-        assert!(t.observe("keyboard", true));
+        t.observe("keyboard", false, None);
+        assert!(!t.observe("keyboard", true, Some(t2)));
+        let t3 = t2 + Duration::from_secs(60);
+        assert!(t.observe("keyboard", true, Some(t3)));
         // mouse still armed
-        assert!(!t.observe("mouse", true));
+        assert!(!t.observe("mouse", true, Some(t3)));
     }
 
     // --- compute_pending ------------------------------------------------
 
     fn device_state(name: &str, presence: Presence, percent: Option<u8>) -> DeviceState {
+        device_state_at(name, presence, percent, percent.map(|_| Instant::now()))
+    }
+
+    fn device_state_at(
+        name: &str,
+        presence: Presence,
+        percent: Option<u8>,
+        last_seen: Option<Instant>,
+    ) -> DeviceState {
         DeviceState {
             info: DeviceInfo {
                 name: name.to_owned(),
@@ -246,7 +358,7 @@ mod tests {
                 locator: None,
             },
             last_reading: percent.map(|p| BatteryReading::new(p, ChargeState::Discharging)),
-            last_seen: percent.map(|_| Instant::now()),
+            last_seen,
             presence,
             estimate: crate::domain::Estimate::Unknown,
         }
@@ -282,24 +394,47 @@ mod tests {
     fn device_still_low_after_reconnecting_does_not_double_notify() {
         let mut tracker = LowTracker::default();
         let cfg = Config::default();
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(60);
 
-        // First, low while Online — fires and is recorded as notified.
-        let online_low = TrayState {
-            devices: vec![device_state("mouse", Presence::Online, Some(5))],
+        // First low reading while Online — only one confirmation so far.
+        let online_low_1 = TrayState {
+            devices: vec![device_state_at(
+                "mouse",
+                Presence::Online,
+                Some(5),
+                Some(t0),
+            )],
         };
-        assert_eq!(
-            compute_pending(&online_low, &cfg, &mut tracker),
-            vec![("mouse".to_string(), 5)]
-        );
+        assert!(compute_pending(&online_low_1, &cfg, &mut tracker).is_empty());
 
         // Goes away while still low: skipped entirely, tracker untouched.
         let disconnected = TrayState {
-            devices: vec![device_state("mouse", Presence::Disconnected, Some(5))],
+            devices: vec![device_state_at(
+                "mouse",
+                Presence::Disconnected,
+                Some(5),
+                Some(t0),
+            )],
         };
         assert!(compute_pending(&disconnected, &cfg, &mut tracker).is_empty());
 
-        // Comes back Online, still low: no second notification.
-        assert!(compute_pending(&online_low, &cfg, &mut tracker).is_empty());
+        // Comes back Online with a fresh low reading: second confirmation fires.
+        let online_low_2 = TrayState {
+            devices: vec![device_state_at(
+                "mouse",
+                Presence::Online,
+                Some(5),
+                Some(t1),
+            )],
+        };
+        assert_eq!(
+            compute_pending(&online_low_2, &cfg, &mut tracker),
+            vec![("mouse".to_string(), 5)]
+        );
+
+        // Still low, same reading republished: no second notification.
+        assert!(compute_pending(&online_low_2, &cfg, &mut tracker).is_empty());
     }
 
     #[test]
