@@ -21,7 +21,9 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-# Installed by `cargo install --path .` (CARGO_HOME defaults to ~/.cargo).
+# Installed by `cargo install --path .`. This default assumes CARGO_HOME is
+# ~/.cargo; `make service` rewrites the line to the path cargo actually used,
+# so a non-default CARGO_HOME does not produce a unit that fails with 203/EXEC.
 ExecStart=%h/.cargo/bin/rigbat tray
 Restart=on-failure
 RestartSec=2
@@ -34,8 +36,8 @@ RestartSec=2
 # ~/.config/autostart (write, via the settings toggle), and the ability to
 # spawn `rigbat settings` as a GUI child with access to the Wayland/X11
 # socket and the GPU. Directives that would break any of that (PrivateDevices,
-# ProtectHome, MemoryDenyWriteExecute, PrivateNetwork, a restrictive
-# SystemCallFilter, ProtectSystem=strict) are deliberately omitted.
+# ProtectHome, MemoryDenyWriteExecute, PrivateNetwork, ProtectSystem=strict)
+# are deliberately omitted.
 
 # Blocks privilege escalation via setuid/setgid/file capabilities. Does not
 # touch device, D-Bus, or GUI access.
@@ -73,6 +75,16 @@ IPAddressDeny=any
 # Rejects non-native syscall ABIs (e.g. 32-bit compat) on this native amd64
 # binary. Does not remove or filter any specific syscall by name.
 SystemCallArchitectures=native
+# Restricts the unit to the syscalls a normal userspace service needs. The
+# settings window is spawned as a child of the tray and inherits this filter,
+# so the GPU path is the thing that had to be proven: verified under
+# `systemd-run --user -p SystemCallFilter=@system-service` that the window
+# starts, holds /dev/dri/renderD128 open and renders, and that the tray opens
+# and writes /dev/hidraw and publishes its SNI item — no SIGSYS on either.
+# EPERM rather than the default SIGSYS: a denied syscall should surface as an
+# error the program can report, not kill the tray outright.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=graphical-session.target

@@ -1,3 +1,6 @@
+# `make install` rewrites Exec to the absolute path of the installed binary:
+# a desktop launcher is started by the DE, which does not source an interactive
+# shell, so ~/.cargo/bin is not necessarily on its PATH.
 [Desktop Entry]
 Type=Application
 Version=1.0
@@ -6,6 +9,6 @@ Comment=Battery monitor for gaming peripherals
 Exec=rigbat settings
 Icon=rigbat
 Terminal=false
-Categories=System;HardwareSettings;
+Categories=Settings;HardwareSettings;
 StartupWMClass=rigbat
 NoDisplay=false
