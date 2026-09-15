@@ -17,16 +17,10 @@ trait LogindManager {
 
 /// Spawns a background task that fires `refresh` whenever the system resumes.
 /// Quietly exits if logind is unavailable so the main binary still works in
-/// environments without systemd (e.g. containers, BSDs).
-pub fn watch_resume(refresh: RefreshSignal) {
+/// environments without systemd (e.g. containers, BSDs). `conn` is the
+/// process-wide system-bus connection, opened by the caller.
+pub fn watch_resume(refresh: RefreshSignal, conn: zbus::Connection) {
     tokio::spawn(async move {
-        let conn = match zbus::Connection::system().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("logind unavailable: {e}; no re-poll after suspend");
-                return;
-            }
-        };
         let manager = match LogindManagerProxy::new(&conn).await {
             Ok(m) => m,
             Err(e) => {

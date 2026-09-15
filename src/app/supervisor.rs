@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
@@ -8,6 +9,7 @@ use tokio::time::sleep;
 
 use crate::app::refresh::RefreshSignal;
 use crate::config::Config;
+use crate::discovery::Context;
 use crate::domain::estimate::estimate as estimate_remaining;
 use crate::domain::{BatteryReading, DeviceId, DeviceInfo, DeviceState, Estimate, Presence};
 use crate::sources::BatterySource;
@@ -44,11 +46,17 @@ pub struct TrayState {
 pub struct Supervisor;
 
 impl Supervisor {
-    /// Spawns the manager with the real `discovery::discover_all` backend.
+    /// Spawns the manager with the real `discovery::discover_all` backend,
+    /// threading the shared `Context` (in particular its system-bus
+    /// connection) into every discovery pass.
     pub fn spawn(
         config_rx: watch::Receiver<Config>,
+        ctx: Arc<Context>,
     ) -> (watch::Receiver<TrayState>, RefreshSignal) {
-        Self::spawn_with(config_rx, || Box::pin(crate::discovery::discover_all()))
+        Self::spawn_with(config_rx, move || {
+            let ctx = ctx.clone();
+            Box::pin(async move { crate::discovery::discover_all(&ctx).await })
+        })
     }
 
     /// Injectable discovery for tests. `discover` is called once at start, then

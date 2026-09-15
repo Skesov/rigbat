@@ -1,3 +1,4 @@
+use crate::discovery::Context;
 use crate::domain::{BatteryReading, DeviceInfo};
 
 pub mod bluez;
@@ -16,5 +17,5 @@ pub trait BatterySource: Send {
 #[async_trait::async_trait]
 pub trait BatteryBackend: Send + Sync {
     fn name(&self) -> &'static str;
-    async fn discover(&self) -> Vec<Box<dyn BatterySource>>;
+    async fn discover(&self, ctx: &Context) -> Vec<Box<dyn BatterySource>>;
 }

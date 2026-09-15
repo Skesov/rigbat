@@ -240,7 +240,8 @@ async fn async_main(invocation: Invocation) {
         return;
     }
 
-    let sources = discovery::discover_all().await;
+    let ctx = discovery::Context::new();
+    let sources = discovery::discover_all(&ctx).await;
 
     let rows = app::poll_once(sources).await;
 
@@ -253,6 +254,33 @@ async fn async_main(invocation: Invocation) {
     }
 }
 
+/// Spawns the two long-lived watchers that need the system bus (resume
+/// detection, BlueZ event watching), reusing the process-wide connection from
+/// `ctx`. Both are optimisations, never dependencies — the periodic discovery
+/// sweep is the safety net — so this runs in its own task: a slow or
+/// unreachable bus must delay neither the tray icon nor the waybar module's
+/// first frame. If the bus is unavailable both are skipped, the same
+/// degradation each watcher applied on its own before the connection was
+/// shared.
+fn spawn_bus_dependent_tasks(
+    ctx: std::sync::Arc<discovery::Context>,
+    refresh: crate::app::refresh::RefreshSignal,
+) {
+    tokio::spawn(async move {
+        match ctx.system_bus().await {
+            Ok(conn) => {
+                crate::session::watch_resume(refresh.clone(), conn.clone());
+                crate::sources::bluez::watch_events(refresh, conn);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "system D-Bus unavailable: {e:#}; no resume re-poll, no BlueZ event watching"
+                );
+            }
+        }
+    });
+}
+
 async fn run_tray() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting rigbat tray");
 
@@ -262,9 +290,9 @@ async fn run_tray() {
     // whenever config.json changes on disk (best-effort, never fatal).
     crate::config::watch_file(config_tx.clone());
 
-    let (rx, refresh) = app::supervisor::Supervisor::spawn(config_rx);
-    crate::session::watch_resume(refresh.clone());
-    crate::sources::bluez::watch_events(refresh.clone());
+    let ctx = std::sync::Arc::new(discovery::Context::new());
+    let (rx, refresh) = app::supervisor::Supervisor::spawn(config_rx, ctx.clone());
+    spawn_bus_dependent_tasks(ctx.clone(), refresh.clone());
     let theme_rx = appearance::spawn();
     // Spawn the notifier after config_tx is available so it can receive the
     // notifications_enabled flag and per-device thresholds via a config receiver.
@@ -313,9 +341,9 @@ async fn run_waybar() {
     let (config_tx, config_rx) = tokio::sync::watch::channel(config);
     crate::config::watch_file(config_tx.clone());
 
-    let (mut rx, refresh) = app::supervisor::Supervisor::spawn(config_rx);
-    crate::session::watch_resume(refresh.clone());
-    crate::sources::bluez::watch_events(refresh.clone());
+    let ctx = std::sync::Arc::new(discovery::Context::new());
+    let (mut rx, refresh) = app::supervisor::Supervisor::spawn(config_rx, ctx.clone());
+    spawn_bus_dependent_tasks(ctx.clone(), refresh.clone());
 
     // Separate from the receiver Supervisor::spawn consumed, so a
     // primary_device/shown_devices edit is picked up even between two

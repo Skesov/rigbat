@@ -16,6 +16,7 @@ use tokio::time::Instant;
 use zbus::zvariant::OwnedObjectPath;
 
 use crate::app::refresh::RefreshSignal;
+use crate::discovery::Context;
 use crate::domain::{BatteryReading, ChargeState, DeviceInfo, Transport, guess_kind};
 
 use super::{BatteryBackend, BatterySource};
@@ -51,8 +52,8 @@ impl BatteryBackend for BluezBackend {
         "bluez"
     }
 
-    async fn discover(&self) -> Vec<Box<dyn BatterySource>> {
-        match discover_inner().await {
+    async fn discover(&self, ctx: &Context) -> Vec<Box<dyn BatterySource>> {
+        match discover_inner(ctx).await {
             Ok(sources) => sources,
             Err(e) => {
                 tracing::warn!("bluez discovery failed: {e:#}");
@@ -62,10 +63,8 @@ impl BatteryBackend for BluezBackend {
     }
 }
 
-async fn discover_inner() -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
-    let conn = zbus::Connection::system()
-        .await
-        .context("connecting to system D-Bus")?;
+async fn discover_inner(ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
+    let conn = ctx.system_bus().await?;
 
     let om = zbus::fdo::ObjectManagerProxy::builder(&conn)
         .destination("org.bluez")
@@ -149,9 +148,9 @@ async fn discover_inner() -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
 /// added, removed, or reports a new battery level. Best-effort: if the
 /// system bus or BlueZ is unavailable the task exits and rigbat falls back
 /// to the supervisor's periodic discovery.
-pub fn watch_events(refresh: RefreshSignal) {
+pub fn watch_events(refresh: RefreshSignal, conn: zbus::Connection) {
     tokio::spawn(async move {
-        if let Err(e) = watch_events_inner(refresh).await {
+        if let Err(e) = watch_events_inner(refresh, conn).await {
             tracing::warn!("bluez event watcher stopped: {e:#}");
         }
     });
@@ -223,11 +222,7 @@ async fn subscribe(conn: &zbus::Connection) -> anyhow::Result<Subscriptions> {
     })
 }
 
-async fn watch_events_inner(refresh: RefreshSignal) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system()
-        .await
-        .context("connecting to system D-Bus")?;
-
+async fn watch_events_inner(refresh: RefreshSignal, conn: zbus::Connection) -> anyhow::Result<()> {
     let dbus = zbus::fdo::DBusProxy::new(&conn)
         .await
         .context("building DBusProxy")?;

@@ -114,7 +114,7 @@ impl BatteryBackend for SysfsBackend {
         "sysfs"
     }
 
-    async fn discover(&self) -> Vec<Box<dyn BatterySource>> {
+    async fn discover(&self, _ctx: &crate::discovery::Context) -> Vec<Box<dyn BatterySource>> {
         SysfsSource::enumerate()
             .into_iter()
             .map(|s| Box::new(s) as Box<dyn BatterySource>)

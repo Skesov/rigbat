@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::mpsc::{self, TryRecvError};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -26,6 +28,16 @@ struct SettingsApp {
     saved_at: Option<Instant>,
     /// Reflects `~/.config/autostart/rigbat.desktop` existence — not stored in Config.
     autostart_enabled: bool,
+    /// Kept alive for the life of the window and used to spawn scans; never
+    /// entered blockingly from `ui()`, which runs on the main thread.
+    rt: Arc<tokio::runtime::Runtime>,
+    /// Shared across scans so the system-bus connection they open is memoized.
+    discovery_ctx: Arc<crate::discovery::Context>,
+    /// `Some` while a scan's result is outstanding; taken (and cleared) once
+    /// `try_recv` yields something.
+    scan_rx: Option<mpsc::Receiver<Vec<DeviceInfo>>>,
+    /// True from the moment a scan is spawned until its result is applied.
+    scanning: bool,
 }
 
 impl SettingsApp {
@@ -36,7 +48,9 @@ impl SettingsApp {
     }
 
     /// Copies the fields this window owns onto `target`, leaving everything
-    /// else (in particular `primary_device`, owned by the tray menu) untouched.
+    /// else untouched. `primary_device` is deliberately not one of them: no UI
+    /// sets it, and the tray resolves the aggregate icon without it when it is
+    /// `None`.
     fn apply_to(&self, target: &mut Config) {
         target.display_mode = self.config.display_mode;
         target.tray_mode = self.config.tray_mode;
@@ -51,8 +65,8 @@ impl SettingsApp {
     /// `SAVED_VISIBLE_SECS`. Logs on failure; the status line stays unchanged.
     ///
     /// Re-reads the on-disk config first and merges only the fields this window
-    /// owns into it: the tray menu also writes `primary_device` on every device
-    /// click, and a stale in-memory snapshot here would silently revert that.
+    /// owns into it, so a hand-edited `primary_device` (or any future field this
+    /// window does not display) survives a save from a stale in-memory snapshot.
     fn persist(&mut self, ui: &egui::Ui) {
         let mut on_disk = config::load();
         self.apply_to(&mut on_disk);
@@ -67,13 +81,86 @@ impl SettingsApp {
         }
     }
 
+    /// Spawns one discovery pass on `rt` if none is already in flight, wiring
+    /// its result to a fresh channel and waking `egui_ctx` when it lands so the
+    /// window updates without waiting for the next input event.
+    fn spawn_scan(&mut self, egui_ctx: egui::Context) {
+        if self.scanning {
+            return;
+        }
+        self.scanning = true;
+        let (tx, rx) = mpsc::channel();
+        self.scan_rx = Some(rx);
+        let ctx = Arc::clone(&self.discovery_ctx);
+        self.rt.spawn(async move {
+            let devices: Vec<DeviceInfo> = crate::discovery::discover_all(&ctx)
+                .await
+                .iter()
+                .map(|s| s.device().clone())
+                .collect();
+            // The receiver is dropped if the window closed mid-scan; ignore that.
+            let _ = tx.send(devices);
+            egui_ctx.request_repaint();
+        });
+    }
+
+    /// Drains a completed scan's result, if any, without blocking. Safe to
+    /// call every frame.
+    fn poll_scan(&mut self) {
+        let Some(rx) = self.scan_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(devices) => self.apply_scan_result(devices),
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.scanning = false;
+                self.scan_rx = None;
+            }
+        }
+    }
+
+    /// Applies a freshly completed scan's device list. Only `self.devices`
+    /// changes: `shown_devices` and `device_overrides` are keyed by device
+    /// name and are left exactly as the user set them, whether or not the
+    /// device set changed since the previous scan.
+    fn apply_scan_result(&mut self, devices: Vec<DeviceInfo>) {
+        self.devices = devices;
+        self.scanning = false;
+        self.scan_rx = None;
+    }
+
+    /// Renders a "Rescan" button, disabled and relabeled while a scan is
+    /// already in flight.
+    fn render_rescan_button(&mut self, ui: &mut egui::Ui) {
+        let egui_ctx = ui.ctx().clone();
+        ui.add_enabled_ui(!self.scanning, |ui| {
+            let label = if self.scanning {
+                "Scanning…"
+            } else {
+                "Rescan"
+            };
+            if ui.button(label).clicked() {
+                self.spawn_scan(egui_ctx.clone());
+            }
+        });
+    }
+
+    /// Shared empty-state message for both device sections below, pointing at
+    /// the Rescan button instead of telling the user to reopen the window.
+    fn render_device_empty_state(ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new("No devices found. Connect a device, then press Rescan.").weak(),
+        );
+    }
+
     /// Renders the per-device checkboxes that drive `shown_devices`. Each checkbox
     /// toggles whether that device gets a tray icon (PerDevice) or appears in the
     /// menu (PrimaryOnly). Unchecking a duplicate (e.g. the BT copy of a mouse that
     /// is also seen over USB) removes that one icon.
     fn render_device_picker(&mut self, ui: &mut egui::Ui) {
         if self.devices.is_empty() {
-            ui.label(egui::RichText::new("No devices found. Connect a device and reopen.").weak());
+            Self::render_device_empty_state(ui);
             return;
         }
 
@@ -103,7 +190,7 @@ impl SettingsApp {
     /// lost_focus) or checkbox toggle, never on every dragged pixel.
     fn render_device_overrides(&mut self, ui: &mut egui::Ui) {
         if self.devices.is_empty() {
-            ui.label(egui::RichText::new("No devices found. Connect a device and reopen.").weak());
+            Self::render_device_empty_state(ui);
             return;
         }
 
@@ -175,6 +262,8 @@ impl SettingsApp {
 impl eframe::App for SettingsApp {
     /// Called each frame; `ui` is the root central panel provided by eframe 0.34.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_scan();
+
         // Apply a 16 px inner margin on all sides per the design system. We
         // replace the default CentralPanel frame with one that only changes
         // inner_margin, keeping all other visual properties from the theme.
@@ -218,7 +307,10 @@ impl SettingsApp {
         if per_device {
             ui.indent("tray_device_picker", |ui| {
                 ui.add_space(4.0);
-                ui.strong("Devices in tray");
+                ui.horizontal(|ui| {
+                    ui.strong("Devices in tray");
+                    self.render_rescan_button(ui);
+                });
                 ui.label(egui::RichText::new("Uncheck a device to remove its tray icon.").weak());
                 self.render_device_picker(ui);
             });
@@ -255,7 +347,10 @@ impl SettingsApp {
         }
 
         ui.add_space(8.0);
-        ui.strong("Per-device overrides");
+        ui.horizontal(|ui| {
+            ui.strong("Per-device overrides");
+            self.render_rescan_button(ui);
+        });
         self.render_device_overrides(ui);
 
         // ── Notifications ─────────────────────────────────────────────────────
@@ -365,30 +460,23 @@ fn shown_after_toggle(all: &[String], checked: &HashSet<String>) -> Vec<String> 
     }
 }
 
-/// Gathers connected device infos in a throwaway tokio runtime, dropped before
-/// eframe starts. Returns an empty list if the runtime or discovery fails
-/// (settings must still open so the user can change other options).
-fn discover_devices() -> Vec<DeviceInfo> {
-    let Ok(rt) = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    else {
-        return Vec::new();
-    };
-    rt.block_on(async {
-        crate::discovery::discover_all()
-            .await
-            .iter()
-            .map(|s| s.device().clone())
-            .collect()
-    })
-    // rt dropped here, before eframe::run_native
-}
-
 /// Opens the settings window. Blocks until the user closes it.
+///
+/// Keeps a tokio runtime alive for the life of the window (unlike the old
+/// discover-once-and-drop approach) so devices that connect after the window
+/// opens still show up: a scan is spawned on it at startup and again on
+/// every "Rescan" click, never entered blockingly from `ui()`.
 pub fn run() -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
     let config = config::load();
-    let devices = discover_devices();
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .context("building the tokio runtime for device discovery")?,
+    );
+    let discovery_ctx = Arc::new(crate::discovery::Context::new());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([460.0, 560.0])
@@ -400,16 +488,22 @@ pub fn run() -> anyhow::Result<()> {
     eframe::run_native(
         "rigbat",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             // Follow the system light/dark preference. Confirmed safe in the runtime-less settings
             // process on COSMIC/Wayland — portal theme queries do not hit the zbus-no-runtime path.
             cc.egui_ctx.set_theme(egui::ThemePreference::System);
-            Ok(Box::new(SettingsApp {
+            let mut app = SettingsApp {
                 config,
-                devices,
+                devices: Vec::new(),
                 saved_at: None,
                 autostart_enabled: autostart::is_enabled(),
-            }))
+                rt,
+                discovery_ctx,
+                scan_rx: None,
+                scanning: false,
+            };
+            app.spawn_scan(cc.egui_ctx.clone());
+            Ok(Box::new(app))
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
@@ -425,6 +519,23 @@ mod tests {
             devices: Vec::new(),
             saved_at: None,
             autostart_enabled: false,
+            rt: Arc::new(
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("building test tokio runtime"),
+            ),
+            discovery_ctx: Arc::new(crate::discovery::Context::new()),
+            scan_rx: None,
+            scanning: false,
+        }
+    }
+
+    fn device(name: &str) -> DeviceInfo {
+        DeviceInfo {
+            name: name.to_string(),
+            kind: crate::domain::DeviceKind::Mouse,
+            transport: crate::domain::Transport::Hidraw,
+            locator: None,
         }
     }
 
@@ -562,5 +673,58 @@ mod tests {
             .collect();
         let result = shown_after_toggle(&all, &checked);
         assert_eq!(result, vec!["mouse".to_string(), "headset".to_string()]);
+    }
+
+    #[test]
+    fn apply_scan_result_preserves_shown_devices_and_overrides() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "mouse".to_string(),
+            DeviceSettings {
+                poll_interval_secs: Some(30),
+                low_threshold: Some(10),
+            },
+        );
+        let mut app = settings_app_with(Config {
+            shown_devices: vec!["mouse".to_string()],
+            device_overrides: overrides.clone(),
+            ..Config::default()
+        });
+        app.apply_scan_result(vec![device("mouse"), device("keyboard")]);
+        assert_eq!(app.config.shown_devices, vec!["mouse".to_string()]);
+        assert_eq!(app.config.device_overrides, overrides);
+        assert!(!app.scanning);
+        assert!(app.scan_rx.is_none());
+    }
+
+    #[test]
+    fn apply_scan_result_empty_means_all_survives_device_set_change() {
+        // shown_devices == [] is the canonical "show all"; it must not flip
+        // to a concrete list just because the discovered set changed.
+        let mut app = settings_app_with(Config::default());
+        app.apply_scan_result(vec![device("mouse")]);
+        assert!(app.config.shown_devices.is_empty());
+        app.apply_scan_result(vec![device("mouse"), device("keyboard")]);
+        assert!(app.config.shown_devices.is_empty());
+    }
+
+    #[test]
+    fn apply_scan_result_keeps_override_for_device_that_disappeared() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "headset".to_string(),
+            DeviceSettings {
+                poll_interval_secs: None,
+                low_threshold: Some(5),
+            },
+        );
+        let mut app = settings_app_with(Config {
+            device_overrides: overrides.clone(),
+            ..Config::default()
+        });
+        // "headset" is not in this scan's result.
+        app.apply_scan_result(vec![device("mouse")]);
+        assert_eq!(app.config.device_overrides, overrides);
+        assert!(!app.devices.iter().any(|d| d.name == "headset"));
     }
 }
