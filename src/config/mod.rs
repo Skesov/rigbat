@@ -103,12 +103,21 @@ impl Config {
             .max(1)
     }
 
-    /// Effective low-battery threshold for `name`: device override → global.
+    /// Effective low-battery threshold for `name`: device override → global →
+    /// clamp to the percent domain.
+    ///
+    /// The clamp is not decoration: `serde` accepts any `u8`, and the settings
+    /// window's 5-50 range does not constrain a hand-edited `config.json`. A
+    /// stored `250` would make `percent <= threshold` true for every
+    /// discharging device, painting a full battery red and reporting `low` to
+    /// waybar forever. Clamping keeps a nonsensical value inside the domain
+    /// `BatteryReading::percent` already guarantees.
     pub fn effective_low_threshold(&self, name: &str) -> u8 {
         self.device_overrides
             .get(name)
             .and_then(|d| d.low_threshold)
             .unwrap_or(self.low_threshold)
+            .min(100)
     }
 }
 
@@ -517,6 +526,27 @@ mod tests {
             cfg.effective_low_threshold("keyboard"),
             DEFAULT_LOW_THRESHOLD
         );
+    }
+
+    /// A hand-edited config.json can carry any `u8`; above 100 every
+    /// discharging device would classify as low forever.
+    #[test]
+    fn effective_low_threshold_clamps_above_full_charge() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "mouse".to_string(),
+            DeviceSettings {
+                poll_interval_secs: None,
+                low_threshold: Some(255),
+            },
+        );
+        let cfg = Config {
+            low_threshold: 250,
+            device_overrides: overrides,
+            ..Config::default()
+        };
+        assert_eq!(cfg.effective_low_threshold("mouse"), 100);
+        assert_eq!(cfg.effective_low_threshold("keyboard"), 100);
     }
 
     // --- serde with device_overrides ----------------------------------------
