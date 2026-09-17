@@ -79,8 +79,10 @@ which modern desktops (GNOME, KDE, COSMIC) import into the systemd user manager
 at login automatically.
 
 Use the service **or** the in-app "Startup" toggle (which writes an XDG autostart
-entry), not both — each launches `rigbat tray`, so enabling both starts two
-instances.
+entry), not both — each launches `rigbat tray`. A second instance detects the
+first through a session-bus name and exits immediately instead of doubling
+every device in the tray; the settings window also disables the Startup
+checkbox and explains why when it sees the service enabled.
 
 ## Permissions
 

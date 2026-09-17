@@ -32,7 +32,9 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
 - `rigbat --waybar` — long-lived waybar custom-module: holds its own `Supervisor` and prints one
   JSON line for the featured device on startup and on every state change (run with `interval`
   omitted, not `tray`'s icon/notifications).
-- `rigbat tray` — SNI daemon (`Supervisor` + `ksni`), the long-running mode.
+- `rigbat tray` — SNI daemon (`Supervisor` + `ksni`), the long-running mode. Claims
+  `org.rigbat.Tray` on the session bus before publishing anything (`tray::single_instance`); a
+  second instance sees the name taken and exits 0 instead of doubling every tray icon.
 - `rigbat settings` — GTK-free eframe/egui settings window in a SEPARATE process (the tray spawns
   it). It edits `config.json`; the tray applies changes via the file watch. It holds a tokio
   runtime only to run device discovery off the UI thread — the winit event loop is never entered

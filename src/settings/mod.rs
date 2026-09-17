@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::{Duration, Instant};
@@ -20,6 +21,35 @@ const LOW_THRESHOLD_RANGE: std::ops::RangeInclusive<u8> = 5..=50;
 /// a HID device every second, which drains the battery it is meant to monitor.
 const POLL_INTERVAL_RANGE: std::ops::RangeInclusive<u64> = 10..=3600;
 
+/// systemd targets `systemctl --user enable` links a unit into. Checked in
+/// this order but either one enabling `rigbat.service` counts: which target
+/// applies depends on the unit's own `WantedBy=`, not on anything this window
+/// controls.
+const SYSTEMD_WANTS_TARGETS: [&str; 2] = ["default.target.wants", "graphical-session.target.wants"];
+
+/// The unit name `make service` installs and `systemctl --user enable`
+/// operates on.
+const SYSTEMD_UNIT_NAME: &str = "rigbat.service";
+
+/// Returns `true` if `rigbat.service` is enabled for the systemd user manager
+/// rooted at `unit_dir` (`$XDG_CONFIG_HOME/systemd/user`, falling back to
+/// `~/.config/systemd/user`) — i.e. `systemctl --user enable` linked it into
+/// `default.target.wants/` or `graphical-session.target.wants/`. A pure
+/// filesystem check: no systemd dependency, no shelling out.
+fn systemd_service_enabled_at(unit_dir: &Path) -> bool {
+    SYSTEMD_WANTS_TARGETS
+        .iter()
+        .any(|target| unit_dir.join(target).join(SYSTEMD_UNIT_NAME).exists())
+}
+
+/// Returns `true` if `rigbat.service` is enabled, or `false` if the config
+/// directory cannot be determined (no home directory in the environment).
+fn systemd_service_enabled() -> bool {
+    directories::BaseDirs::new()
+        .map(|b| systemd_service_enabled_at(&b.config_dir().join("systemd").join("user")))
+        .unwrap_or(false)
+}
+
 struct SettingsApp {
     config: Config,
     devices: Vec<DeviceInfo>,
@@ -28,6 +58,11 @@ struct SettingsApp {
     saved_at: Option<Instant>,
     /// Reflects `~/.config/autostart/rigbat.desktop` existence — not stored in Config.
     autostart_enabled: bool,
+    /// Whether `rigbat.service` is enabled in the systemd user manager,
+    /// checked once when the window opens (T29): a second launch path to the
+    /// same `rigbat tray` that the autostart checkbox must not silently
+    /// duplicate.
+    systemd_service_enabled: bool,
     /// Kept alive for the life of the window and used to spawn scans; never
     /// entered blockingly from `ui()`, which runs on the main thread.
     rt: Arc<tokio::runtime::Runtime>,
@@ -369,7 +404,18 @@ impl SettingsApp {
         // ── Startup ───────────────────────────────────────────────────────────
         ui.add_space(16.0);
         Self::section_header(ui, "Startup");
-        if ui
+        if self.systemd_service_enabled {
+            ui.add_enabled_ui(false, |ui| {
+                ui.checkbox(&mut self.autostart_enabled, "Start with session");
+            });
+            ui.label(
+                egui::RichText::new(
+                    "Managed by the systemd user service. Disable it with: \
+                     systemctl --user disable --now rigbat.service",
+                )
+                .weak(),
+            );
+        } else if ui
             .checkbox(&mut self.autostart_enabled, "Start with session")
             .changed()
         {
@@ -497,6 +543,7 @@ pub fn run() -> anyhow::Result<()> {
                 devices: Vec::new(),
                 saved_at: None,
                 autostart_enabled: autostart::is_enabled(),
+                systemd_service_enabled: systemd_service_enabled(),
                 rt,
                 discovery_ctx,
                 scan_rx: None,
@@ -512,6 +559,63 @@ pub fn run() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Unique scratch directory under the OS temp dir for one test. Removed
+    /// at the end of the test regardless of outcome.
+    fn scratch_dir(test_name: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "rigbat-settings-test-{test_name}-{}-{n}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn systemd_service_enabled_at_false_when_dir_absent() {
+        let dir = scratch_dir("dir-absent");
+        assert!(!systemd_service_enabled_at(&dir));
+    }
+
+    #[test]
+    fn systemd_service_enabled_at_false_when_no_symlink() {
+        let dir = scratch_dir("no-symlink");
+        std::fs::create_dir_all(dir.join("default.target.wants")).unwrap();
+        assert!(!systemd_service_enabled_at(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn systemd_service_enabled_at_true_for_default_target_wants() {
+        let dir = scratch_dir("default-target");
+        let wants = dir.join("default.target.wants");
+        std::fs::create_dir_all(&wants).unwrap();
+        std::fs::write(wants.join("rigbat.service"), "").unwrap();
+        assert!(systemd_service_enabled_at(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn systemd_service_enabled_at_true_for_graphical_session_target_wants() {
+        let dir = scratch_dir("graphical-session-target");
+        let wants = dir.join("graphical-session.target.wants");
+        std::fs::create_dir_all(&wants).unwrap();
+        std::fs::write(wants.join("rigbat.service"), "").unwrap();
+        assert!(systemd_service_enabled_at(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn systemd_service_enabled_at_ignores_other_unit_names() {
+        let dir = scratch_dir("other-unit");
+        let wants = dir.join("default.target.wants");
+        std::fs::create_dir_all(&wants).unwrap();
+        std::fs::write(wants.join("other.service"), "").unwrap();
+        assert!(!systemd_service_enabled_at(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn settings_app_with(config: Config) -> SettingsApp {
         SettingsApp {
@@ -519,6 +623,7 @@ mod tests {
             devices: Vec::new(),
             saved_at: None,
             autostart_enabled: false,
+            systemd_service_enabled: false,
             rt: Arc::new(
                 tokio::runtime::Builder::new_current_thread()
                     .build()

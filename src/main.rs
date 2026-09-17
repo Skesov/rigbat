@@ -281,7 +281,32 @@ fn spawn_bus_dependent_tasks(
     });
 }
 
+/// Prints the human-facing explanation for a second `rigbat tray` standing
+/// down. Not a `tracing` log line: this is addressed to whoever is watching
+/// the terminal, not the journal.
+#[allow(clippy::print_stderr)]
+fn announce_already_running() {
+    eprintln!(
+        "another rigbat tray is already running in this session; leaving it in charge \
+         (enable either the systemd service or the Startup toggle, not both)"
+    );
+}
+
 async fn run_tray() {
+    // Keep the session-bus connection alive for the whole process: dropping
+    // it releases the single-instance name and reopens the collision.
+    let _session_guard = match tray::single_instance::acquire().await {
+        tray::single_instance::SingleInstance::AlreadyRunning => {
+            tracing::info!(
+                "another rigbat tray already owns the session-bus single-instance name; exiting"
+            );
+            announce_already_running();
+            return;
+        }
+        tray::single_instance::SingleInstance::Acquired(conn) => Some(conn),
+        tray::single_instance::SingleInstance::Unavailable => None,
+    };
+
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting rigbat tray");
 
     let config = crate::config::load();

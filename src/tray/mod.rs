@@ -1,5 +1,6 @@
 pub mod icon;
 pub mod manager;
+pub mod single_instance;
 
 use std::time::{Duration, Instant};
 

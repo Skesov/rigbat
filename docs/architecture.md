@@ -65,6 +65,12 @@ Vec<Box<dyn BatterySource>>`. Finds devices and constructs sources. Backends are
 `tokio`, message-passing, **no `Mutex` on shared data**. The `Supervisor` owns all state; data
 flows out through channels.
 
+- Before any of this starts, `run_tray` claims `org.rigbat.Tray` on the session bus
+  (`tray::single_instance`, `DoNotQueue`, no `ReplaceExisting`). A second `rigbat tray` (e.g. the
+  systemd service and the "Start with session" autostart entry both enabled) sees the name
+  already owned, prints one line to stderr, and exits 0 instead of publishing a duplicate set of
+  `ksni` icons — `ksni`'s own `org.kde.StatusNotifierItem-<pid>-<n>` is PID-keyed and never
+  collides, which is why that duplication otherwise goes unnoticed.
 - `Supervisor::spawn(config_rx)` starts a **manager task** holding a `DeviceRegistry` — the
   device order, infos, readings and per-device task handles, keyed by `DeviceId`. It owns
   discovery: it runs `discover_all()` at start, every 30 s, and on every refresh request.
