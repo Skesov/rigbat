@@ -11,6 +11,7 @@ pub trait IconRenderer: Send + Sync {
         kind: Option<DeviceKind>,
         theme: &Theme,
         mode: DisplayMode,
+        stale: bool,
     ) -> Vec<ksni::Icon>;
 }
 
@@ -28,6 +29,8 @@ impl Theme {
         Self {
             normal: [216, 222, 233, 255],
             low: [191, 97, 106, 255],
+            // 8.18:1 against a #1e1e1e panel — well clear of the 3:1 WCAG
+            // 2.1 SC 1.4.11 floor for graphical objects.
             charging: [163, 190, 140, 255],
             offline: [216, 222, 233, 180],
         }
@@ -38,7 +41,14 @@ impl Theme {
         Self {
             normal: [59, 66, 82, 255],
             low: [191, 97, 106, 255],
-            charging: [163, 190, 140, 255],
+            // The Nord green (#a3be8c) used on dark only reaches 1.79:1
+            // against a #f0f0f0 panel, well under the 3:1 WCAG 2.1
+            // SC 1.4.11 floor for graphical objects. This darker shade
+            // reaches 6.19:1, and still clears the floor at 3.23:1 once the
+            // fill is dimmed by STALE_ALPHA — which is the case that has to
+            // pass, since in IconOnly mode the fill level *is* the reading.
+            // Do not swap it for the dark-theme value.
+            charging: [69, 96, 53, 255],
             offline: [59, 66, 82, 180],
         }
     }
@@ -56,6 +66,15 @@ impl Default for TinySkiaRenderer {
     }
 }
 
+/// Alpha multiplier applied to the fill bar of a stale-but-known reading.
+/// 0.38 (the Material/Apple convention) is for *disabled controls*, which
+/// WCAG 2.1 SC 1.4.11 exempts from contrast — a stale battery reading is
+/// still information the user must read, not a control, so that convention
+/// does not apply here. 0.70 keeps the outline/digit colours (never dimmed,
+/// see below) reading clearly muted at 22 px while every meaning-bearing
+/// mark stays at full contrast.
+const STALE_ALPHA: f32 = 0.70;
+
 impl IconRenderer for TinySkiaRenderer {
     fn render(
         &self,
@@ -63,6 +82,7 @@ impl IconRenderer for TinySkiaRenderer {
         kind: Option<DeviceKind>,
         theme: &Theme,
         mode: DisplayMode,
+        stale: bool,
     ) -> Vec<ksni::Icon> {
         let (color_rgba, percent, is_offline) = match status {
             PrimaryStatus::Offline => (theme.offline, None, true),
@@ -72,6 +92,10 @@ impl IconRenderer for TinySkiaRenderer {
         };
 
         // Offline always draws the offline battery regardless of mode.
+        // `Offline` + `stale` cannot happen by construction (resolve_for
+        // never sets stale alongside Offline), but if it did, this path
+        // draws the plain offline battery rather than dimming an
+        // already-empty icon.
         if is_offline {
             return self
                 .sizes
@@ -80,12 +104,27 @@ impl IconRenderer for TinySkiaRenderer {
                 .collect();
         }
 
+        // A low battery that has gone stale is exactly the reading that must
+        // not get quieter, so `Low` is never dimmed even when stale. Every
+        // other status dims the fill bar only — the outline and the digits
+        // carry the reading and stay at full colour/contrast.
+        let dim_fill = stale && !matches!(status, PrimaryStatus::Low { .. });
+        let fill_rgba = if dim_fill {
+            let [r, g, b, a] = color_rgba;
+            let scaled = (f32::from(a) * STALE_ALPHA).round().clamp(0.0, 255.0) as u8;
+            [r, g, b, scaled]
+        } else {
+            color_rgba
+        };
+
         let fill_ratio = percent.map_or(0.0, |p| f32::from(p) / 100.0);
         let pct = percent.unwrap_or(0);
 
         self.sizes
             .iter()
-            .filter_map(|&size| render_mode(size, color_rgba, fill_ratio, pct, mode, kind))
+            .filter_map(|&size| {
+                render_mode(size, color_rgba, fill_rgba, fill_ratio, pct, mode, kind)
+            })
             .collect()
     }
 }
@@ -103,11 +142,15 @@ fn wide_width(height: u32) -> u32 {
     ((height as f32) * WIDE_ASPECT).round() as u32
 }
 
-/// Renders one icon for the given mode and size. Returns `None` only if
-/// `Pixmap::new` fails (does not happen for sizes ≤ 64).
+/// Renders one icon for the given mode and size. `fill_rgba` is the colour
+/// used for the fill bar (may be dimmed for a stale reading); `color_rgba`
+/// is the full colour used for the outline, nub, digits and glyph, which are
+/// never dimmed. Returns `None` only if `Pixmap::new` fails (does not happen
+/// for sizes ≤ 64).
 fn render_mode(
     size: u32,
     color_rgba: [u8; 4],
+    fill_rgba: [u8; 4],
     fill_ratio: f32,
     percent: u8,
     mode: DisplayMode,
@@ -115,12 +158,14 @@ fn render_mode(
 ) -> Option<ksni::Icon> {
     let [r, g, b, a] = color_rgba;
     let color = Color::from_rgba8(r, g, b, a);
+    let [fr, fg, fb, fa] = fill_rgba;
+    let fill_color = Color::from_rgba8(fr, fg, fb, fa);
     let w = wide_width(size);
 
     match mode {
         DisplayMode::IconOnly => {
             let mut pixmap = Pixmap::new(w, size)?;
-            draw_battery(&mut pixmap, fill_ratio, color, false);
+            draw_battery(&mut pixmap, fill_ratio, fill_color, color, false);
             maybe_draw_kind_glyph(&mut pixmap, kind, size, color);
             Some(pixmap_to_icon(pixmap))
         }
@@ -142,6 +187,7 @@ fn render_mode(
 }
 
 /// Renders an offline (crossed) battery icon, matching the online width.
+/// Offline is never dimmed, so fill and mark share one colour.
 fn render_offline_battery(
     n: u32,
     color_rgba: [u8; 4],
@@ -150,7 +196,7 @@ fn render_offline_battery(
     let mut pixmap = Pixmap::new(wide_width(n), n)?;
     let [r, g, b, a] = color_rgba;
     let color = Color::from_rgba8(r, g, b, a);
-    draw_battery(&mut pixmap, 0.0, color, true);
+    draw_battery(&mut pixmap, 0.0, color, color, true);
     maybe_draw_kind_glyph(&mut pixmap, kind, n, color);
     Some(pixmap_to_icon(pixmap))
 }
@@ -160,14 +206,22 @@ fn render_offline_battery(
 // ---------------------------------------------------------------------------
 
 /// Draws the full battery (outline + fill + nub + optional cross line)
-/// into `pixmap`. The battery occupies the full pixmap area.
-fn draw_battery(pixmap: &mut Pixmap, fill_ratio: f32, color: Color, is_offline: bool) {
+/// into `pixmap`. The battery occupies the full pixmap area. `fill_color`
+/// paints the fill bar only; `mark_color` paints the outline, nub and cross
+/// line — the meaning-bearing marks, which are never dimmed.
+fn draw_battery(
+    pixmap: &mut Pixmap,
+    fill_ratio: f32,
+    fill_color: Color,
+    mark_color: Color,
+    is_offline: bool,
+) {
     let g = battery_geometry(pixmap.width() as f32, pixmap.height() as f32);
-    draw_battery_fill(pixmap, &g, fill_ratio, color);
-    draw_battery_outline(pixmap, &g, color);
-    draw_battery_nub(pixmap, &g, color);
+    draw_battery_fill(pixmap, &g, fill_ratio, fill_color);
+    draw_battery_outline(pixmap, &g, mark_color);
+    draw_battery_nub(pixmap, &g, mark_color);
     if is_offline {
-        draw_cross_line(pixmap, &g, color);
+        draw_cross_line(pixmap, &g, mark_color);
     }
 }
 
@@ -680,6 +734,7 @@ mod tests {
                 None,
                 &Theme::dark(),
                 mode,
+                false,
             );
             save(&icons[0], &format!("/tmp/rigbat_{name}.png"));
         }
@@ -697,6 +752,7 @@ mod tests {
                 kind,
                 &Theme::dark(),
                 DisplayMode::IconOnly,
+                false,
             );
             save(&icons[0], &format!("/tmp/rigbat_glyph_{kname}.png"));
         }
@@ -712,6 +768,7 @@ mod tests {
             None,
             &Theme::dark(),
             DisplayMode::IconOnly,
+            false,
         );
         assert_eq!(icons.len(), default_sizes().len());
     }
@@ -725,6 +782,7 @@ mod tests {
             None,
             &Theme::dark(),
             DisplayMode::IconOnly,
+            false,
         );
         for icon in &icons {
             // Height matches a requested size; width is slightly wider.
@@ -745,6 +803,7 @@ mod tests {
             None,
             &Theme::dark(),
             DisplayMode::PercentOnly,
+            false,
         );
         assert_eq!(icons.len(), default_sizes().len());
     }
@@ -757,6 +816,7 @@ mod tests {
             None,
             &Theme::dark(),
             DisplayMode::PercentOnly,
+            false,
         );
         for icon in &icons {
             assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
@@ -773,6 +833,7 @@ mod tests {
             None,
             &Theme::dark(),
             DisplayMode::PercentInIcon,
+            false,
         );
         assert_eq!(icons.len(), default_sizes().len());
     }
@@ -785,6 +846,7 @@ mod tests {
             None,
             &Theme::dark(),
             DisplayMode::PercentInIcon,
+            false,
         );
         for icon in &icons {
             assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
@@ -801,6 +863,7 @@ mod tests {
             None,
             &Theme::dark(),
             DisplayMode::PercentOnly,
+            false,
         );
         assert_eq!(icons.len(), default_sizes().len());
         for icon in &icons {
@@ -816,7 +879,7 @@ mod tests {
             DisplayMode::PercentOnly,
             DisplayMode::PercentInIcon,
         ] {
-            let icons = renderer.render(PrimaryStatus::Offline, None, &Theme::dark(), mode);
+            let icons = renderer.render(PrimaryStatus::Offline, None, &Theme::dark(), mode, false);
             assert_eq!(
                 icons.len(),
                 default_sizes().len(),
@@ -879,6 +942,7 @@ mod tests {
             None,
             &Theme::dark(),
             DisplayMode::IconOnly,
+            false,
         );
         assert_eq!(icons.len(), default_sizes().len());
         for icon in &icons {
@@ -894,6 +958,7 @@ mod tests {
             None,
             &Theme::dark(),
             DisplayMode::IconOnly,
+            false,
         );
         assert_eq!(icons.len(), default_sizes().len());
         for icon in &icons {
@@ -909,6 +974,7 @@ mod tests {
             None,
             &Theme::dark(),
             DisplayMode::IconOnly,
+            false,
         );
         assert_eq!(icons.len(), default_sizes().len());
         for icon in &icons {
@@ -925,12 +991,175 @@ mod tests {
     fn render_dark_differs_from_light() {
         let renderer = TinySkiaRenderer::default();
         let status = PrimaryStatus::Ok { percent: 50 };
-        let dark_icons = renderer.render(status, None, &Theme::dark(), DisplayMode::IconOnly);
-        let light_icons = renderer.render(status, None, &Theme::light(), DisplayMode::IconOnly);
+        let dark_icons =
+            renderer.render(status, None, &Theme::dark(), DisplayMode::IconOnly, false);
+        let light_icons =
+            renderer.render(status, None, &Theme::light(), DisplayMode::IconOnly, false);
 
         assert!(!dark_icons.is_empty());
         assert!(!light_icons.is_empty());
         assert_ne!(&dark_icons[0].data, &light_icons[0].data);
+    }
+
+    /// Mean alpha (icon data is ARGB, alpha is byte 0 of each pixel) across
+    /// all pixels of the first icon.
+    fn mean_alpha(icon: &ksni::Icon) -> f64 {
+        let alphas: Vec<u8> = icon.data.chunks_exact(4).map(|px| px[0]).collect();
+        alphas.iter().map(|&a| f64::from(a)).sum::<f64>() / alphas.len() as f64
+    }
+
+    #[test]
+    fn stale_reading_renders_more_transparent_than_fresh() {
+        let renderer = TinySkiaRenderer::default();
+        let status = PrimaryStatus::Ok { percent: 50 };
+        let theme = Theme::dark();
+
+        let fresh = renderer.render(status, None, &theme, DisplayMode::IconOnly, false);
+        let stale = renderer.render(status, None, &theme, DisplayMode::IconOnly, true);
+
+        assert_ne!(&fresh[0].data, &stale[0].data);
+        assert!(
+            mean_alpha(&stale[0]) < mean_alpha(&fresh[0]),
+            "stale icon must be more transparent than the fresh one"
+        );
+    }
+
+    #[test]
+    fn stale_offline_renders_same_as_non_stale_offline() {
+        let renderer = TinySkiaRenderer::default();
+        let theme = Theme::dark();
+
+        let plain = renderer.render(
+            PrimaryStatus::Offline,
+            None,
+            &theme,
+            DisplayMode::IconOnly,
+            false,
+        );
+        let stale_offline = renderer.render(
+            PrimaryStatus::Offline,
+            None,
+            &theme,
+            DisplayMode::IconOnly,
+            true,
+        );
+
+        assert_eq!(&plain[0].data, &stale_offline[0].data);
+    }
+
+    #[test]
+    fn low_status_never_dims_when_stale() {
+        let renderer = TinySkiaRenderer::default();
+        let theme = Theme::dark();
+        let status = PrimaryStatus::Low { percent: 10 };
+
+        let fresh = renderer.render(status, None, &theme, DisplayMode::IconOnly, false);
+        let stale = renderer.render(status, None, &theme, DisplayMode::IconOnly, true);
+
+        assert_eq!(mean_alpha(&fresh[0]), mean_alpha(&stale[0]));
+        assert_eq!(&fresh[0].data, &stale[0].data);
+    }
+
+    #[test]
+    fn stale_dimming_leaves_outline_and_digits_unchanged_only_fill_dims() {
+        let renderer = TinySkiaRenderer::default();
+        let theme = Theme::dark();
+        let status = PrimaryStatus::Ok { percent: 60 };
+
+        let fresh = renderer.render(status, None, &theme, DisplayMode::IconOnly, false);
+        let stale = renderer.render(status, None, &theme, DisplayMode::IconOnly, true);
+        let fresh_icon = &fresh[0];
+        let stale_icon = &stale[0];
+
+        // The outline/nub stroke is opaque and drawn last, on top of the
+        // (possibly dimmed) fill, so SourceOver compositing makes its pixels
+        // bit-identical between fresh and stale regardless of fill alpha.
+        // Pixels strictly inside the fill area carry no such stroke, so
+        // dimming must show up there instead.
+        let mut mark_pixel_unchanged = false;
+        let mut fill_pixel_dimmed = false;
+        for (f, s) in fresh_icon
+            .data
+            .chunks_exact(4)
+            .zip(stale_icon.data.chunks_exact(4))
+        {
+            if f[0] == 255 && f == s {
+                mark_pixel_unchanged = true;
+            }
+            if f[0] == 255 && s[0] < f[0] {
+                fill_pixel_dimmed = true;
+            }
+        }
+        assert!(
+            mark_pixel_unchanged,
+            "expected at least one fully-opaque pixel (outline/nub) to be identical"
+        );
+        assert!(
+            fill_pixel_dimmed,
+            "expected at least one fully-opaque fresh pixel (fill) to be more transparent when stale"
+        );
+    }
+
+    /// WCAG 2.1 relative luminance of one sRGB channel (0-255).
+    fn linearize_channel(c: u8) -> f64 {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// WCAG 2.1 relative luminance of an sRGB colour.
+    fn relative_luminance(rgb: [u8; 3]) -> f64 {
+        let [r, g, b] = rgb;
+        0.2126 * linearize_channel(r)
+            + 0.7152 * linearize_channel(g)
+            + 0.0722 * linearize_channel(b)
+    }
+
+    /// WCAG 2.1 contrast ratio between two sRGB colours.
+    fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f64 {
+        let (l1, l2) = (relative_luminance(a), relative_luminance(b));
+        let (lighter, darker) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn light_theme_charging_color_clears_wcag_graphical_object_contrast() {
+        let theme = Theme::light();
+        let [r, g, b, _] = theme.charging;
+        let panel = [0xf0, 0xf0, 0xf0]; // typical light panel background
+        let ratio = contrast_ratio([r, g, b], panel);
+
+        // WCAG 2.1 SC 1.4.11 (Non-text Contrast) requires 3:1 for graphical
+        // objects; a battery icon's charging colour is not an exempt
+        // "inactive control", so it must clear this floor.
+        assert!(
+            ratio >= 3.0,
+            "light theme charging colour contrast is {ratio:.2}:1, below the 3:1 WCAG floor"
+        );
+
+        // The dimmed fill is the case that actually has to pass: in IconOnly
+        // mode there are no digits, so the fill level is the whole reading.
+        // Composite the stale fill over the panel the way the renderer does.
+        let dimmed = [
+            (f64::from(r) * f64::from(STALE_ALPHA)
+                + f64::from(panel[0]) * (1.0 - f64::from(STALE_ALPHA)))
+            .round() as u8,
+            (f64::from(g) * f64::from(STALE_ALPHA)
+                + f64::from(panel[1]) * (1.0 - f64::from(STALE_ALPHA)))
+            .round() as u8,
+            (f64::from(b) * f64::from(STALE_ALPHA)
+                + f64::from(panel[2]) * (1.0 - f64::from(STALE_ALPHA)))
+            .round() as u8,
+        ];
+        let dimmed_ratio = contrast_ratio(dimmed, panel);
+        assert!(
+            dimmed_ratio >= 3.0,
+            "light theme charging fill dimmed by STALE_ALPHA is {dimmed_ratio:.2}:1, \
+             below the 3:1 WCAG floor"
+        );
     }
 
     // --- corner glyph tests -----------------------------------------------
@@ -1002,6 +1231,7 @@ mod tests {
             Some(crate::domain::DeviceKind::Mouse),
             &Theme::dark(),
             DisplayMode::IconOnly,
+            false,
         );
         assert!(!icons.is_empty());
         assert!(
@@ -1018,6 +1248,7 @@ mod tests {
             Some(crate::domain::DeviceKind::Keyboard),
             &Theme::dark(),
             DisplayMode::IconOnly,
+            false,
         );
         assert!(!icons.is_empty());
         assert!(
@@ -1034,6 +1265,7 @@ mod tests {
             Some(crate::domain::DeviceKind::Headset),
             &Theme::dark(),
             DisplayMode::IconOnly,
+            false,
         );
         assert!(!icons.is_empty());
         assert!(
@@ -1050,6 +1282,7 @@ mod tests {
             Some(crate::domain::DeviceKind::Controller),
             &Theme::dark(),
             DisplayMode::IconOnly,
+            false,
         );
         assert!(!icons.is_empty());
         assert!(
@@ -1063,12 +1296,14 @@ mod tests {
     fn glyph_none_and_other_render_identically() {
         let renderer = TinySkiaRenderer { sizes: vec![22] };
         let status = PrimaryStatus::Ok { percent: 50 };
-        let icons_none = renderer.render(status, None, &Theme::dark(), DisplayMode::IconOnly);
+        let icons_none =
+            renderer.render(status, None, &Theme::dark(), DisplayMode::IconOnly, false);
         let icons_other = renderer.render(
             status,
             Some(crate::domain::DeviceKind::Other),
             &Theme::dark(),
             DisplayMode::IconOnly,
+            false,
         );
         assert!(!icons_none.is_empty());
         assert_eq!(icons_none.len(), icons_other.len());
@@ -1083,12 +1318,14 @@ mod tests {
     fn glyph_some_kind_differs_from_none_in_corner() {
         let renderer = TinySkiaRenderer { sizes: vec![22] };
         let status = PrimaryStatus::Ok { percent: 50 };
-        let icons_none = renderer.render(status, None, &Theme::dark(), DisplayMode::IconOnly);
+        let icons_none =
+            renderer.render(status, None, &Theme::dark(), DisplayMode::IconOnly, false);
         let icons_mouse = renderer.render(
             status,
             Some(crate::domain::DeviceKind::Mouse),
             &Theme::dark(),
             DisplayMode::IconOnly,
+            false,
         );
         assert!(!icons_none.is_empty());
         assert_ne!(
@@ -1105,6 +1342,7 @@ mod tests {
             Some(crate::domain::DeviceKind::Mouse),
             &Theme::dark(),
             DisplayMode::IconOnly,
+            false,
         );
         assert!(!icons.is_empty());
         assert!(
@@ -1130,6 +1368,7 @@ mod tests {
                 Some(kind),
                 &Theme::dark(),
                 DisplayMode::IconOnly,
+                false,
             );
             assert!(!icons.is_empty());
             assert!(
@@ -1153,6 +1392,7 @@ mod tests {
             Some(crate::domain::DeviceKind::Mouse),
             &Theme::dark(),
             DisplayMode::PercentOnly,
+            false,
         );
         assert!(!icons.is_empty());
         assert!(
@@ -1173,6 +1413,7 @@ mod tests {
             Some(crate::domain::DeviceKind::Mouse),
             &Theme::dark(),
             DisplayMode::PercentInIcon,
+            false,
         );
         assert!(!icons.is_empty());
         assert!(
@@ -1240,6 +1481,7 @@ mod tests {
             None,
             &theme,
             DisplayMode::IconOnly,
+            false,
         );
         let colors = opaque_colors(&icons[0]);
         assert!(
@@ -1265,6 +1507,7 @@ mod tests {
             None,
             &theme,
             DisplayMode::IconOnly,
+            false,
         );
         let colors = opaque_colors(&icons[0]);
         assert!(
@@ -1286,6 +1529,7 @@ mod tests {
             None,
             &theme,
             DisplayMode::IconOnly,
+            false,
         );
         let colors = opaque_colors(&icons[0]);
         assert!(
@@ -1298,7 +1542,13 @@ mod tests {
     fn offline_status_uses_offline_color() {
         let renderer = TinySkiaRenderer { sizes: vec![22] };
         let theme = Theme::dark();
-        let icons = renderer.render(PrimaryStatus::Offline, None, &theme, DisplayMode::IconOnly);
+        let icons = renderer.render(
+            PrimaryStatus::Offline,
+            None,
+            &theme,
+            DisplayMode::IconOnly,
+            false,
+        );
         let colors = opaque_colors(&icons[0]);
         assert!(
             colors.contains(&theme_color_as_drawn(theme.offline)),
@@ -1316,6 +1566,7 @@ mod tests {
                 None,
                 &theme,
                 DisplayMode::IconOnly,
+                false,
             );
             opaque_pixel_count(&icons[0])
         };
@@ -1344,6 +1595,7 @@ mod tests {
                     None,
                     &theme,
                     DisplayMode::PercentOnly,
+                    false,
                 )
                 .remove(0)
         };
@@ -1372,6 +1624,7 @@ mod tests {
                     None,
                     &theme,
                     DisplayMode::PercentInIcon,
+                    false,
                 )
                 .remove(0)
         };
@@ -1393,12 +1646,19 @@ mod tests {
     fn offline_is_visually_distinct_from_empty_battery() {
         let renderer = TinySkiaRenderer { sizes: vec![22] };
         let theme = Theme::dark();
-        let offline = renderer.render(PrimaryStatus::Offline, None, &theme, DisplayMode::IconOnly);
+        let offline = renderer.render(
+            PrimaryStatus::Offline,
+            None,
+            &theme,
+            DisplayMode::IconOnly,
+            false,
+        );
         let empty = renderer.render(
             PrimaryStatus::Ok { percent: 0 },
             None,
             &theme,
             DisplayMode::IconOnly,
+            false,
         );
         assert_ne!(
             offline[0].data, empty[0].data,
@@ -1410,8 +1670,8 @@ mod tests {
     fn ok_status_theme_reaches_the_pixels() {
         let renderer = TinySkiaRenderer { sizes: vec![22] };
         let status = PrimaryStatus::Ok { percent: 50 };
-        let dark = renderer.render(status, None, &Theme::dark(), DisplayMode::IconOnly);
-        let light = renderer.render(status, None, &Theme::light(), DisplayMode::IconOnly);
+        let dark = renderer.render(status, None, &Theme::dark(), DisplayMode::IconOnly, false);
+        let light = renderer.render(status, None, &Theme::light(), DisplayMode::IconOnly, false);
         assert_ne!(
             dark[0].data, light[0].data,
             "Ok uses theme.normal, which differs between dark and light themes"
@@ -1431,6 +1691,7 @@ mod tests {
                     Some(kind),
                     &Theme::dark(),
                     DisplayMode::IconOnly,
+                    false,
                 );
                 assert_eq!(icons.len(), 1, "size {size}: {kind:?} did not render");
             }

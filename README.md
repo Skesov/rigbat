@@ -10,6 +10,8 @@ System tray battery monitor for gaming peripherals.
   first connected device among the shown ones
 - Automatically discovers connected devices on startup — no manual configuration required
 - Supports multiple devices simultaneously; choose which ones appear in the settings window
+- Keeps showing the last known charge when a device sleeps or goes out of range, drawn dimmed so
+  a remembered reading is never mistaken for a live one
 - Sends desktop notifications when battery is low
 - Works with wired, wireless, and Bluetooth devices
 

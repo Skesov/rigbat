@@ -103,6 +103,13 @@ flows out through channels.
   `JoinHandle::is_finished()` — a task that panicked (as opposed to one reconcile aborted
   itself for a vanished device) is demoted to `Unreachable` and respawned rather than left
   silently dead.
+- **Stale rendering**: a device that is `Unreachable`/`Disconnected` but still holds a reading
+  keeps its normal icon with the fill dimmed by `STALE_ALPHA`, rather than falling back to the
+  empty offline battery — Bluetooth peripherals sleep constantly, and the charge is still known.
+  Only the fill dims: the outline and the digits carry the reading, so they stay at full strength
+  and above the 3:1 WCAG 2.1 SC 1.4.11 floor for graphical objects (the standard's exemption
+  covers inactive _controls_, not information displays). A `Low` status never dims at all — a
+  warning that has gone stale is exactly the one that must not get quieter.
 - **Estimate**: on every reading the manager derives a time-remaining estimate
   (`domain::estimate`) from the device's percent-change history, refusing rather than guessing
   when the evidence is thin (coarse-bucket readings, a short window, an uneven step rate — see

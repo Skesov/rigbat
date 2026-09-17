@@ -91,6 +91,9 @@ fn featured_name(state: &crate::app::supervisor::TrayState, cfg: &Config) -> Opt
 struct Resolved {
     state: DeviceState,
     status: PrimaryStatus,
+    /// `true` when `status` classifies a retained reading from a device that
+    /// is not currently `Online` — the icon should render dimmed.
+    stale: bool,
 }
 
 /// Resolves an icon's device from its key, the current tray state and config.
@@ -103,9 +106,12 @@ struct Resolved {
 /// would be the bug.
 /// Aggregate icon (`key = None`): `featured_name`'s pick.
 ///
-/// `classify` only knows readings, not reachability, so `Unreachable`/
-/// `Disconnected` are mapped to `PrimaryStatus::Offline` here rather than
-/// teaching `classify` about presence.
+/// `classify` only knows readings, not reachability. A device that is not
+/// `Online` still classifies its retained reading (marked `stale`) as long
+/// as one exists — Bluetooth peripherals sleep constantly, and a device
+/// whose last-known charge is 88% should not flash "offline" just because
+/// it is asleep. Only a device with no reading at all falls back to
+/// `PrimaryStatus::Offline`.
 fn resolve_for(key: Option<&str>, state: &TrayState, cfg: &Config) -> Option<Resolved> {
     let name = match key {
         Some(name) => {
@@ -118,17 +124,18 @@ fn resolve_for(key: Option<&str>, state: &TrayState, cfg: &Config) -> Option<Res
         None => featured_name(state, cfg)?,
     };
     let device = state.devices.iter().find(|d| d.info.name == name)?;
-    let status = if device.presence == Presence::Online {
-        classify(
-            device.last_reading,
-            cfg.effective_low_threshold(&device.info.name),
-        )
+    let low_threshold = cfg.effective_low_threshold(&device.info.name);
+    let (status, stale) = if device.presence == Presence::Online {
+        (classify(device.last_reading, low_threshold), false)
+    } else if device.last_reading.is_some() {
+        (classify(device.last_reading, low_threshold), true)
     } else {
-        PrimaryStatus::Offline
+        (PrimaryStatus::Offline, false)
     };
     Some(Resolved {
         state: device.clone(),
         status,
+        stale,
     })
 }
 
@@ -185,8 +192,9 @@ impl Tray for RigbatTray {
         let status = resolved
             .as_ref()
             .map_or(PrimaryStatus::Offline, |r| r.status);
+        let stale = resolved.as_ref().is_some_and(|r| r.stale);
         let kind = resolved.map(|r| r.state.info.kind);
-        self.renderer.render(status, kind, &theme, mode)
+        self.renderer.render(status, kind, &theme, mode, stale)
     }
 
     fn tool_tip(&self) -> ToolTip {
@@ -677,18 +685,44 @@ mod tests {
     }
 
     #[test]
-    fn resolve_for_unreachable_device_reports_offline_despite_retained_low_reading() {
+    fn resolve_for_unreachable_device_with_retained_reading_classifies_and_marks_stale() {
         let cfg = cfg_with_primary(None);
         let state = TrayState {
             devices: vec![DeviceState {
                 info: make_info("mouse"),
-                last_reading: Some(make_reading(5)), // would classify as Low
+                last_reading: Some(make_reading(5)), // classifies as Low
                 last_seen: Some(Instant::now()),
                 presence: Presence::Unreachable,
                 estimate: crate::domain::Estimate::Unknown,
             }],
         };
         let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
+        assert!(matches!(resolved.status, PrimaryStatus::Low { .. }));
+        assert!(resolved.stale);
+    }
+
+    #[test]
+    fn resolve_for_unreachable_device_with_no_reading_reports_offline_not_stale() {
+        let cfg = cfg_with_primary(None);
+        let state = TrayState {
+            devices: vec![DeviceState {
+                info: make_info("mouse"),
+                last_reading: None,
+                last_seen: None,
+                presence: Presence::Unreachable,
+                estimate: crate::domain::Estimate::Unknown,
+            }],
+        };
+        let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
         assert_eq!(resolved.status, PrimaryStatus::Offline);
+        assert!(!resolved.stale);
+    }
+
+    #[test]
+    fn resolve_for_online_device_is_never_stale() {
+        let state = make_state(vec![(make_info("mouse"), Some(make_reading(80)))]);
+        let cfg = cfg_with_primary(None);
+        let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
+        assert!(!resolved.stale);
     }
 }
