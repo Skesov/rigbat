@@ -5,7 +5,7 @@ System tray battery monitor for gaming peripherals (Linux), written in Rust.
 ## Status
 
 Working: `rigbat list` / `--json` / `--wide` / `--waybar` / `tray` / `settings`. Sources: sysfs,
-bluez, steelseries (via `discovery::discover_all`, re-discovered live so hotplugged devices
+bluez, steelseries, eightbitdo (via `discovery::discover_all`, re-discovered live so hotplugged devices
 appear; BlueZ signals debounced). Devices retain their last reading across drops (`Presence`:
 Online/Unreachable/Disconnected). Tray: left-click menu listing device status, device-type glyph,
 light/dark theme, display modes, time-remaining estimate, low-battery notifications, separate
@@ -54,7 +54,7 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
 ## Key decisions
 
 - **Concurrency:** `tokio`, message-passing, no `Mutex` on shared data. Supervisor owns state; data flows through `mpsc` (readings) and `watch` (to tray, and for the refresh signal — a generation counter, `app::refresh::RefreshSignal`, not `Notify`, whose `notify_waiters()` drops triggers fired mid-poll). Each source is a separate task with its own interval; a panicking source is detected on the next discovery sweep (`is_finished()`) and respawned, not left silently dead.
-- **Source port:** `trait BatterySource { async fn poll(&mut self) -> Result<BatteryReading> }`. Source holds an open handle for its entire lifetime (does not reopen on each poll — reopening per poll can deadlock the device).
+- **Source port:** `trait BatterySource { async fn poll(&mut self) -> Result<BatteryReading> }`. Handle policy is not universal — it follows how the device talks, which is the vendor's choice, not rigbat's: a **request/response** device (write a query, read the echo — SteelSeries) holds its handle for the source's whole lifetime, because reopening per poll can deadlock it mid-exchange; a **stream-only** device (pushes input reports unprompted — 8BitDo in DInput at 1000 Hz) opens per poll and closes, because holding the handle open just queues reports into the kernel's ring for the whole interval between polls, almost all discarded, and there is nothing to deadlock since nothing is written. A new backend establishes which kind it faces — read the report descriptor, watch whether the device sends anything unprompted — before picking a policy; neither is the default.
 - **Tray:** `ksni`, SNI-only. XEmbed is not embedded — closed by external `snixembed`. No GTK dependency.
 - **Icon:** render behind the `IconRenderer -> Vec<ksni::Icon>` port (multiple sizes for HiDPI). Implementation in `tiny-skia`; migration to SVG/resvg is a new implementation behind the same port.
 - **Extensibility:** sources are built-in adapters behind a trait, no dlopen plugins (YAGNI).

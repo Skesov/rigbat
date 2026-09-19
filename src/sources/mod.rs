@@ -2,6 +2,7 @@ use crate::discovery::Context;
 use crate::domain::{BatteryReading, DeviceInfo};
 
 pub mod bluez;
+pub mod eightbitdo;
 pub mod steelseries;
 pub mod sysfs;
 

@@ -104,6 +104,13 @@ Bluetooth and sysfs (kernel power_supply) devices need no rule — only USB HID 
 gated by permissions. A device already plugged in when you run `udev-install` is
 re-triggered automatically; if it still shows `offline`, replug it.
 
+### 8BitDo Ultimate 2 Wireless
+
+This controller only reports battery in **DInput mode**. Its default XInput mode and its
+Switch mode both leave the battery unreadable, so rigbat sees nothing and the device does
+not appear at all — this is not a bug. To switch to DInput, hold **B** while powering the
+controller on, undocked from its dongle.
+
 ## Settings
 
 `rigbat settings` opens the settings window. It edits the poll interval (10–3600 s, default

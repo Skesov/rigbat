@@ -1,5 +1,6 @@
 use crate::sources::{
-    BatteryBackend, bluez::BluezBackend, steelseries::SteelSeriesBackend, sysfs::SysfsBackend,
+    BatteryBackend, bluez::BluezBackend, eightbitdo::EightBitDoBackend,
+    steelseries::SteelSeriesBackend, sysfs::SysfsBackend,
 };
 
 /// Returns all registered backends in priority order.
@@ -9,6 +10,7 @@ pub fn backends() -> Vec<Box<dyn BatteryBackend>> {
         Box::new(SysfsBackend),
         Box::new(BluezBackend),
         Box::new(SteelSeriesBackend),
+        Box::new(EightBitDoBackend),
     ]
 }
 
@@ -19,6 +21,6 @@ mod tests {
     #[test]
     fn backends_contains_all_expected_names() {
         let names: Vec<&'static str> = backends().iter().map(|b| b.name()).collect();
-        assert_eq!(names, vec!["sysfs", "bluez", "steelseries"]);
+        assert_eq!(names, vec!["sysfs", "bluez", "steelseries", "eightbitdo"]);
     }
 }

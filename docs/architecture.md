@@ -46,9 +46,13 @@ trait in an inner layer — with the concrete dependency living in the implement
 ## Ports (contracts)
 
 - **`BatterySource`** (`sources`): `async fn poll(&mut self) -> Result<BatteryReading>` and
-  `fn device(&self) -> &DeviceInfo`. One source = one device. A source opens its handle once and
-  holds it for its whole lifetime — it does not reopen per poll (reopening per poll can
-  deadlock the device).
+  `fn device(&self) -> &DeviceInfo`. One source = one device. Handle policy follows how the
+  device talks, not a fixed rule: a request/response device (write a query, read the echo —
+  SteelSeries) opens its handle once and holds it for the source's whole lifetime, since
+  reopening per poll can deadlock it mid-exchange; a stream-only device (pushes input reports
+  unprompted — 8BitDo in DInput) opens per poll and closes, since holding the handle open just
+  queues discarded reports into the kernel's ring and nothing is written to deadlock. A new
+  backend determines which kind it is before choosing.
 - **`BatteryBackend`** (`sources`): `async fn discover(&self, ctx: &discovery::Context) ->
 Vec<Box<dyn BatterySource>>`. Finds devices and constructs sources. Backends are listed in
   `discovery::registry::backends()`. `Context` is the dependency container built at the

@@ -17,3 +17,6 @@
 
 # SteelSeries Aerox 5 Wireless (vendor 0x1038, product 0x1852)
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="1852", TAG+="uaccess"
+
+# 8BitDo Ultimate 2 Wireless in DInput mode (vendor 0x2dc8, product 0x6012)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2dc8", ATTRS{idProduct}=="6012", TAG+="uaccess"
