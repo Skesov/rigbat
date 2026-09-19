@@ -8,7 +8,9 @@ use crate::app::refresh::RefreshSignal;
 use crate::app::supervisor::TrayState;
 use crate::appearance::ColorScheme;
 use crate::config::{Config, TrayMode};
-use crate::domain::{DeviceState, Presence, PrimaryStatus, classify, freedesktop_icon_name};
+use crate::domain::{
+    DeviceState, Presence, PrimaryStatus, classify, classify_stale, freedesktop_icon_name,
+};
 use crate::tray::format_device_entry;
 use crate::tray::icon::{IconRenderer, Theme, TinySkiaRenderer};
 
@@ -107,11 +109,18 @@ struct Resolved {
 /// Aggregate icon (`key = None`): `featured_name`'s pick.
 ///
 /// `classify` only knows readings, not reachability. A device that is not
-/// `Online` still classifies its retained reading (marked `stale`) as long
-/// as one exists — Bluetooth peripherals sleep constantly, and a device
-/// whose last-known charge is 88% should not flash "offline" just because
-/// it is asleep. Only a device with no reading at all falls back to
+/// `Online` still shows its retained percentage (marked `stale`) as long as
+/// one exists — Bluetooth peripherals sleep constantly, and a device whose
+/// last-known charge is 88% should not flash "offline" just because it is
+/// asleep. Only a device with no reading at all falls back to
 /// `PrimaryStatus::Offline`.
+///
+/// The retained charge state does not survive the presence drop, though: a
+/// stored `ChargeState::Charging` describes a live condition that is no
+/// longer known to be true, and (worse) it outranks `Low` in `classify`'s
+/// priority, hiding a low battery behind a stale green icon. So a stale
+/// reading is classified by `classify_stale`, which looks only at the
+/// percentage.
 fn resolve_for(key: Option<&str>, state: &TrayState, cfg: &Config) -> Option<Resolved> {
     let name = match key {
         Some(name) => {
@@ -127,8 +136,8 @@ fn resolve_for(key: Option<&str>, state: &TrayState, cfg: &Config) -> Option<Res
     let low_threshold = cfg.effective_low_threshold(&device.info.name);
     let (status, stale) = if device.presence == Presence::Online {
         (classify(device.last_reading, low_threshold), false)
-    } else if device.last_reading.is_some() {
-        (classify(device.last_reading, low_threshold), true)
+    } else if let Some(reading) = device.last_reading {
+        (classify_stale(reading.percent, low_threshold), true)
     } else {
         (PrimaryStatus::Offline, false)
     };
@@ -716,6 +725,44 @@ mod tests {
         let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
         assert_eq!(resolved.status, PrimaryStatus::Offline);
         assert!(!resolved.stale);
+    }
+
+    #[test]
+    fn resolve_for_unreachable_stale_charging_never_shows_charging() {
+        // Regression test for the reported bug: a mouse retained at 80%
+        // Charging, then gone unreachable, must not render green.
+        let cfg = cfg_with_primary(None);
+        let state = TrayState {
+            devices: vec![DeviceState {
+                info: make_info("mouse"),
+                last_reading: Some(BatteryReading::new(80, ChargeState::Charging)),
+                last_seen: Some(Instant::now()),
+                presence: Presence::Unreachable,
+                estimate: crate::domain::Estimate::Unknown,
+            }],
+        };
+        let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
+        assert_eq!(resolved.status, PrimaryStatus::Ok { percent: 80 });
+        assert!(resolved.stale);
+    }
+
+    #[test]
+    fn resolve_for_unreachable_stale_charging_below_threshold_is_low_not_hidden() {
+        // A stale Charging flag must not outrank and hide a low battery.
+        let mut cfg = cfg_with_primary(None);
+        cfg.low_threshold = 20;
+        let state = TrayState {
+            devices: vec![DeviceState {
+                info: make_info("mouse"),
+                last_reading: Some(BatteryReading::new(15, ChargeState::Charging)),
+                last_seen: Some(Instant::now()),
+                presence: Presence::Unreachable,
+                estimate: crate::domain::Estimate::Unknown,
+            }],
+        };
+        let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
+        assert_eq!(resolved.status, PrimaryStatus::Low { percent: 15 });
+        assert!(resolved.stale);
     }
 
     #[test]
