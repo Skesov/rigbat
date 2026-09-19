@@ -101,6 +101,22 @@ impl LowTracker {
                 1
             }
         };
+        if count < LOW_CONFIRMATIONS {
+            // Makes the confirmation requirement visible. Sleeping does not
+            // stall it — a non-Online device is skipped without touching its
+            // streak, so the second confirmation simply waits for the next
+            // successful reading, however much later that is. The alert is
+            // therefore delayed by device usage, not by wall-clock time, and
+            // only a device that never answers again stays stuck at one.
+            // Without this line that wait is indistinguishable from a broken
+            // notifier.
+            tracing::debug!(
+                device = %name,
+                confirmations = count,
+                needed = LOW_CONFIRMATIONS,
+                "low reading not yet confirmed"
+            );
+        }
         count >= LOW_CONFIRMATIONS && self.notified.insert(name.to_owned())
     }
 }
@@ -222,7 +238,17 @@ pub fn spawn(mut rx: watch::Receiver<TrayState>, config_rx: watch::Receiver<Conf
                                 "low battery alert not delivered: timed out after {NOTIFY_TIMEOUT:?}"
                             );
                         }
-                        Ok(Ok(_)) => {}
+                        // The toast is the feature's whole output and it
+                        // vanishes when dismissed. Without this line there is no
+                        // way to tell "never fired" from "fired and was missed"
+                        // from "the daemon swallowed it" after the fact.
+                        Ok(Ok(_)) => {
+                            tracing::info!(
+                                device = %name,
+                                percent = pct,
+                                "low battery alert delivered"
+                            );
+                        }
                     }
                 }
             }
