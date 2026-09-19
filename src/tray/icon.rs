@@ -756,6 +756,32 @@ mod tests {
             );
             save(&icons[0], &format!("/tmp/rigbat_glyph_{kname}.png"));
         }
+
+        // Fresh/stale pairs, both themes: the point of comparison is whether a
+        // remembered reading still reads as a reading. `Low` appears here
+        // deliberately — it must come out identical in both columns.
+        let stale_cases = [
+            ("ok", PrimaryStatus::Ok { percent: 75 }),
+            ("charging", PrimaryStatus::Charging { percent: 75 }),
+            ("low", PrimaryStatus::Low { percent: 12 }),
+        ];
+        for (theme_name, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            for (case, status) in stale_cases {
+                for (suffix, stale) in [("fresh", false), ("stale", true)] {
+                    let icons = renderer.render(
+                        status,
+                        Some(DeviceKind::Mouse),
+                        &theme,
+                        DisplayMode::IconOnly,
+                        stale,
+                    );
+                    save(
+                        &icons[0],
+                        &format!("/tmp/rigbat_{theme_name}_{case}_{suffix}.png"),
+                    );
+                }
+            }
+        }
     }
 
     // --- mode: IconOnly --------------------------------------------------
