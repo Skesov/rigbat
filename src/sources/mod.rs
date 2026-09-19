@@ -15,8 +15,15 @@ pub trait BatterySource: Send {
 }
 
 /// Transport layer: discovers devices and creates battery sources.
+///
+/// `discover` returns `Err` when the sweep itself failed (a bus call errored,
+/// a directory could not be read) — distinct from `Ok(vec![])`, which means
+/// the backend looked and honestly found nothing. `discovery::discover_all`
+/// and `app::supervisor::DeviceRegistry::reconcile` depend on that
+/// distinction: a failed sweep must not be mistaken for every one of this
+/// backend's devices having vanished.
 #[async_trait::async_trait]
 pub trait BatteryBackend: Send + Sync {
     fn name(&self) -> &'static str;
-    async fn discover(&self, ctx: &Context) -> Vec<Box<dyn BatterySource>>;
+    async fn discover(&self, ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>>;
 }

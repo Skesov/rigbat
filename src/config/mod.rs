@@ -36,7 +36,21 @@ pub enum TrayMode {
 #[serde(default)]
 pub struct Config {
     pub display_mode: DisplayMode,
-    /// Device names to display as icons. Empty list = show all.
+    /// Device names to hide from the tray and menu. Empty list = show all.
+    /// A name this list never mentions is shown, including one for a device
+    /// that is not currently discovered — the field only ever grows or
+    /// shrinks by exactly the name a checkbox toggle names, never by
+    /// rebuilding from whatever devices happen to be visible right now.
+    pub hidden_devices: Vec<String>,
+    /// Deprecated pre-T33 whitelist ("who to show"). Editing it through a
+    /// partial device view could silently erase entries for devices absent
+    /// from that view — the field it was replaced by, `hidden_devices`
+    /// ("who to hide"), cannot have that failure mode because toggling one
+    /// device never touches any other entry. Converted into `hidden_devices`
+    /// once, by `app::supervisor` right after its first discovery sweep —
+    /// not here: `config::load` has no device roster to convert against.
+    /// This version never writes to it again once converted. Kept only so
+    /// an old config file still deserializes.
     pub shown_devices: Vec<String>,
     /// Whether to send desktop notifications for low-battery crossings.
     /// Defaults to true; old config files without this key load as true
@@ -59,6 +73,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             display_mode: DisplayMode::IconOnly,
+            hidden_devices: Vec::new(),
             shown_devices: Vec::new(),
             notifications_enabled: true,
             tray_mode: TrayMode::PrimaryOnly,
@@ -89,9 +104,9 @@ impl DisplayMode {
 }
 
 impl Config {
-    /// Returns true if the device should be shown (empty list = show all).
+    /// Returns true if the device should be shown (absent from `hidden_devices`).
     pub fn is_shown(&self, name: &str) -> bool {
-        self.shown_devices.is_empty() || self.shown_devices.iter().any(|n| n == name)
+        !self.hidden_devices.iter().any(|n| n == name)
     }
 
     /// Effective poll interval for `name`: device override → global → clamp to at least 1.
@@ -129,13 +144,24 @@ pub fn config_path() -> Option<PathBuf> {
 
 /// Reads config. File missing or invalid → Config::default() (log invalid files,
 /// do not panic). Never panics.
+///
+/// Never converts a legacy `shown_devices` whitelist into `hidden_devices`:
+/// that conversion needs a discovered device roster, which no caller of
+/// `load()` has at hand (the tray does not have one yet either, this early).
+/// `app::supervisor` performs it once, after its first discovery sweep.
 pub fn load() -> Config {
-    let path = match config_path() {
-        Some(p) => p,
-        None => return Config::default(),
-    };
+    match config_path() {
+        Some(path) => load_from(&path),
+        None => Config::default(),
+    }
+}
 
-    let data = match std::fs::read_to_string(&path) {
+/// Reads the config at `path`, exactly as stored. Split out of `load()` so
+/// tests can exercise it against a temporary file instead of the real
+/// `config_path()`. `pub(crate)` so `settings::save_edit`'s own tests can use
+/// the same seam.
+pub(crate) fn load_from(path: &Path) -> Config {
+    let data = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => return Config::default(),
     };
@@ -152,8 +178,22 @@ pub fn load() -> Config {
 /// Saves atomically: create directory, write to temp file, rename.
 pub fn save(config: &Config) -> anyhow::Result<()> {
     use anyhow::Context as _;
-
     let path = config_path().context("cannot determine config directory")?;
+    save_to(&path, config)
+}
+
+/// Writes `config` atomically to `path`. Split out of `save()` so tests can
+/// exercise a save/load round trip against a temporary file instead of the
+/// real `config_path()`. `pub(crate)` so `settings::save_edit`'s own tests
+/// can use the same seam.
+///
+/// The temp file is named after this process's pid and a per-process
+/// counter (`unique_tmp_path`), not a fixed `config.json.tmp`: the tray and
+/// a settings window can both save around the same moment, and a fixed name
+/// let whichever process's `rename` won take a file the other was still
+/// writing. On any failure the temp file is removed rather than left behind.
+pub(crate) fn save_to(path: &Path, config: &Config) -> anyhow::Result<()> {
+    use anyhow::Context as _;
 
     let dir = path
         .parent()
@@ -163,14 +203,28 @@ pub fn save(config: &Config) -> anyhow::Result<()> {
 
     let json = serde_json::to_string_pretty(config).context("failed to serialize config")?;
 
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &json)
-        .with_context(|| format!("failed to write temp config {tmp_path:?}"))?;
+    let tmp_path = unique_tmp_path(path, std::process::id());
+    let result = std::fs::write(&tmp_path, &json)
+        .with_context(|| format!("failed to write temp config {tmp_path:?}"))
+        .and_then(|()| {
+            std::fs::rename(&tmp_path, path)
+                .with_context(|| format!("failed to rename {tmp_path:?} to {path:?}"))
+        });
 
-    std::fs::rename(&tmp_path, &path)
-        .with_context(|| format!("failed to rename {tmp_path:?} to {path:?}"))?;
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
 
-    Ok(())
+/// Builds the atomic-save temp path for `path`, unique to `pid` and to this
+/// call within that process (`config.json` → `config.json.<pid>-<n>.tmp`).
+/// `pid` is a parameter, not `std::process::id()` read internally, so tests
+/// can simulate two different processes without spawning real ones.
+fn unique_tmp_path(path: &Path, pid: u32) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    path.with_extension(format!("json.{pid}-{n}.tmp"))
 }
 
 /// Returns `true` if any path in the event matches the target config file name.
@@ -274,14 +328,14 @@ mod tests {
     fn default_config() {
         let cfg = Config::default();
         assert_eq!(cfg.display_mode, DisplayMode::IconOnly);
-        assert!(cfg.shown_devices.is_empty());
+        assert!(cfg.hidden_devices.is_empty());
     }
 
     #[test]
     fn serde_round_trip() {
         let cfg = Config {
             display_mode: DisplayMode::PercentInIcon,
-            shown_devices: vec!["mouse".to_string(), "keyboard".to_string()],
+            hidden_devices: vec!["mouse".to_string(), "keyboard".to_string()],
             notifications_enabled: false,
             tray_mode: TrayMode::PerDevice,
             primary_device: Some("mouse".to_string()),
@@ -324,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn is_shown_empty_list_allows_all() {
+    fn is_shown_empty_hidden_devices_allows_all() {
         let cfg = Config::default();
         assert!(cfg.is_shown("mouse"));
         assert!(cfg.is_shown("keyboard"));
@@ -332,18 +386,113 @@ mod tests {
     }
 
     #[test]
-    fn is_shown_whitelist_filters() {
+    fn is_shown_hides_only_the_named_device() {
         let cfg = Config {
             display_mode: DisplayMode::IconOnly,
-            shown_devices: vec!["mouse".to_string()],
+            hidden_devices: vec!["mouse".to_string()],
             notifications_enabled: true,
             tray_mode: TrayMode::PrimaryOnly,
             primary_device: None,
             ..Config::default()
         };
-        assert!(cfg.is_shown("mouse"));
-        assert!(!cfg.is_shown("keyboard"));
-        assert!(!cfg.is_shown("headset"));
+        assert!(!cfg.is_shown("mouse"));
+        assert!(cfg.is_shown("keyboard"));
+        // Never mentioned in hidden_devices — shown by default, including a
+        // name that is not currently discovered.
+        assert!(cfg.is_shown("headset"));
+    }
+
+    // --- load_from / save_to round trip ---------------------------------------
+
+    /// Unique scratch config file path under the OS temp dir for one test.
+    /// Never the real `config_path()` — these tests must not touch
+    /// `~/.config/rigbat/config.json`.
+    fn scratch_config_path(test_name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "rigbat-config-test-{test_name}-{}-{n}.json",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn save_then_load_preserves_hidden_devices() {
+        let path = scratch_config_path("round-trip");
+        let cfg = Config {
+            hidden_devices: vec!["mouse".to_string(), "headset".to_string()],
+            ..Config::default()
+        };
+        save_to(&path, &cfg).unwrap();
+        let restored = load_from(&path);
+        assert_eq!(restored.hidden_devices, cfg.hidden_devices);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn load_from_missing_file_returns_default() {
+        let path = scratch_config_path("missing");
+        assert_eq!(load_from(&path), Config::default());
+    }
+
+    #[test]
+    fn unique_tmp_path_differs_between_processes() {
+        let path = PathBuf::from("/tmp/rigbat-test/config.json");
+        assert_ne!(unique_tmp_path(&path, 111), unique_tmp_path(&path, 222));
+    }
+
+    #[test]
+    fn unique_tmp_path_differs_within_same_process() {
+        let path = PathBuf::from("/tmp/rigbat-test/config.json");
+        assert_ne!(unique_tmp_path(&path, 111), unique_tmp_path(&path, 111));
+    }
+
+    /// Unique scratch directory (not file) under the OS temp dir, for tests
+    /// that need to inspect the directory's contents rather than one path.
+    fn scratch_config_dir(test_name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "rigbat-config-test-dir-{test_name}-{}-{n}",
+            std::process::id()
+        ))
+    }
+
+    /// Forces `save_to` to fail after the temp file is written: `path` is
+    /// made an existing directory, so `rename(tmp_path, path)` fails with
+    /// EISDIR. Regression test for C5's cleanup requirement — the earlier
+    /// version left the temp file behind on any failure.
+    #[test]
+    fn save_to_cleans_up_temp_file_on_rename_failure() {
+        let dir = scratch_config_dir("save-failure");
+        let path = dir.join("config.json");
+        std::fs::create_dir_all(&path).unwrap();
+
+        assert!(save_to(&path, &Config::default()).is_err());
+
+        let leftover: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() != "config.json")
+            .collect();
+        assert!(leftover.is_empty(), "temp file left behind: {leftover:?}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `load_from` must not convert a legacy `shown_devices` whitelist — it
+    /// has no device roster to convert against. `app::supervisor` performs
+    /// that conversion, once, after its first discovery sweep.
+    #[test]
+    fn load_from_does_not_migrate_legacy_shown_devices() {
+        let path = scratch_config_path("no-migration-on-load");
+        std::fs::write(&path, r#"{"shown_devices": ["mouse"]}"#).unwrap();
+        let cfg = load_from(&path);
+        assert_eq!(cfg.shown_devices, vec!["mouse".to_string()]);
+        assert!(cfg.hidden_devices.is_empty());
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

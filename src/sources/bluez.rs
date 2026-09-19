@@ -52,14 +52,8 @@ impl BatteryBackend for BluezBackend {
         "bluez"
     }
 
-    async fn discover(&self, ctx: &Context) -> Vec<Box<dyn BatterySource>> {
-        match discover_inner(ctx).await {
-            Ok(sources) => sources,
-            Err(e) => {
-                tracing::warn!("bluez discovery failed: {e:#}");
-                Vec::new()
-            }
-        }
+    async fn discover(&self, ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
+        discover_inner(ctx).await
     }
 }
 

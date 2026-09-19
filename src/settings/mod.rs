@@ -1,17 +1,37 @@
-use std::collections::{HashMap, HashSet};
+mod devices;
+
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use egui_extras::{Column, Size, StripBuilder, TableBuilder};
 
 use crate::autostart;
 use crate::config::{self, Config, DeviceSettings, DisplayMode, TrayMode};
-use crate::domain::DeviceInfo;
+use crate::domain::{BatteryReading, DeviceInfo, Presence};
+use crate::state;
+use devices::{DeleteState, DeviceRow, SortColumn, SortState};
 
 /// Seconds the "Changes saved." status line remains visible after a save.
 const SAVED_VISIBLE_SECS: u64 = 2;
+
+/// Fixed width of the per-device override panel beside the Devices tab
+/// table. A detail panel, not an expanding row: `TableBody::rows` renders
+/// homogeneous row heights for its virtualisation to stay simple, and the
+/// selection survives sort/filter because it is keyed by device name, not
+/// row index.
+const DEVICE_DETAIL_PANEL_WIDTH: f32 = 240.0;
+
+/// Row and header heights for the Devices tab table.
+const TABLE_ROW_HEIGHT: f32 = 22.0;
+const TABLE_HEADER_HEIGHT: f32 = 24.0;
+
+/// Height reserved for the shared status bar (separator + "Changes saved." +
+/// Close) at the bottom of the window, below both tabs.
+const STATUS_BAR_HEIGHT: f32 = 40.0;
 
 /// Global low-battery threshold range, percent. Below 5% the warning fires too
 /// late to matter; above 50% it stops meaning "low".
@@ -50,6 +70,27 @@ fn systemd_service_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// The window's two top-level sections. Hand-rolled `SelectableLabel` tab
+/// bar, not `egui_dock` (a docking system for editor layouts, not a fixed
+/// two-or-three-section switcher) and not a sidebar (GNOME HIG reserves the
+/// sidebar pattern for apps with many destinations or their own iconography;
+/// two sections is squarely view-switcher territory). Kept open for a third
+/// tab without redesigning navigation — add a variant and a label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    General,
+    Devices,
+}
+
+/// One scan's raw result: the current discovery-and-poll pass, plus a fresh
+/// read of the persisted device inventory. `SettingsApp::apply_scan_result`
+/// merges the two into the Devices tab's table rows; `General`'s device list
+/// only needs the discovered half.
+struct ScanResult {
+    discovered: Vec<(DeviceInfo, Option<BatteryReading>)>,
+    records: Vec<state::DeviceRecord>,
+}
+
 struct SettingsApp {
     config: Config,
     devices: Vec<DeviceInfo>,
@@ -70,9 +111,27 @@ struct SettingsApp {
     discovery_ctx: Arc<crate::discovery::Context>,
     /// `Some` while a scan's result is outstanding; taken (and cleared) once
     /// `try_recv` yields something.
-    scan_rx: Option<mpsc::Receiver<Vec<DeviceInfo>>>,
+    scan_rx: Option<mpsc::Receiver<ScanResult>>,
     /// True from the moment a scan is spawned until its result is applied.
     scanning: bool,
+    tab: Tab,
+    /// `None` if the state store failed to open (see `state::open`) — the
+    /// Devices tab then shows only what the current scan finds, same as
+    /// this window behaved before the inventory existed.
+    store: Option<Arc<dyn state::Store>>,
+    /// The Devices tab's backing list: every inventory record merged with
+    /// the last scan. Search and sort are applied to a copy of this on
+    /// render, never in place — `device_rows` itself always holds the full,
+    /// unfiltered set.
+    device_rows: Vec<DeviceRow>,
+    device_search: String,
+    device_sort: SortState,
+    /// Device name the override detail panel is showing. Name, not
+    /// `DeviceId`: `device_overrides` is keyed by name (see
+    /// `apply_device_override`), and a name survives the selected device
+    /// dropping out of the current scan.
+    selected_device: Option<String>,
+    delete_state: DeleteState,
 }
 
 impl SettingsApp {
@@ -82,31 +141,17 @@ impl SettingsApp {
         ui.add_space(4.0);
     }
 
-    /// Copies the fields this window owns onto `target`, leaving everything
-    /// else untouched. `primary_device` is deliberately not one of them: no UI
-    /// sets it, and the tray resolves the aggregate icon without it when it is
-    /// `None`.
-    fn apply_to(&self, target: &mut Config) {
-        target.display_mode = self.config.display_mode;
-        target.tray_mode = self.config.tray_mode;
-        target.shown_devices = self.config.shown_devices.clone();
-        target.notifications_enabled = self.config.notifications_enabled;
-        target.poll_interval_secs = self.config.poll_interval_secs;
-        target.low_threshold = self.config.low_threshold;
-        target.device_overrides = self.config.device_overrides.clone();
-    }
-
-    /// Saves the current config and flashes the "Changes saved." status for
+    /// Saves one user edit and flashes the "Changes saved." status for
     /// `SAVED_VISIBLE_SECS`. Logs on failure; the status line stays unchanged.
     ///
-    /// Re-reads the on-disk config first and merges only the fields this window
-    /// owns into it, so a hand-edited `primary_device` (or any future field this
-    /// window does not display) survives a save from a stale in-memory snapshot.
-    fn persist(&mut self, ui: &egui::Ui) {
-        let mut on_disk = config::load();
-        self.apply_to(&mut on_disk);
-        match config::save(&on_disk) {
-            Ok(()) => {
+    /// `edit` names exactly the field the call site just changed — see
+    /// `save_edit` for why. On success, `self.config` adopts the freshly
+    /// saved config, so any field changed on disk by another process since
+    /// this window opened is picked up too, not just the one this call
+    /// touched.
+    fn persist(&mut self, ui: &egui::Ui, edit: impl FnOnce(&mut Config)) {
+        match save_edit(&config::load, &config::save, edit) {
+            Ok(on_disk) => {
                 self.config = on_disk;
                 self.saved_at = Some(Instant::now());
                 ui.ctx()
@@ -116,9 +161,20 @@ impl SettingsApp {
         }
     }
 
-    /// Spawns one discovery pass on `rt` if none is already in flight, wiring
-    /// its result to a fresh channel and waking `egui_ctx` when it lands so the
-    /// window updates without waiting for the next input event.
+    /// Spawns one discovery-and-poll pass on `rt` if none is already in
+    /// flight, plus a fresh read of the device inventory, wiring the result
+    /// to a fresh channel and waking `egui_ctx` when it lands so the window
+    /// updates without waiting for the next input event.
+    ///
+    /// Polls every discovered device (unlike the pre-T35 discovery-only
+    /// scan) because the Devices tab needs each one's charge; this only
+    /// runs on an explicit Rescan click or window open, not on a timer, so
+    /// the extra device wake-up this costs is the same one-off the user just
+    /// asked for, not the continuous drain `POLL_INTERVAL_RANGE` guards
+    /// against. The inventory read is a direct, synchronous `Store` call
+    /// made from inside this spawned task, never on the UI thread — the
+    /// same "brief, blocking, from an async context" pattern
+    /// `app::supervisor` already uses for `record_seen`/`record_reading`.
     fn spawn_scan(&mut self, egui_ctx: egui::Context) {
         if self.scanning {
             return;
@@ -127,14 +183,23 @@ impl SettingsApp {
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
         let ctx = Arc::clone(&self.discovery_ctx);
+        let store = self.store.clone();
         self.rt.spawn(async move {
-            let devices: Vec<DeviceInfo> = crate::discovery::discover_all(&ctx)
-                .await
-                .iter()
-                .map(|s| s.device().clone())
-                .collect();
+            let sweeps = crate::discovery::discover_all(&ctx).await;
+            let sources = crate::discovery::flatten(sweeps);
+            let discovered = crate::app::poll_once(sources).await;
+            let records = match &store {
+                Some(store) => store.list_devices().unwrap_or_else(|e| {
+                    tracing::warn!("failed to read device inventory: {e:#}");
+                    Vec::new()
+                }),
+                None => Vec::new(),
+            };
             // The receiver is dropped if the window closed mid-scan; ignore that.
-            let _ = tx.send(devices);
+            let _ = tx.send(ScanResult {
+                discovered,
+                records,
+            });
             egui_ctx.request_repaint();
         });
     }
@@ -146,7 +211,7 @@ impl SettingsApp {
             return;
         };
         match rx.try_recv() {
-            Ok(devices) => self.apply_scan_result(devices),
+            Ok(result) => self.apply_scan_result(result),
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.scanning = false;
@@ -155,12 +220,19 @@ impl SettingsApp {
         }
     }
 
-    /// Applies a freshly completed scan's device list. Only `self.devices`
-    /// changes: `shown_devices` and `device_overrides` are keyed by device
-    /// name and are left exactly as the user set them, whether or not the
-    /// device set changed since the previous scan.
-    fn apply_scan_result(&mut self, devices: Vec<DeviceInfo>) {
-        self.devices = devices;
+    /// Applies a freshly completed scan's result. `self.devices` (the
+    /// General tab's picker) and `self.device_rows` (the Devices tab's
+    /// table) are both derived fresh; `hidden_devices` and
+    /// `device_overrides` are keyed by device name and are left exactly as
+    /// the user set them, whether or not the device set changed since the
+    /// previous scan.
+    fn apply_scan_result(&mut self, result: ScanResult) {
+        self.devices = result
+            .discovered
+            .iter()
+            .map(|(info, _)| info.clone())
+            .collect();
+        self.device_rows = devices::merge_devices(result.records, result.discovered);
         self.scanning = false;
         self.scan_rx = None;
     }
@@ -181,115 +253,318 @@ impl SettingsApp {
         });
     }
 
-    /// Shared empty-state message for both device sections below, pointing at
-    /// the Rescan button instead of telling the user to reopen the window.
-    fn render_device_empty_state(ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new("No devices found. Connect a device, then press Rescan.").weak(),
-        );
-    }
-
-    /// Renders the per-device checkboxes that drive `shown_devices`. Each checkbox
-    /// toggles whether that device gets a tray icon (PerDevice) or appears in the
-    /// menu (PrimaryOnly). Unchecking a duplicate (e.g. the BT copy of a mouse that
-    /// is also seen over USB) removes that one icon.
-    fn render_device_picker(&mut self, ui: &mut egui::Ui) {
-        if self.devices.is_empty() {
-            Self::render_device_empty_state(ui);
-            return;
-        }
-
-        let all_names: Vec<String> = self.devices.iter().map(|d| d.name.clone()).collect();
-        for name in &all_names {
-            let mut checked = self.config.is_shown(name);
-            if ui.checkbox(&mut checked, name).changed() {
-                // Rebuild the checked set after this toggle.
-                let mut checked_set: HashSet<String> = all_names
-                    .iter()
-                    .filter(|n| self.config.is_shown(n))
-                    .cloned()
-                    .collect();
-                if checked {
-                    checked_set.insert(name.clone());
-                } else {
-                    checked_set.remove(name.as_str());
-                }
-                self.config.shown_devices = shown_after_toggle(&all_names, &checked_set);
-                self.persist(ui);
-            }
-        }
-    }
-
-    /// Renders one CollapsingHeader per discovered device with optional
-    /// threshold/interval overrides. Persists only on release (drag_stopped /
-    /// lost_focus) or checkbox toggle, never on every dragged pixel.
-    fn render_device_overrides(&mut self, ui: &mut egui::Ui) {
-        if self.devices.is_empty() {
-            Self::render_device_empty_state(ui);
-            return;
-        }
-
+    /// Renders the threshold/interval override controls for one device, by
+    /// name, in the Devices tab's detail panel. Persists only on release
+    /// (`drag_stopped`/`lost_focus`) or checkbox toggle, never on every
+    /// dragged pixel — same rule the pre-T35 collapsing-header version
+    /// followed, this is that same body applied to one selected device
+    /// instead of looped over every discovered one.
+    fn render_device_override_controls(&mut self, ui: &mut egui::Ui, name: &str) {
         let default_threshold = self.config.low_threshold;
         let default_interval = self.config.poll_interval_secs;
-        let names: Vec<String> = self.devices.iter().map(|d| d.name.clone()).collect();
+        let existing = self.config.device_overrides.get(name).cloned();
+        let mut threshold_on = existing.as_ref().is_some_and(|d| d.low_threshold.is_some());
+        let mut threshold = existing
+            .as_ref()
+            .and_then(|d| d.low_threshold)
+            .unwrap_or(default_threshold);
+        let mut interval_on = existing
+            .as_ref()
+            .is_some_and(|d| d.poll_interval_secs.is_some());
+        let mut interval = existing
+            .as_ref()
+            .and_then(|d| d.poll_interval_secs)
+            .unwrap_or(default_interval);
 
-        for name in &names {
-            let existing = self.config.device_overrides.get(name).cloned();
-            let mut threshold_on = existing.as_ref().is_some_and(|d| d.low_threshold.is_some());
-            let mut threshold = existing
-                .as_ref()
-                .and_then(|d| d.low_threshold)
-                .unwrap_or(default_threshold);
-            let mut interval_on = existing
-                .as_ref()
-                .is_some_and(|d| d.poll_interval_secs.is_some());
-            let mut interval = existing
-                .as_ref()
-                .and_then(|d| d.poll_interval_secs)
-                .unwrap_or(default_interval);
+        let mut save = false;
+        if ui
+            .checkbox(&mut threshold_on, "Override low battery threshold")
+            .changed()
+        {
+            save = true;
+        }
+        if threshold_on {
+            let resp = ui.add(egui::Slider::new(&mut threshold, LOW_THRESHOLD_RANGE).suffix("%"));
+            save |= resp.drag_stopped() || resp.lost_focus();
+        }
 
-            let mut save = false;
-            egui::CollapsingHeader::new(name)
-                .id_salt(name)
-                .show(ui, |ui| {
-                    if ui
-                        .checkbox(&mut threshold_on, "Override low battery threshold")
-                        .changed()
-                    {
-                        save = true;
-                    }
-                    if threshold_on {
-                        let resp = ui.add(
-                            egui::Slider::new(&mut threshold, LOW_THRESHOLD_RANGE).suffix("%"),
-                        );
-                        save |= resp.drag_stopped() || resp.lost_focus();
-                    }
+        if ui
+            .checkbox(&mut interval_on, "Override poll interval")
+            .changed()
+        {
+            save = true;
+        }
+        if interval_on {
+            let resp = ui.add(egui::Slider::new(&mut interval, POLL_INTERVAL_RANGE).suffix(" s"));
+            save |= resp.drag_stopped() || resp.lost_focus();
+        }
 
-                    if ui
-                        .checkbox(&mut interval_on, "Override poll interval")
-                        .changed()
-                    {
-                        save = true;
-                    }
-                    if interval_on {
-                        let resp = ui.add(
-                            egui::Slider::new(&mut interval, POLL_INTERVAL_RANGE).suffix(" s"),
-                        );
-                        save |= resp.drag_stopped() || resp.lost_focus();
-                    }
-                });
-
-            if save {
+        if save {
+            let name = name.to_string();
+            let threshold = threshold_on.then_some(threshold);
+            let interval = interval_on.then_some(interval);
+            self.persist(ui, move |target| {
                 apply_device_override(
-                    &mut self.config.device_overrides,
-                    name,
-                    threshold_on.then_some(threshold),
-                    interval_on.then_some(interval),
+                    &mut target.device_overrides,
+                    &name,
+                    threshold,
+                    interval,
                     default_threshold,
                     default_interval,
                 );
-                self.persist(ui);
+            });
+        }
+    }
+
+    /// The Devices tab: search box, Rescan, then the inventory table beside
+    /// the selected device's override panel. Source is the union
+    /// `apply_scan_result` already merged into `self.device_rows` — union,
+    /// not `self.devices` alone, is the whole point of T35: a device the
+    /// inventory remembers but the current scan did not find must still
+    /// show up here.
+    fn render_devices_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.device_search)
+                    .hint_text("Search devices…")
+                    .desired_width(220.0),
+            );
+            self.render_rescan_button(ui);
+        });
+        ui.add_space(8.0);
+
+        let filtered = devices::filter_rows(&self.device_rows, &self.device_search);
+        if filtered.is_empty() {
+            let message = if self.device_rows.is_empty() {
+                "No devices recorded yet. Connect a device, then press Rescan."
+            } else {
+                "No devices match your search."
+            };
+            ui.label(egui::RichText::new(message).weak());
+            return;
+        }
+
+        let mut rows = filtered;
+        devices::sort_rows(&mut rows, self.device_sort);
+        let now = state::now_unix();
+
+        StripBuilder::new(ui)
+            .size(Size::remainder().at_least(360.0))
+            .size(Size::exact(DEVICE_DETAIL_PANEL_WIDTH))
+            .horizontal(|mut strip| {
+                strip.cell(|ui| self.render_device_table(ui, &rows, now));
+                strip.cell(|ui| self.render_device_detail(ui));
+            });
+    }
+
+    /// The inventory table itself: sticky header with click-to-sort columns,
+    /// a virtualised body (`TableBody::rows` — the inventory grows without
+    /// bound, so only visible rows are built), resizable columns.
+    fn render_device_table(&mut self, ui: &mut egui::Ui, rows: &[DeviceRow], now: i64) {
+        let sort = self.device_sort;
+        let mut clicked_sort: Option<SortColumn> = None;
+
+        TableBuilder::new(ui)
+            .id_salt("devices_table")
+            .striped(true)
+            .resizable(true)
+            .column(Column::initial(160.0).at_least(100.0).resizable(true))
+            .column(Column::initial(80.0).at_least(60.0).resizable(true))
+            .column(Column::initial(90.0).at_least(70.0).resizable(true))
+            .column(Column::initial(64.0).at_least(50.0).resizable(true))
+            .column(Column::initial(96.0).at_least(70.0).resizable(true))
+            .column(Column::initial(96.0).at_least(70.0).resizable(true))
+            .column(Column::initial(96.0).at_least(70.0).resizable(true))
+            .column(Column::initial(56.0).at_least(50.0).resizable(false))
+            .column(Column::initial(96.0).at_least(70.0).resizable(false))
+            .header(TABLE_HEADER_HEIGHT, |mut header| {
+                let columns: [(&str, Option<SortColumn>); 9] = [
+                    ("Name", Some(SortColumn::Name)),
+                    ("Type", Some(SortColumn::Type)),
+                    ("Transport", Some(SortColumn::Transport)),
+                    ("Charge", Some(SortColumn::Charge)),
+                    ("Presence", Some(SortColumn::Presence)),
+                    ("First seen", Some(SortColumn::FirstSeen)),
+                    ("Last seen", Some(SortColumn::LastSeen)),
+                    ("Shown", None),
+                    ("", None),
+                ];
+                for (label, sort_column) in columns {
+                    header.col(|ui| match sort_column {
+                        Some(column) => {
+                            if ui.button(header_label(label, column, sort)).clicked() {
+                                clicked_sort = Some(column);
+                            }
+                        }
+                        None => {
+                            ui.label(label);
+                        }
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(TABLE_ROW_HEIGHT, rows.len(), |mut table_row| {
+                    let index = table_row.index();
+                    if let Some(row) = rows.get(index) {
+                        self.render_device_row(&mut table_row, row, now);
+                    }
+                });
+            });
+
+        if let Some(column) = clicked_sort {
+            self.device_sort = self.device_sort.clicked(column);
+        }
+    }
+
+    /// Renders one table row's nine cells, in the same order as
+    /// `render_device_table`'s header.
+    fn render_device_row(
+        &mut self,
+        table_row: &mut egui_extras::TableRow<'_, '_>,
+        row: &DeviceRow,
+        now: i64,
+    ) {
+        table_row.col(|ui| {
+            let is_selected = self.selected_device.as_deref() == Some(row.device.name.as_str());
+            if ui.selectable_label(is_selected, &row.device.name).clicked() {
+                self.selected_device = Some(row.device.name.clone());
             }
+        });
+        table_row.col(|ui| {
+            ui.label(row.kind.as_str());
+        });
+        table_row.col(|ui| {
+            ui.label(row.device.transport.as_str());
+        });
+        table_row.col(|ui| {
+            let text = match row.charge {
+                Some(r) => format!("{}%", r.percent),
+                None => "—".to_string(),
+            };
+            ui.label(text);
+        });
+        table_row.col(|ui| {
+            let (label, weak) = match row.presence {
+                Presence::Online => ("Online", false),
+                Presence::Unreachable => ("Unreachable", false),
+                Presence::Disconnected => ("Disconnected", true),
+            };
+            let text = egui::RichText::new(label);
+            ui.label(if weak { text.weak() } else { text });
+        });
+        table_row.col(|ui| render_seen_cell(ui, row.first_seen, now));
+        table_row.col(|ui| render_seen_cell(ui, row.last_seen, now));
+        table_row.col(|ui| {
+            let mut shown = self.config.is_shown(&row.device.name);
+            if ui.checkbox(&mut shown, "").changed() {
+                let name = row.device.name.clone();
+                self.persist(ui, move |target| {
+                    toggle_hidden(&mut target.hidden_devices, &name, shown);
+                });
+            }
+        });
+        table_row.col(|ui| self.render_delete_cell(ui, row));
+    }
+
+    /// Delete needs a deliberate second click: the first arms
+    /// `self.delete_state` and swaps the cell to Confirm/Cancel in place,
+    /// per T35 ("do not delete on first click"). A row the scan discovered
+    /// but the inventory has not persisted yet (`store_id: None`) has
+    /// nothing to delete.
+    fn render_delete_cell(&mut self, ui: &mut egui::Ui, row: &DeviceRow) {
+        let Some(store_id) = row.store_id else {
+            ui.label("—");
+            return;
+        };
+
+        if self.delete_state == DeleteState::Confirming(store_id) {
+            ui.horizontal(|ui| {
+                if ui.small_button("Confirm").clicked() {
+                    self.delete_device(ui, store_id, &row.device.name);
+                }
+                if ui.small_button("Cancel").clicked() {
+                    self.delete_state = DeleteState::Idle;
+                }
+            });
+        } else if ui.small_button("Delete").clicked() {
+            self.delete_state = DeleteState::Confirming(store_id);
+        }
+    }
+
+    /// Forgets a device (T34): deletes its inventory row and readings, and
+    /// its `hidden_devices` entry — nothing left to show it as hidden once
+    /// it no longer exists. Store I/O happens directly on the UI thread,
+    /// the same as `persist`'s `config::save`/`load`: a deliberate,
+    /// infrequent, user-confirmed click, not the per-frame inventory read
+    /// `spawn_scan` keeps off the UI thread.
+    fn delete_device(&mut self, ui: &egui::Ui, store_id: i64, name: &str) {
+        if let Some(store) = &self.store
+            && let Err(e) = store.delete_device(store_id)
+        {
+            tracing::error!("failed to delete device {name:?} from inventory: {e}");
+            self.delete_state = DeleteState::Idle;
+            return;
+        }
+
+        let hidden_name = name.to_string();
+        self.persist(ui, move |target| {
+            toggle_hidden(&mut target.hidden_devices, &hidden_name, true);
+        });
+        devices::remove_row(&mut self.device_rows, store_id);
+        if self.selected_device.as_deref() == Some(name) {
+            self.selected_device = None;
+        }
+        self.delete_state = DeleteState::Idle;
+    }
+
+    /// The panel beside the table: the selected device's name and its
+    /// threshold/interval overrides. A fixed-width side panel rather than
+    /// an expanding row — `TableBody::rows` renders every row at the same
+    /// height for its virtualisation to stay simple, and keying the
+    /// selection by device name (not row index) means it survives the
+    /// selected row moving under a re-sort or a search filter.
+    fn render_device_detail(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        match self.selected_device.clone() {
+            Some(name) => {
+                ui.strong(&name);
+                ui.add_space(4.0);
+                self.render_device_override_controls(ui, &name);
+            }
+            None => {
+                ui.weak("Select a device to edit its overrides.");
+            }
+        }
+    }
+}
+
+/// Header cell text for a sortable column: the plain label, plus a direction
+/// arrow when `column` is the active sort column. GNOME HIG: ascending shows
+/// the arrow pointing down, descending flips it to pointing up.
+fn header_label(label: &str, column: SortColumn, sort: SortState) -> String {
+    if sort.column != column {
+        return label.to_string();
+    }
+    let arrow = match sort.direction {
+        devices::SortDirection::Ascending => "▼",
+        devices::SortDirection::Descending => "▲",
+    };
+    format!("{label} {arrow}")
+}
+
+/// Renders a First-seen/Last-seen cell: the relative age, with the absolute
+/// UTC date as a hover tooltip (judgement call, not GNOME-sourced — see
+/// T35's spec). A missing timestamp (a discovered-but-not-yet-recorded
+/// device) renders as a plain dash.
+fn render_seen_cell(ui: &mut egui::Ui, at: Option<i64>, now: i64) {
+    match at {
+        Some(at) => {
+            let relative = devices::relative_label(now, at);
+            let absolute = devices::absolute_date_label(at);
+            ui.label(relative).on_hover_text(absolute);
+        }
+        None => {
+            ui.label("—");
         }
     }
 }
@@ -304,15 +579,47 @@ impl eframe::App for SettingsApp {
         // inner_margin, keeping all other visual properties from the theme.
         let frame = egui::Frame::central_panel(ui.style()).inner_margin(16.0);
         frame.show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                self.render_sections(ui);
-            });
+            self.render_tab_bar(ui);
+            ui.add_space(8.0);
+            // A vertical strip, not plain top-to-bottom layout: `egui_extras`'s
+            // table (and the strip that lays it out beside the detail panel)
+            // claims all remaining height for itself — "if you want something
+            // below the table, put it in a strip" (egui_extras::table's own
+            // module doc). Reserving the status bar's row up front is what
+            // leaves it anything to render into on the Devices tab.
+            StripBuilder::new(ui)
+                .size(Size::remainder())
+                .size(Size::exact(STATUS_BAR_HEIGHT))
+                .vertical(|mut strip| {
+                    strip.cell(|ui| match self.tab {
+                        Tab::General => {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                self.render_general_tab(ui);
+                            });
+                        }
+                        Tab::Devices => self.render_devices_tab(ui),
+                    });
+                    strip.cell(|ui| self.render_status_bar(ui));
+                });
         });
     }
 }
 
 impl SettingsApp {
-    fn render_sections(&mut self, ui: &mut egui::Ui) {
+    /// Hand-rolled tab bar: `SelectableLabel`s bound to `Tab`, not
+    /// `egui_dock` (see `Tab`'s doc comment for why).
+    fn render_tab_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            for (tab, label) in [(Tab::General, "General"), (Tab::Devices, "Devices")] {
+                if ui.selectable_label(self.tab == tab, label).clicked() {
+                    self.tab = tab;
+                }
+            }
+        });
+        ui.separator();
+    }
+
+    fn render_general_tab(&mut self, ui: &mut egui::Ui) {
         // ── Tray display ──────────────────────────────────────────────────────
         Self::section_header(ui, "Tray display");
         for mode in DisplayMode::ALL {
@@ -321,7 +628,7 @@ impl SettingsApp {
                 .changed()
             {
                 // Persist immediately; the tray watches the file and re-renders.
-                self.persist(ui);
+                self.persist(ui, move |target| target.display_mode = mode);
             }
         }
 
@@ -331,23 +638,21 @@ impl SettingsApp {
             .checkbox(&mut per_device, "Show one icon per device")
             .changed()
         {
-            self.config.tray_mode = if per_device {
+            let tray_mode = if per_device {
                 TrayMode::PerDevice
             } else {
                 TrayMode::PrimaryOnly
             };
-            self.persist(ui);
+            self.persist(ui, move |target| target.tray_mode = tray_mode);
         }
 
         if per_device {
             ui.indent("tray_device_picker", |ui| {
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.strong("Devices in tray");
-                    self.render_rescan_button(ui);
-                });
-                ui.label(egui::RichText::new("Uncheck a device to remove its tray icon.").weak());
-                self.render_device_picker(ui);
+                ui.label(
+                    egui::RichText::new("Choose which devices get an icon on the Devices tab.")
+                        .weak(),
+                );
             });
         }
 
@@ -362,8 +667,7 @@ impl SettingsApp {
                 .suffix("%"),
         );
         if resp.drag_stopped() || resp.lost_focus() {
-            self.config.low_threshold = threshold;
-            self.persist(ui);
+            self.persist(ui, move |target| target.low_threshold = threshold);
         }
 
         let mut interval = self.config.poll_interval_secs;
@@ -377,16 +681,12 @@ impl SettingsApp {
                 "Polling more often than this wakes the device constantly and drains its battery.",
             );
         if resp.drag_stopped() || resp.lost_focus() {
-            self.config.poll_interval_secs = interval;
-            self.persist(ui);
+            self.persist(ui, move |target| target.poll_interval_secs = interval);
         }
-
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.strong("Per-device overrides");
-            self.render_rescan_button(ui);
-        });
-        self.render_device_overrides(ui);
+        ui.label(
+            egui::RichText::new("Per-device overrides live on the Devices tab: select a row.")
+                .weak(),
+        );
 
         // ── Notifications ─────────────────────────────────────────────────────
         ui.add_space(16.0);
@@ -398,7 +698,10 @@ impl SettingsApp {
             )
             .changed()
         {
-            self.persist(ui);
+            let notifications_enabled = self.config.notifications_enabled;
+            self.persist(ui, move |target| {
+                target.notifications_enabled = notifications_enabled;
+            });
         }
 
         // ── Startup ───────────────────────────────────────────────────────────
@@ -438,8 +741,12 @@ impl SettingsApp {
         Self::section_header(ui, "About");
         ui.label(format!("rigbat {}", env!("CARGO_PKG_VERSION")));
         ui.hyperlink_to("Project page", env!("CARGO_PKG_REPOSITORY"));
+    }
 
-        // ── Bottom row: status + Close ────────────────────────────────────────
+    /// Status line + Close button, shared by both tabs (not just General's
+    /// scroll area): the Devices tab's override panel saves too, and Close
+    /// must stay reachable regardless of which tab is open.
+    fn render_status_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.separator();
 
@@ -492,18 +799,53 @@ fn apply_device_override(
     }
 }
 
-/// Returns the `shown_devices` value after a toggle. If every device in `all`
-/// is present in `checked`, returns an empty `Vec` (canonical "show all").
-/// Otherwise returns only the checked names in the order they appear in `all`.
-fn shown_after_toggle(all: &[String], checked: &HashSet<String>) -> Vec<String> {
-    if all.iter().all(|n| checked.contains(n)) {
-        Vec::new()
-    } else {
-        all.iter()
-            .filter(|n| checked.contains(n.as_str()))
-            .cloned()
-            .collect()
+/// Toggles whether `name` is hidden: `show = true` removes it from
+/// `hidden_devices` (if present), `show = false` adds it (if absent).
+/// Exactly one entry changes; every other entry — including one for a device
+/// that is not in the currently-discovered list — is left untouched. That is
+/// the structural fix for the bug this replaces: a partial view of the
+/// roster can never damage entries it does not display, because it never
+/// rebuilds the list at all.
+fn toggle_hidden(hidden_devices: &mut Vec<String>, name: &str, show: bool) {
+    if show {
+        hidden_devices.retain(|n| n != name);
+    } else if !hidden_devices.iter().any(|n| n == name) {
+        hidden_devices.push(name.to_string());
     }
+}
+
+/// Re-reads the on-disk config via `load_config`, applies `edit` — the one
+/// change a call site just made — to that fresh copy, and writes the result
+/// back via `save_config`. Returns the saved config on success.
+///
+/// Replaces the earlier `apply_to`, which copied every window-owned field
+/// from the window's in-memory snapshot regardless of whether the user had
+/// touched it in this window session. That blanket overwrite is what let the
+/// tray's one-time `shown_devices` → `hidden_devices` migration be silently
+/// undone: a window opened before the migration ran held `hidden_devices`
+/// empty, and its next save — for any field, even an unrelated one — wrote
+/// that stale empty list back over the migrated value, permanently, since
+/// the migration cannot re-run once `shown_devices` is already empty. `edit`
+/// makes that impossible by construction: every field other than the one it
+/// names always comes from `load_config`, never from a window snapshot.
+///
+/// `load_config`/`save_config` are parameters, not `config::load`/`save`
+/// called directly, so tests can point this at a temporary file instead of
+/// the real `config::config_path()` — mirrors
+/// `app::supervisor::migrate_shown_devices_once`.
+fn save_edit<L, S>(
+    load_config: &L,
+    save_config: &S,
+    edit: impl FnOnce(&mut Config),
+) -> anyhow::Result<Config>
+where
+    L: Fn() -> Config,
+    S: Fn(&Config) -> anyhow::Result<()>,
+{
+    let mut on_disk = load_config();
+    edit(&mut on_disk);
+    save_config(&on_disk)?;
+    Ok(on_disk)
 }
 
 /// Opens the settings window. Blocks until the user closes it.
@@ -516,6 +858,12 @@ pub fn run() -> anyhow::Result<()> {
     use anyhow::Context as _;
 
     let config = config::load();
+    // A second connection to the same database the tray writes through —
+    // safe since the schema migration takes BEGIN IMMEDIATE plus
+    // CREATE TABLE IF NOT EXISTS. `None` (no state directory, a corrupt
+    // file) degrades to today's scan-only device list, same as the tray
+    // treats a missing store as an optimisation, never a dependency.
+    let store = state::open();
     let rt = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -525,8 +873,10 @@ pub fn run() -> anyhow::Result<()> {
     let discovery_ctx = Arc::new(crate::discovery::Context::new());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([460.0, 560.0])
-            .with_min_inner_size([380.0, 320.0])
+            // Wide enough for the Devices tab's nine-column table plus its
+            // detail panel; General's narrower content still fits fine.
+            .with_inner_size([820.0, 560.0])
+            .with_min_inner_size([480.0, 320.0])
             .with_title("rigbat")
             .with_app_id("rigbat"),
         ..Default::default()
@@ -548,6 +898,13 @@ pub fn run() -> anyhow::Result<()> {
                 discovery_ctx,
                 scan_rx: None,
                 scanning: false,
+                tab: Tab::General,
+                store,
+                device_rows: Vec::new(),
+                device_search: String::new(),
+                device_sort: SortState::default(),
+                selected_device: None,
+                delete_state: DeleteState::default(),
             };
             app.spawn_scan(cc.egui_ctx.clone());
             Ok(Box::new(app))
@@ -632,6 +989,13 @@ mod tests {
             discovery_ctx: Arc::new(crate::discovery::Context::new()),
             scan_rx: None,
             scanning: false,
+            tab: Tab::General,
+            store: None,
+            device_rows: Vec::new(),
+            device_search: String::new(),
+            device_sort: SortState::default(),
+            selected_device: None,
+            delete_state: DeleteState::default(),
         }
     }
 
@@ -644,49 +1008,97 @@ mod tests {
         }
     }
 
-    #[test]
-    fn apply_to_preserves_primary_device() {
-        let app = settings_app_with(Config {
-            primary_device: None,
-            ..Config::default()
-        });
-        let mut target = Config {
-            primary_device: Some("mouse".to_string()),
-            ..Config::default()
-        };
-        app.apply_to(&mut target);
-        assert_eq!(target.primary_device, Some("mouse".to_string()));
+    /// Wraps a plain device list into a `ScanResult` with no reading and no
+    /// inventory records — what `apply_scan_result`'s pre-T35 tests exercised
+    /// before it started merging in the store's half.
+    fn scan_result(devices: Vec<DeviceInfo>) -> ScanResult {
+        ScanResult {
+            discovered: devices.into_iter().map(|d| (d, None)).collect(),
+            records: Vec::new(),
+        }
+    }
+
+    /// Unique scratch config file path under the OS temp dir for one test.
+    /// Never the real `config::config_path()` — `save_edit` tests must not
+    /// touch `~/.config/rigbat/config.json`.
+    fn scratch_config_path(test_name: &str) -> PathBuf {
+        scratch_dir(test_name).join("config.json")
     }
 
     #[test]
-    fn apply_to_overwrites_owned_fields() {
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "mouse".to_string(),
-            DeviceSettings {
-                poll_interval_secs: Some(30),
-                low_threshold: Some(10),
-            },
+    fn save_edit_writes_only_the_edited_field() {
+        let path = scratch_config_path("writes-only-edited-field");
+        config::save_to(&path, &Config::default()).unwrap();
+
+        let load = || config::load_from(&path);
+        let save = |cfg: &Config| config::save_to(&path, cfg);
+        let result = save_edit(&load, &save, |target| target.low_threshold = 15).unwrap();
+
+        assert_eq!(result.low_threshold, 15);
+        assert_eq!(
+            result.poll_interval_secs,
+            Config::default().poll_interval_secs
         );
-        let app = settings_app_with(Config {
-            display_mode: DisplayMode::PercentInIcon,
-            shown_devices: vec!["mouse".to_string()],
-            notifications_enabled: false,
-            tray_mode: TrayMode::PerDevice,
-            poll_interval_secs: 45,
-            low_threshold: 15,
-            device_overrides: overrides.clone(),
-            ..Config::default()
-        });
-        let mut target = Config::default();
-        app.apply_to(&mut target);
-        assert_eq!(target.display_mode, DisplayMode::PercentInIcon);
-        assert_eq!(target.tray_mode, TrayMode::PerDevice);
-        assert_eq!(target.shown_devices, vec!["mouse".to_string()]);
-        assert!(!target.notifications_enabled);
-        assert_eq!(target.poll_interval_secs, 45);
-        assert_eq!(target.low_threshold, 15);
-        assert_eq!(target.device_overrides, overrides);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// A field `edit` does not name — here `primary_device`, which no UI
+    /// control ever sets — must survive untouched. Replaces the old
+    /// `apply_to_preserves_primary_device`, which tested the same guarantee
+    /// against the blanket-overwrite `apply_to` this function replaces.
+    #[test]
+    fn save_edit_preserves_fields_it_does_not_touch() {
+        let path = scratch_config_path("preserves-untouched-fields");
+        config::save_to(
+            &path,
+            &Config {
+                primary_device: Some("mouse".to_string()),
+                ..Config::default()
+            },
+        )
+        .unwrap();
+
+        let load = || config::load_from(&path);
+        let save = |cfg: &Config| config::save_to(&path, cfg);
+        let result = save_edit(&load, &save, |target| target.low_threshold = 10).unwrap();
+
+        assert_eq!(result.primary_device, Some("mouse".to_string()));
+        assert_eq!(result.low_threshold, 10);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// Regression test for C1: a settings window's own `self.config` snapshot
+    /// is never fed to `save_edit` — only `load_config`'s fresh read is. This
+    /// reproduces the failing sequence directly: the window "opens" (saved
+    /// once with `hidden_devices` empty), something else — the tray's
+    /// one-time `shown_devices` migration, in this test's role — writes
+    /// `hidden_devices` afterward, and the window then saves an unrelated
+    /// field. The migrated value must survive.
+    #[test]
+    fn save_edit_stale_window_snapshot_does_not_clobber_concurrent_disk_write() {
+        let path = scratch_config_path("stale-snapshot");
+        config::save_to(&path, &Config::default()).unwrap();
+
+        // The window would have opened here, holding hidden_devices == [].
+        // It is never consulted below — only load_config is.
+
+        config::save_to(
+            &path,
+            &Config {
+                hidden_devices: vec!["keyboard".to_string()],
+                ..Config::default()
+            },
+        )
+        .unwrap();
+
+        let load = || config::load_from(&path);
+        let save = |cfg: &Config| config::save_to(&path, cfg);
+        let result =
+            save_edit(&load, &save, |target| target.notifications_enabled = false).unwrap();
+
+        assert_eq!(result.hidden_devices, vec!["keyboard".to_string()]);
+        assert!(!result.notifications_enabled);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -737,51 +1149,52 @@ mod tests {
     }
 
     #[test]
-    fn shown_after_toggle_all_checked_collapses_to_empty() {
-        let all = vec!["mouse".to_string(), "keyboard".to_string()];
-        let checked: HashSet<String> = all.iter().cloned().collect();
-        assert!(shown_after_toggle(&all, &checked).is_empty());
+    fn toggle_hidden_unchecking_adds_entry() {
+        let mut hidden = Vec::new();
+        toggle_hidden(&mut hidden, "mouse", false);
+        assert_eq!(hidden, vec!["mouse".to_string()]);
     }
 
     #[test]
-    fn shown_after_toggle_partial_returns_checked_names() {
-        let all = vec![
-            "mouse".to_string(),
-            "keyboard".to_string(),
-            "headset".to_string(),
-        ];
-        let checked: HashSet<String> = ["mouse".to_string(), "headset".to_string()]
-            .into_iter()
-            .collect();
-        let result = shown_after_toggle(&all, &checked);
-        assert_eq!(result, vec!["mouse".to_string(), "headset".to_string()]);
+    fn toggle_hidden_checking_removes_entry() {
+        let mut hidden = vec!["mouse".to_string()];
+        toggle_hidden(&mut hidden, "mouse", true);
+        assert!(hidden.is_empty());
     }
 
     #[test]
-    fn shown_after_toggle_none_checked_returns_empty_vec() {
-        let all = vec!["mouse".to_string(), "keyboard".to_string()];
-        let checked: HashSet<String> = HashSet::new();
-        let result = shown_after_toggle(&all, &checked);
-        assert!(result.is_empty());
+    fn toggle_hidden_leaves_unrelated_entries_untouched() {
+        // Regression test for the bug this replaces: a device not in the
+        // currently-discovered list ("offline-device") must survive a toggle
+        // on an unrelated device. The old `shown_after_toggle` rebuilt the
+        // whole list from the visible roster and silently dropped anything
+        // absent from it.
+        let mut hidden = vec!["offline-device".to_string()];
+        toggle_hidden(&mut hidden, "mouse", false);
+        assert_eq!(
+            hidden,
+            vec!["offline-device".to_string(), "mouse".to_string()]
+        );
+        toggle_hidden(&mut hidden, "mouse", true);
+        assert_eq!(hidden, vec!["offline-device".to_string()]);
     }
 
     #[test]
-    fn shown_after_toggle_preserves_order_from_all() {
-        let all = vec![
-            "mouse".to_string(),
-            "keyboard".to_string(),
-            "headset".to_string(),
-        ];
-        // checked in reverse insertion order — result must follow `all` order
-        let checked: HashSet<String> = ["headset".to_string(), "mouse".to_string()]
-            .into_iter()
-            .collect();
-        let result = shown_after_toggle(&all, &checked);
-        assert_eq!(result, vec!["mouse".to_string(), "headset".to_string()]);
+    fn toggle_hidden_checking_already_shown_is_noop() {
+        let mut hidden = vec!["keyboard".to_string()];
+        toggle_hidden(&mut hidden, "mouse", true);
+        assert_eq!(hidden, vec!["keyboard".to_string()]);
     }
 
     #[test]
-    fn apply_scan_result_preserves_shown_devices_and_overrides() {
+    fn toggle_hidden_unchecking_already_hidden_is_noop() {
+        let mut hidden = vec!["mouse".to_string()];
+        toggle_hidden(&mut hidden, "mouse", false);
+        assert_eq!(hidden, vec!["mouse".to_string()]);
+    }
+
+    #[test]
+    fn apply_scan_result_preserves_hidden_devices_and_overrides() {
         let mut overrides = HashMap::new();
         overrides.insert(
             "mouse".to_string(),
@@ -791,26 +1204,26 @@ mod tests {
             },
         );
         let mut app = settings_app_with(Config {
-            shown_devices: vec!["mouse".to_string()],
+            hidden_devices: vec!["mouse".to_string()],
             device_overrides: overrides.clone(),
             ..Config::default()
         });
-        app.apply_scan_result(vec![device("mouse"), device("keyboard")]);
-        assert_eq!(app.config.shown_devices, vec!["mouse".to_string()]);
+        app.apply_scan_result(scan_result(vec![device("mouse"), device("keyboard")]));
+        assert_eq!(app.config.hidden_devices, vec!["mouse".to_string()]);
         assert_eq!(app.config.device_overrides, overrides);
         assert!(!app.scanning);
         assert!(app.scan_rx.is_none());
     }
 
     #[test]
-    fn apply_scan_result_empty_means_all_survives_device_set_change() {
-        // shown_devices == [] is the canonical "show all"; it must not flip
-        // to a concrete list just because the discovered set changed.
+    fn apply_scan_result_empty_hidden_devices_survives_device_set_change() {
+        // hidden_devices == [] is "show all"; it must not flip to a concrete
+        // list just because the discovered set changed.
         let mut app = settings_app_with(Config::default());
-        app.apply_scan_result(vec![device("mouse")]);
-        assert!(app.config.shown_devices.is_empty());
-        app.apply_scan_result(vec![device("mouse"), device("keyboard")]);
-        assert!(app.config.shown_devices.is_empty());
+        app.apply_scan_result(scan_result(vec![device("mouse")]));
+        assert!(app.config.hidden_devices.is_empty());
+        app.apply_scan_result(scan_result(vec![device("mouse"), device("keyboard")]));
+        assert!(app.config.hidden_devices.is_empty());
     }
 
     #[test]
@@ -828,7 +1241,7 @@ mod tests {
             ..Config::default()
         });
         // "headset" is not in this scan's result.
-        app.apply_scan_result(vec![device("mouse")]);
+        app.apply_scan_result(scan_result(vec![device("mouse")]));
         assert_eq!(app.config.device_overrides, overrides);
         assert!(!app.devices.iter().any(|d| d.name == "headset"));
     }

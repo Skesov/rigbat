@@ -141,6 +141,15 @@ fn compute_pending(state: &TrayState, cfg: &Config, tracker: &mut LowTracker) ->
         .devices
         .iter()
         .filter_map(|d| {
+            // Hiding a device is the only control the user has for saying
+            // "this one is not my concern", and a hidden device has no tray
+            // icon — a toast about it points at a state that cannot be
+            // inspected. Skipped before the tracker sees it, so unhiding
+            // later starts from a clean crossing rather than one consumed
+            // while the device was invisible.
+            if !cfg.is_shown(&d.info.name) {
+                return None;
+            }
             if d.presence != Presence::Online {
                 return None;
             }
@@ -270,6 +279,34 @@ mod tests {
     use crate::domain::{
         BatteryReading, ChargeState, DeviceInfo, DeviceKind, DeviceState, Presence, Transport,
     };
+
+    #[test]
+    fn hidden_device_never_notifies() {
+        let mut tracker = LowTracker::default();
+        let cfg = Config {
+            hidden_devices: vec!["mouse".to_string()],
+            low_threshold: 20,
+            ..Config::default()
+        };
+        let now = Instant::now();
+        let state = TrayState {
+            devices: vec![device_state_at(
+                "mouse",
+                Presence::Online,
+                Some(5),
+                Some(now),
+            )],
+        };
+        assert!(compute_pending(&state, &cfg, &mut tracker).is_empty());
+
+        // Unhiding must not fire on a crossing consumed while invisible: the
+        // tracker never saw the hidden readings, so confirmation starts now.
+        let shown = Config {
+            hidden_devices: Vec::new(),
+            ..cfg
+        };
+        assert!(compute_pending(&state, &shown, &mut tracker).is_empty());
+    }
 
     #[test]
     fn notify_timeout_is_well_under_dbus_default() {

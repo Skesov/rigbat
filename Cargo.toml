@@ -21,6 +21,10 @@ futures-util = { version = "0.3", default-features = false }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 nix = { version = "0.31", default-features = false, features = ["poll"] }
 notify = "8"
+# bundled compiles SQLite from source and links it statically: no runtime
+# libsqlite3 dependency, cargo build stays self-contained. Needs a C
+# compiler at build time — see CONTRIBUTING.md.
+rusqlite = { version = "0.40", features = ["bundled"] }
 # default-features off drops accesskit: its AT-SPI bridge (accesskit_unix) opens
 # a zbus connection on a thread without a tokio runtime, which panics in the
 # runtime-less `rigbat settings` process. a11y on the settings dialog can be
@@ -31,6 +35,10 @@ eframe = { version = "0.34.3", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+# Pinned to exactly eframe's egui version (0.34.3): egui_extras must match
+# eframe's egui build-for-build, or the two link two different, incompatible
+# `egui` crates. `cargo tree -i egui` confirms a single 0.34.3 in the graph.
+egui_extras = { version = "=0.34.3", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 

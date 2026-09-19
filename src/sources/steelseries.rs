@@ -85,11 +85,11 @@ impl BatteryBackend for SteelSeriesBackend {
         "steelseries"
     }
 
-    async fn discover(&self, _ctx: &crate::discovery::Context) -> Vec<Box<dyn BatterySource>> {
-        discover_inner().unwrap_or_else(|e| {
-            tracing::warn!("steelseries discovery failed: {e:#}");
-            Vec::new()
-        })
+    async fn discover(
+        &self,
+        _ctx: &crate::discovery::Context,
+    ) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
+        discover_inner()
     }
 }
 

@@ -62,8 +62,19 @@ Pick the granularity that fits the protocol:
 - No `unwrap`/`expect` in non-test code — return `anyhow::Result` with context.
 - Pure parsing logic split into functions with unit tests (see the `parse_*` functions in
   `steelseries.rs`).
-- No C libraries. Use kernel interfaces directly (`/sys`, `/dev/hidraw`) or pure-Rust
-  D-Bus (`zbus`). See [docs/adding-a-device.md](docs/adding-a-device.md).
+- Talk to devices through kernel interfaces directly (`/sys`, `/dev/hidraw`) or pure-Rust
+  D-Bus (`zbus`) — no `libhidapi`, no `libdbus`. See
+  [docs/adding-a-device.md](docs/adding-a-device.md). This is about device access, not a
+  blanket ban on C dependencies: the state store is SQLite via `rusqlite`, chosen because no
+  pure-Rust engine offers a comparable multi-process story (redb's is an experimental flag in
+  an unreleased version; the Turso rewrite is pre-1.0 by its own maintainers).
+- No `unsafe` in this crate — enforced by `unsafe_code = "forbid"` in `Cargo.toml`, which the
+  compiler checks. Dependencies may use it internally; rigbat's own code may not.
+
+## Build requirements
+
+A C compiler (`cc`) must be on `PATH`: `rusqlite`'s `bundled` feature compiles SQLite from
+source. Everything else in the dependency tree is pure Rust.
 
 ## Checks before opening a PR
 

@@ -9,6 +9,7 @@ mod notifications;
 mod session;
 mod settings;
 mod sources;
+mod state;
 mod tray;
 
 use crate::domain::Presence;
@@ -241,7 +242,8 @@ async fn async_main(invocation: Invocation) {
     }
 
     let ctx = discovery::Context::new();
-    let sources = discovery::discover_all(&ctx).await;
+    let sweeps = discovery::discover_all(&ctx).await;
+    let sources = discovery::flatten(sweeps);
 
     let rows = app::poll_once(sources).await;
 
@@ -310,13 +312,27 @@ async fn run_tray() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting rigbat tray");
 
     let config = crate::config::load();
-    let (config_tx, config_rx) = tokio::sync::watch::channel(config);
+    let (config_tx, _config_rx) = tokio::sync::watch::channel(config);
     // Start the filesystem watcher. It pushes reloaded configs into config_tx
     // whenever config.json changes on disk (best-effort, never fatal).
     crate::config::watch_file(config_tx.clone());
 
+    // Optional: device inventory and reading history. `state::open` logs its
+    // own warning and returns None if the store cannot be opened — battery
+    // monitoring must not depend on it. Only the tray writes to it (see
+    // `src/state/mod.rs`); `--waybar` runs its own Supervisor without one.
+    let store = crate::state::open();
+    if let Some(store) = &store {
+        crate::state::spawn_retention(store.clone());
+    }
+
     let ctx = std::sync::Arc::new(discovery::Context::new());
-    let (rx, refresh) = app::supervisor::Supervisor::spawn(config_rx, ctx.clone());
+    let (rx, refresh) = app::supervisor::Supervisor::spawn(
+        config_tx.clone(),
+        ctx.clone(),
+        store.clone(),
+        app::supervisor::ConfigRole::Owner,
+    );
     spawn_bus_dependent_tasks(ctx.clone(), refresh.clone());
     let theme_rx = appearance::spawn();
     // Spawn the notifier after config_tx is available so it can receive the
@@ -363,16 +379,22 @@ async fn run_waybar() {
     );
 
     let config = crate::config::load();
-    let (config_tx, config_rx) = tokio::sync::watch::channel(config);
+    let (config_tx, _config_rx) = tokio::sync::watch::channel(config);
     crate::config::watch_file(config_tx.clone());
 
     let ctx = std::sync::Arc::new(discovery::Context::new());
-    let (mut rx, refresh) = app::supervisor::Supervisor::spawn(config_rx, ctx.clone());
+    // No state store here: only `rigbat tray` writes to it (see
+    // `src/state/mod.rs`'s module doc and `run_tray`).
+    let (mut rx, refresh) = app::supervisor::Supervisor::spawn(
+        config_tx.clone(),
+        ctx.clone(),
+        None,
+        app::supervisor::ConfigRole::Reader,
+    );
     spawn_bus_dependent_tasks(ctx.clone(), refresh.clone());
 
-    // Separate from the receiver Supervisor::spawn consumed, so a
-    // primary_device/shown_devices edit is picked up even between two
-    // TrayState publications.
+    // A receiver of our own, so a primary_device/hidden_devices edit is
+    // picked up even between two TrayState publications.
     let mut cfg_rx = config_tx.subscribe();
 
     // `Supervisor::spawn` publishes an empty `TrayState` before any backend has

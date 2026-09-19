@@ -524,14 +524,14 @@ mod tests {
     }
 
     #[test]
-    fn waybar_respects_shown_devices_filter() {
+    fn waybar_respects_hidden_devices_filter() {
         let reading = BatteryReading::new(50, ChargeState::Discharging);
         let states = vec![
             device_state("mouse", Presence::Online, Some(reading), None),
             device_state("keyboard", Presence::Online, Some(reading), None),
         ];
         let cfg = Config {
-            shown_devices: vec!["keyboard".to_string()],
+            hidden_devices: vec!["mouse".to_string()],
             ..Config::default()
         };
 

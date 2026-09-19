@@ -18,10 +18,31 @@ use crate::tray::icon::{IconRenderer, Theme, TinySkiaRenderer};
 // sanitize: map non-ASCII-alphanumeric chars to '-' for stable SNI ids
 // ---------------------------------------------------------------------------
 
+/// Builds the SNI item id for a device name.
+///
+/// The readable stem keeps the id recognisable in a bus listing, but on its
+/// own it collides: every character outside `[A-Za-z0-9]` becomes `-`, so
+/// "Foo Bar" and "Foo-Bar" produce one stem, and a name in a non-Latin script
+/// produces nothing but dashes. Hosts key per-item state such as remembered
+/// position on this id, so a suffix derived from the full name keeps distinct
+/// devices distinct whatever characters they use.
 fn sanitize(s: &str) -> String {
-    s.chars()
+    let stem: String = s
+        .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+        .collect();
+    format!("{stem}-{:08x}", name_hash(s))
+}
+
+/// FNV-1a over the original name. Not cryptographic — it only has to separate
+/// names a host would otherwise see as one.
+fn name_hash(s: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in s.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 // ---------------------------------------------------------------------------
@@ -101,11 +122,11 @@ struct Resolved {
 /// Resolves an icon's device from its key, the current tray state and config.
 ///
 /// Per-device icon (`key = Some(name)`): that device, if present and shown.
-/// A device excluded by `shown_devices` resolves to `None` even if `key`
-/// still names it: `desired_keys` only creates per-device icons from the
-/// shown list, so a keyed-but-hidden state is transient (config changed,
-/// reconcile has not yet retired the icon) and showing it for one frame
-/// would be the bug.
+/// A device named in `hidden_devices` resolves to `None` even if `key` still
+/// names it: `desired_keys` only creates per-device icons from the shown
+/// list, so a keyed-but-hidden state is transient (config changed, reconcile
+/// has not yet retired the icon) and showing it for one frame would be the
+/// bug.
 /// Aggregate icon (`key = None`): `featured_name`'s pick.
 ///
 /// `classify` only knows readings, not reachability. A device that is not
@@ -183,10 +204,14 @@ impl Tray for RigbatTray {
         }
     }
 
+    /// COSMIC shows no hover tooltip for tray icons, so for the aggregate
+    /// icon this is the only textual channel naming the device it stands for.
     fn title(&self) -> String {
         match &self.key {
             Some(k) => k.clone(),
-            None => "rigbat".into(),
+            None => self
+                .resolve()
+                .map_or_else(|| "rigbat".to_owned(), |r| r.state.info.name),
         }
     }
 
@@ -434,28 +459,29 @@ mod tests {
     // --- sanitize -----------------------------------------------------------
 
     #[test]
-    fn sanitize_alphanumeric_unchanged() {
-        assert_eq!(sanitize("mouse123"), "mouse123");
+    fn sanitize_keeps_a_readable_stem() {
+        assert!(sanitize("mouse123").starts_with("mouse123-"));
+        assert!(sanitize("MX Master 3").starts_with("MX-Master-3-"));
+        assert!(sanitize("kbd/bt#1").starts_with("kbd-bt-1-"));
     }
 
     #[test]
-    fn sanitize_spaces_become_dash() {
-        assert_eq!(sanitize("MX Master 3"), "MX-Master-3");
+    fn sanitize_is_stable_for_the_same_name() {
+        assert_eq!(sanitize("MX Master 3"), sanitize("MX Master 3"));
+    }
+
+    /// Names that differ only in characters the stem flattens must still get
+    /// distinct ids — hosts key per-item state on this string.
+    #[test]
+    fn sanitize_separates_names_the_stem_cannot() {
+        assert_ne!(sanitize("Foo Bar"), sanitize("Foo-Bar"));
+        assert_ne!(sanitize("héadset"), sanitize("hèadset"));
+        assert_ne!(sanitize("Мышь"), sanitize("Клава"));
     }
 
     #[test]
-    fn sanitize_punctuation_becomes_dash() {
-        assert_eq!(sanitize("kbd/bt#1"), "kbd-bt-1");
-    }
-
-    #[test]
-    fn sanitize_empty_string() {
-        assert_eq!(sanitize(""), "");
-    }
-
-    #[test]
-    fn sanitize_non_ascii_becomes_dash() {
-        assert_eq!(sanitize("héadset"), "h-adset");
+    fn sanitize_empty_string_still_yields_an_id() {
+        assert!(!sanitize("").is_empty());
     }
 
     // --- desired_keys -------------------------------------------------------
@@ -575,9 +601,9 @@ mod tests {
 
     #[test]
     fn featured_name_explicit_hidden_falls_back_to_first_connected() {
-        // "gamepad" is not in shown_devices, so the explicit choice is ignored.
+        // "gamepad" is hidden, so the explicit choice is ignored.
         let mut cfg = cfg_with_primary(Some("gamepad"));
-        cfg.shown_devices = vec!["mouse".to_string(), "keyboard".to_string()];
+        cfg.hidden_devices = vec!["gamepad".to_string()];
         let state = make_state(vec![
             (make_info("mouse"), Some(make_reading(80))),
             (make_info("keyboard"), Some(make_reading(50))),
@@ -616,14 +642,14 @@ mod tests {
     }
 
     #[test]
-    fn featured_name_all_filtered_by_shown_returns_none() {
+    fn featured_name_all_hidden_returns_none() {
         let mut cfg = cfg_with_primary(None);
-        cfg.shown_devices = vec!["trackpad".to_string()];
+        cfg.hidden_devices = vec!["mouse".to_string(), "keyboard".to_string()];
         let state = make_state(vec![
             (make_info("mouse"), Some(make_reading(80))),
             (make_info("keyboard"), Some(make_reading(50))),
         ]);
-        // None of the devices match the whitelist.
+        // Both present devices are hidden.
         assert_eq!(featured_name(&state, &cfg), None);
     }
 
@@ -639,9 +665,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_for_per_device_key_hidden_by_shown_devices_returns_none() {
+    fn resolve_for_per_device_key_hidden_by_hidden_devices_returns_none() {
         let mut cfg = cfg_with_primary(None);
-        cfg.shown_devices = vec!["keyboard".to_string()];
+        cfg.hidden_devices = vec!["mouse".to_string()];
         let state = make_state(vec![(make_info("mouse"), Some(make_reading(80)))]);
         assert!(resolve_for(Some("mouse"), &state, &cfg).is_none());
     }
