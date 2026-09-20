@@ -5,7 +5,7 @@ use tokio::sync::watch;
 
 use crate::app::supervisor::TrayState;
 use crate::config::Config;
-use crate::domain::{Presence, PrimaryStatus, classify};
+use crate::domain::{DeviceId, Presence, PrimaryStatus, classify};
 
 /// Upper bound on a single `notify` call. The D-Bus default reply timeout is
 /// 25 s; a toast that hasn't been accepted well before that has already
@@ -59,20 +59,26 @@ struct LowStreak {
 /// reading must not be double-counted.
 #[derive(Default)]
 struct LowTracker {
-    notified: HashSet<String>,
-    streaks: HashMap<String, LowStreak>,
+    notified: HashSet<DeviceId>,
+    streaks: HashMap<DeviceId, LowStreak>,
 }
 
 impl LowTracker {
-    /// Records the latest observation for `name`: whether it is low, and the
+    /// Records the latest observation for `id`: whether it is low, and the
     /// `last_seen` of the reading that produced it. Returns true iff a
     /// notification should fire now — the device has reached
     /// `LOW_CONFIRMATIONS` consecutive distinct low readings and was not
     /// already notified.
-    fn observe(&mut self, name: &str, is_low: bool, last_seen: Option<Instant>) -> bool {
+    ///
+    /// Keyed by `DeviceId`, not by name: the project deliberately does not
+    /// deduplicate a device seen over two transports, and two such entries can
+    /// carry the same name. Keyed by name their streaks would merge — one
+    /// entry's recovery re-arming the other, one entry's reading confirming
+    /// the other's crossing.
+    fn observe(&mut self, id: &DeviceId, is_low: bool, last_seen: Option<Instant>) -> bool {
         if !is_low {
-            self.streaks.remove(name);
-            self.notified.remove(name);
+            self.streaks.remove(id);
+            self.notified.remove(id);
             return false;
         }
         let Some(last_seen) = last_seen else {
@@ -80,7 +86,7 @@ impl LowTracker {
             // defensively rather than panicking on the missing timestamp.
             return false;
         };
-        let count = match self.streaks.get_mut(name) {
+        let count = match self.streaks.get_mut(id) {
             Some(streak) if streak.last_seen == last_seen => {
                 // Same reading republished — does not advance the streak.
                 streak.count
@@ -92,7 +98,7 @@ impl LowTracker {
             }
             None => {
                 self.streaks.insert(
-                    name.to_owned(),
+                    id.clone(),
                     LowStreak {
                         last_seen,
                         count: 1,
@@ -111,13 +117,13 @@ impl LowTracker {
             // Without this line that wait is indistinguishable from a broken
             // notifier.
             tracing::debug!(
-                device = %name,
+                device = %id.name,
                 confirmations = count,
                 needed = LOW_CONFIRMATIONS,
                 "low reading not yet confirmed"
             );
         }
-        count >= LOW_CONFIRMATIONS && self.notified.insert(name.to_owned())
+        count >= LOW_CONFIRMATIONS && self.notified.insert(id.clone())
     }
 }
 
@@ -158,7 +164,7 @@ fn compute_pending(state: &TrayState, cfg: &Config, tracker: &mut LowTracker) ->
                 classify(d.last_reading, threshold),
                 PrimaryStatus::Low { .. }
             );
-            if tracker.observe(&d.info.name, is_low, d.last_seen) {
+            if tracker.observe(&d.info.id(), is_low, d.last_seen) {
                 let pct = d.last_reading.map(|r| r.percent).unwrap_or(0);
                 Some((d.info.name.clone(), pct))
             } else {
@@ -277,7 +283,8 @@ mod tests {
     use crate::app::supervisor::TrayState;
     use crate::config::Config;
     use crate::domain::{
-        BatteryReading, ChargeState, DeviceInfo, DeviceKind, DeviceState, Presence, Transport,
+        BatteryReading, ChargeState, DeviceId, DeviceInfo, DeviceKind, DeviceState, Presence,
+        Transport,
     };
 
     #[test]
@@ -318,7 +325,7 @@ mod tests {
     fn one_low_reading_does_not_notify() {
         let mut t = LowTracker::default();
         let t0 = Instant::now();
-        assert!(!t.observe("mouse", true, Some(t0)));
+        assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
     }
 
     #[test]
@@ -326,21 +333,21 @@ mod tests {
         let mut t = LowTracker::default();
         let t0 = Instant::now();
         let t1 = t0 + Duration::from_secs(60);
-        assert!(!t.observe("mouse", true, Some(t0)));
-        assert!(t.observe("mouse", true, Some(t1)));
+        assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
+        assert!(t.observe(&test_id("mouse"), true, Some(t1)));
         // Already notified for this crossing — no second fire.
         let t2 = t1 + Duration::from_secs(60);
-        assert!(!t.observe("mouse", true, Some(t2)));
+        assert!(!t.observe(&test_id("mouse"), true, Some(t2)));
     }
 
     #[test]
     fn republished_same_reading_does_not_notify() {
         let mut t = LowTracker::default();
         let t0 = Instant::now();
-        assert!(!t.observe("mouse", true, Some(t0)));
+        assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
         // Same last_seen — a republication of the same reading, not a new one.
-        assert!(!t.observe("mouse", true, Some(t0)));
-        assert!(!t.observe("mouse", true, Some(t0)));
+        assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
+        assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
     }
 
     #[test]
@@ -348,15 +355,15 @@ mod tests {
         let mut t = LowTracker::default();
         let t0 = Instant::now();
         let t1 = t0 + Duration::from_secs(60);
-        assert!(!t.observe("mouse", true, Some(t0)));
-        assert!(t.observe("mouse", true, Some(t1)));
+        assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
+        assert!(t.observe(&test_id("mouse"), true, Some(t1)));
 
         // Recovers, then goes low again — the old streak must not carry over.
-        t.observe("mouse", false, None);
+        t.observe(&test_id("mouse"), false, None);
         let t2 = t1 + Duration::from_secs(120);
         let t3 = t2 + Duration::from_secs(60);
-        assert!(!t.observe("mouse", true, Some(t2)));
-        assert!(t.observe("mouse", true, Some(t3)));
+        assert!(!t.observe(&test_id("mouse"), true, Some(t2)));
+        assert!(t.observe(&test_id("mouse"), true, Some(t3)));
     }
 
     #[test]
@@ -364,19 +371,19 @@ mod tests {
         let mut t = LowTracker::default();
         let t0 = Instant::now();
         // First low reading builds a streak of one.
-        assert!(!t.observe("mouse", true, Some(t0)));
+        assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
         // Device goes non-Online: compute_pending skips it entirely, so
         // observe is simply not called — the streak is untouched.
         let t1 = t0 + Duration::from_secs(60);
         // Comes back Online, still low, with a fresh reading: streak reaches
         // LOW_CONFIRMATIONS and fires.
-        assert!(t.observe("mouse", true, Some(t1)));
+        assert!(t.observe(&test_id("mouse"), true, Some(t1)));
     }
 
     #[test]
     fn missing_last_seen_does_not_panic_or_notify() {
         let mut t = LowTracker::default();
-        assert!(!t.observe("mouse", true, None));
+        assert!(!t.observe(&test_id("mouse"), true, None));
     }
 
     #[test]
@@ -385,23 +392,64 @@ mod tests {
         let t0 = Instant::now();
         let t1 = t0 + Duration::from_secs(60);
 
-        assert!(!t.observe("mouse", true, Some(t0)));
-        assert!(!t.observe("keyboard", true, Some(t0)));
-        assert!(t.observe("mouse", true, Some(t1)));
-        assert!(t.observe("keyboard", true, Some(t1)));
+        assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
+        assert!(!t.observe(&test_id("keyboard"), true, Some(t0)));
+        assert!(t.observe(&test_id("mouse"), true, Some(t1)));
+        assert!(t.observe(&test_id("keyboard"), true, Some(t1)));
         // mouse already notified — no second fire
         let t2 = t1 + Duration::from_secs(60);
-        assert!(!t.observe("mouse", true, Some(t2)));
+        assert!(!t.observe(&test_id("mouse"), true, Some(t2)));
         // keyboard re-arms after recovery
-        t.observe("keyboard", false, None);
-        assert!(!t.observe("keyboard", true, Some(t2)));
+        t.observe(&test_id("keyboard"), false, None);
+        assert!(!t.observe(&test_id("keyboard"), true, Some(t2)));
         let t3 = t2 + Duration::from_secs(60);
-        assert!(t.observe("keyboard", true, Some(t3)));
+        assert!(t.observe(&test_id("keyboard"), true, Some(t3)));
         // mouse still armed
-        assert!(!t.observe("mouse", true, Some(t3)));
+        assert!(!t.observe(&test_id("mouse"), true, Some(t3)));
     }
 
     // --- compute_pending ------------------------------------------------
+
+    /// A `DeviceId` matching what `device_state` builds, so tracker tests and
+    /// `compute_pending` tests name the same device.
+    fn test_id(name: &str) -> DeviceId {
+        DeviceId {
+            name: name.to_owned(),
+            transport: Transport::Sysfs,
+            locator: None,
+        }
+    }
+
+    /// Two entries for one physical device — the sysfs and Bluetooth views the
+    /// project deliberately does not merge — can carry the same name. Their
+    /// low-battery streaks must stay apart.
+    #[test]
+    fn same_name_on_two_transports_tracks_separately() {
+        let mut t = LowTracker::default();
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(60);
+        let sysfs = DeviceId {
+            name: "MX Anywhere 3".to_owned(),
+            transport: Transport::Sysfs,
+            locator: Some("cd:a5:74:20:ae:a6".to_owned()),
+        };
+        let bluetooth = DeviceId {
+            transport: Transport::Bluetooth,
+            ..sysfs.clone()
+        };
+
+        // One confirmation each: neither may borrow the other's.
+        assert!(!t.observe(&sysfs, true, Some(t0)));
+        assert!(!t.observe(&bluetooth, true, Some(t0)));
+
+        // The second confirmation fires each of them once, independently.
+        assert!(t.observe(&sysfs, true, Some(t1)));
+        assert!(t.observe(&bluetooth, true, Some(t1)));
+
+        // And one recovering must not re-arm the other.
+        t.observe(&sysfs, false, None);
+        assert!(!t.observe(&bluetooth, true, Some(t1 + Duration::from_secs(60))));
+    }
 
     fn device_state(name: &str, presence: Presence, percent: Option<u8>) -> DeviceState {
         device_state_at(name, presence, percent, percent.map(|_| Instant::now()))
