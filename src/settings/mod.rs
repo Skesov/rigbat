@@ -18,12 +18,16 @@ use devices::{DeleteState, DeviceRow, SortColumn, SortState};
 /// Seconds the "Changes saved." status line remains visible after a save.
 const SAVED_VISIBLE_SECS: u64 = 2;
 
-/// Fixed width of the per-device override panel beside the Devices tab
-/// table. A detail panel, not an expanding row: `TableBody::rows` renders
-/// homogeneous row heights for its virtualisation to stay simple, and the
-/// selection survives sort/filter because it is keyed by device name, not
-/// row index.
-const DEVICE_DETAIL_PANEL_WIDTH: f32 = 240.0;
+/// Height reserved under the Devices tab table for the selected device's
+/// settings, and only while one is selected.
+///
+/// Below the table rather than beside it: a side panel charges its width to
+/// every frame, including the ones where nothing is selected, and the table is
+/// nine columns wide already. It is a panel rather than an expanding row
+/// because `TableBody::rows` renders homogeneous row heights for its
+/// virtualisation to stay simple; the selection survives sort and filter
+/// because it is keyed by device name, not by row index.
+const DEVICE_DETAIL_HEIGHT: f32 = 104.0;
 
 /// Row and header heights for the Devices tab table.
 const TABLE_ROW_HEIGHT: f32 = 22.0;
@@ -306,65 +310,107 @@ impl SettingsApp {
         }
     }
 
-    fn render_device_override_controls(&mut self, ui: &mut egui::Ui, name: &str) {
+    /// The selected device's low-battery threshold: a checkbox that reads
+    /// `Use default (20%)` until it is ticked, then the override's slider.
+    /// Split from the poll-interval control so the two can sit side by side in
+    /// the detail band; both write through `apply_device_override`, which
+    /// drops an override equal to the current default rather than storing a
+    /// value that only looks like a decision.
+    fn render_threshold_override(&mut self, ui: &mut egui::Ui, name: &str) {
         let default_threshold = self.config.low_threshold;
-        let default_interval = self.config.poll_interval_secs;
         let existing = self.config.device_overrides.get(name).cloned();
-        let mut threshold_on = existing.as_ref().is_some_and(|d| d.low_threshold.is_some());
-        let mut threshold = existing
+        let mut on = existing.as_ref().is_some_and(|d| d.low_threshold.is_some());
+        let mut value = existing
             .as_ref()
             .and_then(|d| d.low_threshold)
             .unwrap_or(default_threshold);
-        let mut interval_on = existing
-            .as_ref()
-            .is_some_and(|d| d.poll_interval_secs.is_some());
-        let mut interval = existing
-            .as_ref()
-            .and_then(|d| d.poll_interval_secs)
-            .unwrap_or(default_interval);
 
-        let mut save = false;
-        let threshold_label = if threshold_on {
+        let label = if on {
             "Override low battery threshold".to_string()
         } else {
             format!("Use default ({default_threshold}%)")
         };
-        if ui.checkbox(&mut threshold_on, threshold_label).changed() {
-            save = true;
-        }
-        if threshold_on {
-            let resp = ui.add(egui::Slider::new(&mut threshold, LOW_THRESHOLD_RANGE).suffix("%"));
-            save |= resp.drag_stopped() || resp.lost_focus();
-        }
-
-        let interval_label = if interval_on {
-            "Override poll interval".to_string()
-        } else {
-            format!("Use default ({default_interval} s)")
-        };
-        if ui.checkbox(&mut interval_on, interval_label).changed() {
-            save = true;
-        }
-        if interval_on {
-            let resp = ui.add(egui::Slider::new(&mut interval, POLL_INTERVAL_RANGE).suffix(" s"));
+        let mut save = ui.checkbox(&mut on, label).changed();
+        if on {
+            let resp = ui.add(egui::Slider::new(&mut value, LOW_THRESHOLD_RANGE).suffix("%"));
             save |= resp.drag_stopped() || resp.lost_focus();
         }
 
         if save {
-            let name = name.to_string();
-            let threshold = threshold_on.then_some(threshold);
-            let interval = interval_on.then_some(interval);
-            self.persist(ui, move |target| {
-                apply_device_override(
-                    &mut target.device_overrides,
-                    &name,
-                    threshold,
-                    interval,
-                    default_threshold,
-                    default_interval,
-                );
-            });
+            self.save_threshold_override(ui, name, on.then_some(value));
         }
+    }
+
+    /// The selected device's poll interval; the threshold control's twin.
+    fn render_interval_override(&mut self, ui: &mut egui::Ui, name: &str) {
+        let default_interval = self.config.poll_interval_secs;
+        let existing = self.config.device_overrides.get(name).cloned();
+        let mut on = existing
+            .as_ref()
+            .is_some_and(|d| d.poll_interval_secs.is_some());
+        let mut value = existing
+            .as_ref()
+            .and_then(|d| d.poll_interval_secs)
+            .unwrap_or(default_interval);
+
+        let label = if on {
+            "Override poll interval".to_string()
+        } else {
+            format!("Use default ({default_interval} s)")
+        };
+        let mut save = ui.checkbox(&mut on, label).changed();
+        if on {
+            let resp = ui.add(egui::Slider::new(&mut value, POLL_INTERVAL_RANGE).suffix(" s"));
+            save |= resp.drag_stopped() || resp.lost_focus();
+        }
+
+        if save {
+            self.save_interval_override(ui, name, on.then_some(value));
+        }
+    }
+
+    /// Writes one device's threshold override, leaving its interval override
+    /// as the on-disk config has it — the two controls are rendered
+    /// separately, so neither may write the other's field from a snapshot.
+    fn save_threshold_override(&mut self, ui: &egui::Ui, name: &str, threshold: Option<u8>) {
+        let default_threshold = self.config.low_threshold;
+        let default_interval = self.config.poll_interval_secs;
+        let name = name.to_string();
+        self.persist(ui, move |target| {
+            let interval = target
+                .device_overrides
+                .get(&name)
+                .and_then(|d| d.poll_interval_secs);
+            apply_device_override(
+                &mut target.device_overrides,
+                &name,
+                threshold,
+                interval,
+                default_threshold,
+                default_interval,
+            );
+        });
+    }
+
+    /// The interval half of `save_threshold_override`.
+    fn save_interval_override(&mut self, ui: &egui::Ui, name: &str, interval: Option<u64>) {
+        let default_threshold = self.config.low_threshold;
+        let default_interval = self.config.poll_interval_secs;
+        let name = name.to_string();
+        self.persist(ui, move |target| {
+            let threshold = target
+                .device_overrides
+                .get(&name)
+                .and_then(|d| d.low_threshold);
+            apply_device_override(
+                &mut target.device_overrides,
+                &name,
+                threshold,
+                interval,
+                default_threshold,
+                default_interval,
+            );
+        });
     }
 
     /// The Devices tab: search box, Refresh, then the inventory table beside
@@ -399,10 +445,18 @@ impl SettingsApp {
         devices::sort_rows(&mut rows, self.device_sort);
         let now = state::now_unix();
 
+        // The detail band claims no height at all while nothing is selected,
+        // so an unselected table is not paying for a panel showing a sentence
+        // about what selecting would do.
+        let detail_height = if self.selected_device.is_some() {
+            DEVICE_DETAIL_HEIGHT
+        } else {
+            0.0
+        };
         StripBuilder::new(ui)
-            .size(Size::remainder().at_least(360.0))
-            .size(Size::exact(DEVICE_DETAIL_PANEL_WIDTH))
-            .horizontal(|mut strip| {
+            .size(Size::remainder().at_least(120.0))
+            .size(Size::exact(detail_height))
+            .vertical(|mut strip| {
                 strip.cell(|ui| self.render_device_table(ui, &rows, now));
                 strip.cell(|ui| self.render_device_detail(ui));
             });
@@ -479,15 +533,33 @@ impl SettingsApp {
     ) {
         table_row.col(|ui| {
             let is_selected = self.selected_device.as_deref() == Some(row.device.name.as_str());
-            // Truncated, not wrapped: the row height is fixed, so a wrapped
-            // second line spills into the row below.
-            let label = egui::Label::new(&row.device.name)
-                .truncate()
-                .selectable(false);
+            // An empty selectable button covering the cell carries the row's
+            // selection background, hover feedback and click; the name is then
+            // drawn inside it. `add_sized` is what makes it cover the cell —
+            // a button whose text is empty is otherwise a few pixels wide, and
+            // the name drawn into that rect truncates away to nothing.
             let resp = ui
-                .add(egui::Button::selectable(is_selected, ""))
+                .add_sized(
+                    ui.available_size(),
+                    egui::Button::selectable(is_selected, ""),
+                )
                 .on_hover_text(&row.device.name);
-            ui.put(resp.rect.shrink2(egui::vec2(4.0, 0.0)), label);
+            // Left-aligned like every other column, which `Ui::put` would not
+            // be: it centres what it places. Truncated, not wrapped, because
+            // the row height is fixed and a second line spills into the row
+            // below.
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(resp.rect.shrink2(egui::vec2(6.0, 0.0)))
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| {
+                    ui.add(
+                        egui::Label::new(&row.device.name)
+                            .truncate()
+                            .selectable(false),
+                    );
+                },
+            );
             if resp.clicked() {
                 self.selected_device = Some(row.device.name.clone());
             }
@@ -606,33 +678,29 @@ impl SettingsApp {
         }
     }
 
-    /// The panel beside the table: the selected device's name and its
-    /// threshold/interval overrides. A fixed-width side panel rather than
-    /// an expanding row — `TableBody::rows` renders every row at the same
-    /// height for its virtualisation to stay simple, and keying the
-    /// selection by device name (not row index) means it survives the
-    /// selected row moving under a re-sort or a search filter.
+    /// The band under the table: the selected device's name, its tray-icon
+    /// pin, and its threshold/interval overrides. Renders nothing at all when
+    /// no row is selected — see `DEVICE_DETAIL_HEIGHT` for why it sits here
+    /// rather than beside the table.
     fn render_device_detail(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        // Framed: an unframed column of text sitting to the right of the table
-        // reads as stray content rather than as this row's settings.
+        let Some(name) = self.selected_device.clone() else {
+            return;
+        };
+        ui.add_space(8.0);
+        // Framed: an unframed block of controls under a table reads as content
+        // belonging to the window rather than to the row that is selected.
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            match self.selected_device.clone() {
-                Some(name) => {
-                    ui.strong(&name);
-                    ui.add_space(4.0);
-                    self.render_primary_control(ui, &name);
-                    ui.add_space(4.0);
-                    self.render_device_override_controls(ui, &name);
-                }
-                None => {
-                    ui.weak("Select a device");
-                    ui.add_space(2.0);
-                    ui.weak("to pin it to the single tray icon, or to");
-                    ui.weak("change its threshold or poll interval.");
-                }
-            }
+            ui.horizontal(|ui| {
+                ui.strong(&name);
+                ui.add_space(12.0);
+                self.render_primary_control(ui, &name);
+            });
+            ui.add_space(4.0);
+            ui.columns(2, |columns| {
+                self.render_threshold_override(&mut columns[0], &name);
+                self.render_interval_override(&mut columns[1], &name);
+            });
         });
     }
 }
@@ -766,10 +834,25 @@ impl SettingsApp {
         } else {
             aggregate_icon_hint(self.config.primary_device.as_deref())
         };
+        // The pin is set from a device's row, so a pin naming a device the
+        // Devices tab has no row for — one retired before the inventory
+        // existed, or deleted since — would be unreachable without this.
+        // Clearing is the only action that needs no row, which is why it is
+        // the only one that lives here.
+        let pinned = !per_device && self.config.primary_device.is_some();
+        let mut clear_pin = false;
         ui.indent("tray_device_picker", |ui| {
             ui.add_space(4.0);
-            ui.label(egui::RichText::new(hint).weak());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(hint).weak());
+                if pinned {
+                    clear_pin = ui.small_button("Clear").clicked();
+                }
+            });
         });
+        if clear_pin {
+            self.persist(ui, |target| target.primary_device = None);
+        }
 
         // ── Battery ───────────────────────────────────────────────────────────
         ui.add_space(16.0);
@@ -1017,9 +1100,11 @@ pub fn run() -> anyhow::Result<()> {
     let discovery_ctx = Arc::new(crate::discovery::Context::new());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            // Wide enough for the Devices tab's nine-column table plus its
-            // detail panel; General's narrower content still fits fine.
-            .with_inner_size([1120.0, 620.0])
+            // The Devices tab's columns add up to 882 px plus inter-column
+            // spacing and the 16 px page margins; 980 clears that without
+            // leaving a wide empty gutter. The per-device settings sit under
+            // the table, so they cost no width at all.
+            .with_inner_size([980.0, 620.0])
             .with_min_inner_size([720.0, 360.0])
             .with_title("rigbat")
             .with_app_id("rigbat"),

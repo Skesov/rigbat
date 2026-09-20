@@ -193,10 +193,12 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
 - Per-device overrides: `device_overrides: HashMap<name, DeviceSettings>` with optional poll
   interval and low threshold; `Config::effective_*` resolve override → global → built-in default.
 - `primary_device` pins the device the aggregate icon features; `None` means the first connected
-  visible device. It is set from the selected device's panel on the Devices tab — one device at a
-  time, so it is an action on a device rather than a column every row would have to carry — and
+  visible device. It is set from the selected device's settings under the Devices tab's table — one
+  device at a time, so it is an action on a device rather than a column every row would carry — and
   the General tab names the current choice beside the single-icon option instead of repeating the
-  control. Forgetting a device clears its pin along with its inventory row.
+  control, plus a `Clear` button — the one action that needs no row, and therefore the way out of
+  a pin naming a device the inventory has no row for (retired before the inventory existed, or
+  deleted since). Forgetting a device clears its pin along with its inventory row.
 - Visibility is recorded as **who to hide** (`hidden_devices`), not who to show. A whitelist has
   to be rebuilt from the devices visible at that moment, so editing it from a partial view
   silently drops every device the view did not contain — which is exactly what made checkboxes

@@ -123,8 +123,8 @@ starts with the session.
 
 **Devices** — a table of every device rigbat has ever seen on this machine, present or not:
 name, type, connection, charge, status, first seen, last seen, a `Tray icon` checkbox, and a
-delete action. Selecting a row opens that device's own settings: pin it to the single tray icon,
-and override the threshold and the poll interval. Unchecking `Tray icon` hides that one device and touches nothing else, so the setting survives
+delete action. Selecting a row opens that device's own settings under the table: pin it to the
+single tray icon, and override the threshold and the poll interval. Unchecking `Tray icon` hides that one device and touches nothing else, so the setting survives
 reboots, unplugged dongles, and devices that happen to be asleep when the window opens. Delete
 removes a device you no longer own from the table; it comes back if the device is ever seen
 again. Renaming a device — in your Bluetooth settings, for instance — keeps its row, its history
