@@ -69,6 +69,39 @@ pub struct Config {
     pub device_overrides: HashMap<String, DeviceSettings>,
 }
 
+/// Moves every per-device setting from `from` to `to`, returning whether any
+/// existed. Called when the inventory sees a device keep its transport and
+/// locator — its hardware identity — while its name changes, which is what a
+/// BlueZ alias edit or a firmware-supplied name change looks like from here.
+///
+/// Config is keyed by display name (the standing decision behind
+/// `dedup-adr.md`), so without this a rename silently resets the device to
+/// defaults: it reappears in the tray after being hidden, loses its threshold
+/// and interval overrides, and stops being the aggregate icon's device.
+pub fn rename_device(cfg: &mut Config, from: &str, to: &str) -> bool {
+    let mut changed = false;
+
+    for entry in &mut cfg.hidden_devices {
+        if entry == from {
+            *entry = to.to_string();
+            changed = true;
+        }
+    }
+    cfg.hidden_devices.dedup();
+
+    if let Some(settings) = cfg.device_overrides.remove(from) {
+        cfg.device_overrides.insert(to.to_string(), settings);
+        changed = true;
+    }
+
+    if cfg.primary_device.as_deref() == Some(from) {
+        cfg.primary_device = Some(to.to_string());
+        changed = true;
+    }
+
+    changed
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -322,6 +355,60 @@ pub fn watch_file(tx: tokio::sync::watch::Sender<Config>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rename_device_moves_every_per_device_setting() {
+        let mut cfg = Config {
+            hidden_devices: vec!["old".to_string(), "other".to_string()],
+            primary_device: Some("old".to_string()),
+            ..Config::default()
+        };
+        cfg.device_overrides.insert(
+            "old".to_string(),
+            DeviceSettings {
+                low_threshold: Some(35),
+                poll_interval_secs: None,
+            },
+        );
+
+        assert!(rename_device(&mut cfg, "old", "new"));
+        assert_eq!(
+            cfg.hidden_devices,
+            vec!["new".to_string(), "other".to_string()]
+        );
+        assert_eq!(cfg.primary_device, Some("new".to_string()));
+        assert!(!cfg.device_overrides.contains_key("old"));
+        assert_eq!(
+            cfg.device_overrides
+                .get("new")
+                .and_then(|d| d.low_threshold),
+            Some(35)
+        );
+    }
+
+    #[test]
+    fn rename_device_reports_no_change_when_the_name_is_unknown() {
+        let mut cfg = Config {
+            hidden_devices: vec!["other".to_string()],
+            ..Config::default()
+        };
+
+        assert!(!rename_device(&mut cfg, "old", "new"));
+        assert_eq!(cfg.hidden_devices, vec!["other".to_string()]);
+    }
+
+    /// A device hidden under both names — possible if it was seen under the
+    /// new name before the rename was noticed — must end up hidden once.
+    #[test]
+    fn rename_device_does_not_duplicate_a_hidden_entry() {
+        let mut cfg = Config {
+            hidden_devices: vec!["old".to_string(), "new".to_string()],
+            ..Config::default()
+        };
+
+        assert!(rename_device(&mut cfg, "old", "new"));
+        assert_eq!(cfg.hidden_devices, vec!["new".to_string()]);
+    }
+
     use super::*;
 
     #[test]

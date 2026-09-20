@@ -6,10 +6,11 @@ System tray battery monitor for gaming peripherals.
 
 - Shows battery level of connected peripherals (mice, keyboards, headsets, controllers) in the system tray
 - Displays one tray icon for every device, or a single aggregate icon (switch in the settings
-  window); the aggregate icon follows `primary_device` from the config if set, otherwise the
-  first connected device among the shown ones
+  window); the aggregate icon shows the device pinned on the Devices tab, or the first connected
+  visible device when none is pinned
 - Automatically discovers connected devices on startup — no manual configuration required
-- Supports multiple devices simultaneously; choose which ones appear in the settings window
+- Supports multiple devices simultaneously; the settings window lists every device ever seen —
+  hide the ones you do not care about, delete the ones you no longer own
 - Keeps showing the last known charge when a device sleeps or goes out of range, drawn dimmed so
   a remembered reading is never mistaken for a live one
 - Sends desktop notifications when battery is low
@@ -113,14 +114,35 @@ controller on, undocked from its dongle.
 
 ## Settings
 
-`rigbat settings` opens the settings window. It edits the poll interval (10–3600 s, default
-60), the low-battery threshold (5–50%, default 20), the display mode, which devices are shown,
-whether one icon per device is used, whether notifications fire, whether rigbat starts with the
-session, and per-device overrides of the interval and threshold. Changes are written to
-`config.json` and the tray picks them up through a file watch — no restart.
+`rigbat settings` opens the settings window. It has two tabs.
 
-Config lives at `~/.config/rigbat/config.json`. `make uninstall` leaves it in place —
-remove it yourself if you want a clean slate.
+**General** — how the tray looks and behaves for every device: one icon per device or a single
+aggregate icon, the display mode, the default low-battery threshold (5–50%, default 20), the
+default poll interval (10–3600 s, default 60), low-battery notifications, and whether rigbat
+starts with the session.
+
+**Devices** — a table of every device rigbat has ever seen on this machine, present or not:
+name, type, connection, charge, status, first seen, last seen, a `Tray icon` checkbox, and a
+delete action. Selecting a row opens that device's own settings: pin it to the single tray icon,
+and override the threshold and the poll interval. Unchecking `Tray icon` hides that one device and touches nothing else, so the setting survives
+reboots, unplugged dongles, and devices that happen to be asleep when the window opens. Delete
+removes a device you no longer own from the table; it comes back if the device is ever seen
+again. Renaming a device — in your Bluetooth settings, for instance — keeps its row, its history
+and its per-device settings: rigbat recognises the hardware, not the label.
+
+Changes are written immediately and the tray picks them up through a file watch — no restart.
+Escape closes the window; if a search is active or a delete is waiting for confirmation, it
+clears that first.
+
+Two files back this:
+
+- `~/.config/rigbat/config.json` — your settings.
+- `~/.local/state/rigbat/rigbat.db` — the device table and charge history (SQLite). The history
+  is what lets the time-remaining estimate survive a restart instead of starting from nothing;
+  readings older than 14 days are dropped automatically. Deleting the file costs only that:
+  rigbat keeps monitoring and rebuilds the table as devices reappear.
+
+`make uninstall` leaves both in place — remove them yourself if you want a clean slate.
 
 ## Status bars
 

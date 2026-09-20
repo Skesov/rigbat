@@ -34,6 +34,32 @@ pub fn classify_stale(percent: u8, low_threshold: u8) -> PrimaryStatus {
     }
 }
 
+/// Picks the featured device by name from an already-shown-filtered roster.
+///
+/// `shown` is `(name, online)` pairs; `online` is the tiebreak signal used
+/// when there is no explicit choice — `Presence::Online` for the tray, but
+/// callers with no presence information (the one-shot CLI path) can pass any
+/// other "prefer this one" signal, such as "this poll returned a reading".
+///
+/// Priority: explicit choice (if still shown) → first online → first shown → None.
+/// It lives in `domain`, not in `tray`, because three surfaces answer this
+/// same question — the aggregate tray icon, `--waybar`, and the settings
+/// window's description of what the single icon will show — so the policy
+/// cannot belong to any one of them. Pure: names and flags in, a name out.
+pub fn select_featured(shown: &[(&str, bool)], primary_device: Option<&str>) -> Option<String> {
+    if let Some(name) = primary_device
+        && shown.iter().any(|(n, _)| *n == name)
+    {
+        return Some(name.to_string());
+    }
+
+    shown
+        .iter()
+        .find(|(_, online)| *online)
+        .or_else(|| shown.first())
+        .map(|(name, _)| name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +140,42 @@ mod tests {
         // Low/Ok — never Charging.
         assert_eq!(classify_stale(80, 20), PrimaryStatus::Ok { percent: 80 });
         assert_eq!(classify_stale(15, 20), PrimaryStatus::Low { percent: 15 });
+    }
+
+    // --- select_featured ------------------------------------------------------
+
+    #[test]
+    fn select_featured_explicit_choice_wins_when_shown() {
+        let shown = [("mouse", true), ("keyboard", false)];
+        assert_eq!(
+            select_featured(&shown, Some("keyboard")),
+            Some("keyboard".to_string())
+        );
+    }
+
+    #[test]
+    fn select_featured_explicit_choice_ignored_when_not_shown() {
+        let shown = [("mouse", true), ("keyboard", false)];
+        assert_eq!(
+            select_featured(&shown, Some("gamepad")),
+            Some("mouse".to_string())
+        );
+    }
+
+    #[test]
+    fn select_featured_no_choice_prefers_online() {
+        let shown = [("mouse", false), ("keyboard", true)];
+        assert_eq!(select_featured(&shown, None), Some("keyboard".to_string()));
+    }
+
+    #[test]
+    fn select_featured_no_online_falls_back_to_first() {
+        let shown = [("mouse", false), ("keyboard", false)];
+        assert_eq!(select_featured(&shown, None), Some("mouse".to_string()));
+    }
+
+    #[test]
+    fn select_featured_empty_returns_none() {
+        assert_eq!(select_featured(&[], None), None);
     }
 }

@@ -334,7 +334,8 @@ impl DeviceRegistry {
     /// `DeviceId`/`transport` — is what answers "which backend owns this
     /// id": `Transport::Hidraw` is shared by both the `steelseries` and
     /// `eightbitdo` backends, so transport cannot make that call.
-    fn reconcile(&mut self, sweeps: Vec<BackendSweep>, ctx: &SourceCtx) {
+    fn reconcile(&mut self, sweeps: Vec<BackendSweep>, ctx: &SourceCtx) -> Vec<(String, String)> {
+        let mut renames: Vec<(String, String)> = Vec::new();
         let now_instant = Instant::now();
         let now_unix = state::now_unix();
 
@@ -360,10 +361,31 @@ impl DeviceRegistry {
                 // Every device discovery finds gets upserted, whether it is
                 // brand new, still running, or reappearing — this is the
                 // `devices` row's `last_seen`, updated once per sweep.
-                if let Some(store) = &self.store
-                    && let Err(e) = store.record_seen(&id, src.device().kind, now_unix)
-                {
-                    tracing::warn!(device = %id.name, "state store: failed to record device seen: {e:#}");
+                if let Some(store) = &self.store {
+                    match store.record_seen(&id, src.device().kind, now_unix) {
+                        Ok(state::Seen::Renamed { from }) => {
+                            tracing::info!(
+                                device = %id.name,
+                                previous = %from,
+                                "device renamed; inventory row and settings follow it"
+                            );
+                            // The live roster is keyed by the same identity, so
+                            // the entry under the old name has to go now. Left
+                            // to the vanished path below it would linger as a
+                            // Disconnected duplicate for DISCONNECTED_RETENTION
+                            // — one device showing twice in the tray for a day,
+                            // while the Devices tab already shows it once.
+                            self.forget(&DeviceId {
+                                name: from.clone(),
+                                ..id.clone()
+                            });
+                            renames.push((from, id.name.clone()));
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(device = %id.name, "state store: failed to record device seen: {e:#}");
+                        }
+                    }
                 }
 
                 if let Some(handle) = self.tasks.get(&id) {
@@ -464,6 +486,7 @@ impl DeviceRegistry {
         }
 
         self.prune_stale(Instant::now());
+        renames
     }
 
     /// Drops `Disconnected` entries that have not been seen for longer than
@@ -483,9 +506,18 @@ impl DeviceRegistry {
             .map(|(id, _)| id.clone())
             .collect();
         for id in stale {
-            self.entries.remove(&id);
-            self.order.retain(|oid| oid != &id);
+            self.forget(&id);
         }
+    }
+
+    /// Drops every trace of one identity: its polling task (aborted), its
+    /// entry, and its place in the display order.
+    fn forget(&mut self, id: &DeviceId) {
+        if let Some(handle) = self.tasks.remove(id) {
+            handle.abort();
+        }
+        self.entries.remove(id);
+        self.order.retain(|oid| oid != id);
     }
 
     fn snapshot(&self) -> Vec<DeviceState> {
@@ -530,7 +562,8 @@ async fn manager_task<F, Fut, L, S>(
 
     let mut registry = DeviceRegistry::new(store);
 
-    rediscover(&mut registry, discover(), &ctx, &watch_tx).await;
+    let renames = rediscover(&mut registry, discover(), &ctx, &watch_tx).await;
+    apply_renames(&renames, &config_tx, &load_config, &save_config);
 
     // The conversion needs a roster it can trust, and the first sweep after
     // login rarely has one — Bluetooth peripherals enumerate late. So it is
@@ -560,7 +593,8 @@ async fn manager_task<F, Fut, L, S>(
                 }
             }
             _ = sleep(DISCOVERY_INTERVAL) => {
-                rediscover(&mut registry, discover(), &ctx, &watch_tx).await;
+                let renames = rediscover(&mut registry, discover(), &ctx, &watch_tx).await;
+                apply_renames(&renames, &config_tx, &load_config, &save_config);
                 // Retried per sweep, not per loop iteration: readings arrive
                 // far more often than sweeps, and counting those would burn
                 // the deadline in seconds instead of minutes.
@@ -572,7 +606,8 @@ async fn manager_task<F, Fut, L, S>(
                 }
             }
             _ = waiter.wait() => {
-                rediscover(&mut registry, discover(), &ctx, &watch_tx).await;
+                let renames = rediscover(&mut registry, discover(), &ctx, &watch_tx).await;
+                apply_renames(&renames, &config_tx, &load_config, &save_config);
                 if !migration_done {
                     migration_sweeps = migration_sweeps.saturating_add(1);
                     migration_done = migrate_shown_devices_once(
@@ -593,12 +628,54 @@ async fn rediscover<Fut>(
     discover: Fut,
     ctx: &SourceCtx,
     watch_tx: &watch::Sender<TrayState>,
-) where
+) -> Vec<(String, String)>
+where
     Fut: Future<Output = Vec<BackendSweep>>,
 {
     let sweeps = discover.await;
-    registry.reconcile(sweeps, ctx);
+    let renames = registry.reconcile(sweeps, ctx);
     publish(registry, watch_tx);
+    renames
+}
+
+/// Moves per-device settings onto each device's new name, then republishes the
+/// config so the tray applies them without waiting for the file watch.
+///
+/// Reads the config fresh from disk rather than from the watch channel, for
+/// the reason `settings::save_edit` documents: the in-memory copy may predate
+/// an edit made in the settings window, and writing it back would undo that
+/// edit.
+///
+/// Takes the pieces by reference and is deliberately **not** async: the
+/// borrows must not cross an `.await`, or `manager_task`'s `L`/`S` would have
+/// to be `Sync` — the same constraint the comment above `rediscover`
+/// describes for the discovery closure.
+fn apply_renames<L, S>(
+    renames: &[(String, String)],
+    config_tx: &watch::Sender<Config>,
+    load_config: &L,
+    save_config: &S,
+) where
+    L: Fn() -> Config,
+    S: Fn(&Config) -> anyhow::Result<()>,
+{
+    if renames.is_empty() {
+        return;
+    }
+    let mut cfg = load_config();
+    let mut changed = false;
+    for (from, to) in renames {
+        changed |= crate::config::rename_device(&mut cfg, from, to);
+    }
+    if !changed {
+        return;
+    }
+    match save_config(&cfg) {
+        Ok(()) => {
+            let _ = config_tx.send(cfg);
+        }
+        Err(e) => tracing::warn!("failed to save config after a device rename: {e:#}"),
+    }
 }
 
 fn spawn_source_task(
@@ -1870,6 +1947,108 @@ mod tests {
         assert_eq!(devices[0].device, a.id());
 
         cleanup_store(&path);
+    }
+
+    /// A device that keeps its transport and locator but comes back under a
+    /// new display name — a BlueZ alias edit — must rename its inventory row
+    /// rather than gain a second one, and must tell the caller so the config
+    /// entries can follow it.
+    #[tokio::test]
+    async fn reconcile_reports_a_rename_instead_of_adding_a_row() {
+        let (store, path) = open_scratch_store("reconcile-rename");
+        let (_tx, config_rx) = config_channel(Config::default());
+        let ctx = source_ctx(config_rx);
+        let mut registry = DeviceRegistry::new(Some(store.clone()));
+
+        let before = DeviceInfo {
+            name: "MX Anywhere 3".to_owned(),
+            kind: DeviceKind::Mouse,
+            transport: Transport::Sysfs,
+            locator: Some("e8:1a:2c:3d:4e:5f".to_owned()),
+        };
+        let after = DeviceInfo {
+            name: "Work mouse".to_owned(),
+            ..before.clone()
+        };
+
+        let renames = registry.reconcile(
+            vec![ok_sweep(
+                "sysfs",
+                vec![Box::new(OkSource {
+                    info: before.clone(),
+                    reading: reading_discharging(80),
+                })],
+            )],
+            &ctx,
+        );
+        assert!(renames.is_empty());
+
+        let renames = registry.reconcile(
+            vec![ok_sweep(
+                "sysfs",
+                vec![Box::new(OkSource {
+                    info: after.clone(),
+                    reading: reading_discharging(80),
+                })],
+            )],
+            &ctx,
+        );
+
+        assert_eq!(
+            renames,
+            vec![("MX Anywhere 3".to_string(), "Work mouse".to_string())]
+        );
+        let devices = store.list_devices().expect("listing devices");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device, after.id());
+
+        // The live roster must not keep the old name around as a Disconnected
+        // duplicate: the tray would show one device twice for a day.
+        let roster = registry.snapshot();
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].info.name, "Work mouse");
+
+        cleanup_store(&path);
+    }
+
+    /// The config half of the same story: the settings keyed by the old name
+    /// move to the new one and the result is both saved and republished.
+    #[test]
+    fn apply_renames_moves_settings_and_republishes() {
+        let saved: Arc<std::sync::Mutex<Option<Config>>> = Arc::new(std::sync::Mutex::new(None));
+        let on_disk = Config {
+            hidden_devices: vec!["MX Anywhere 3".to_string()],
+            primary_device: Some("MX Anywhere 3".to_string()),
+            ..Config::default()
+        };
+        let (config_tx, config_rx) = config_channel(on_disk.clone());
+
+        let load = {
+            let on_disk = on_disk.clone();
+            move || on_disk.clone()
+        };
+        let save = {
+            let saved = saved.clone();
+            move |cfg: &Config| {
+                *saved.lock().expect("mutex poisoned") = Some(cfg.clone());
+                Ok(())
+            }
+        };
+
+        apply_renames(
+            &[("MX Anywhere 3".to_string(), "Work mouse".to_string())],
+            &config_tx,
+            &load,
+            &save,
+        );
+
+        let published = config_rx.borrow().clone();
+        assert_eq!(published.hidden_devices, vec!["Work mouse".to_string()]);
+        assert_eq!(published.primary_device, Some("Work mouse".to_string()));
+        assert_eq!(
+            saved.lock().expect("mutex poisoned").as_ref(),
+            Some(&published)
+        );
     }
 
     #[tokio::test]

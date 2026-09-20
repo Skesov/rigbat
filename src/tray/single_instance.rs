@@ -31,6 +31,14 @@ pub enum SingleInstance {
 /// `ReplaceExisting`/`AllowReplacement`, so the instance that already holds
 /// the name keeps the tray and a second launch is the one that stands down.
 pub async fn acquire() -> SingleInstance {
+    acquire_named(NAME).await
+}
+
+/// The body of `acquire`, with the name as a parameter so a test can claim a
+/// name of its own. Claiming `NAME` in a test would fail on any machine where
+/// the maintainer's own tray is running — the test would be asserting that
+/// nobody uses the program.
+async fn acquire_named(name: &str) -> SingleInstance {
     let conn = match zbus::Connection::session().await {
         Ok(conn) => conn,
         Err(e) => {
@@ -56,22 +64,22 @@ pub async fn acquire() -> SingleInstance {
         }
     };
 
-    let name = match WellKnownName::try_from(NAME) {
-        Ok(name) => name,
+    let well_known = match WellKnownName::try_from(name) {
+        Ok(well_known) => well_known,
         Err(e) => {
-            tracing::warn!("{NAME} is not a valid well-known name: {e}; no single-instance guard");
+            tracing::warn!("{name} is not a valid well-known name: {e}; no single-instance guard");
             return SingleInstance::Unavailable;
         }
     };
 
     let reply = match dbus
-        .request_name(name, RequestNameFlags::DoNotQueue.into())
+        .request_name(well_known, RequestNameFlags::DoNotQueue.into())
         .await
     {
         Ok(reply) => reply,
         Err(e) => {
             tracing::warn!(
-                "requesting {NAME} on the session bus failed: {e:#}; skipping single-instance guard"
+                "requesting {name} on the session bus failed: {e:#}; skipping single-instance guard"
             );
             return SingleInstance::Unavailable;
         }
@@ -87,7 +95,7 @@ pub async fn acquire() -> SingleInstance {
 
 #[cfg(test)]
 mod tests {
-    use super::{SingleInstance, acquire};
+    use super::{SingleInstance, acquire_named};
 
     /// Requires a live session bus, not guaranteed in every environment this
     /// crate is built or tested in (containers, CI runners without D-Bus), so
@@ -99,10 +107,14 @@ mod tests {
         // Two acquisitions from the same process both go through the same
         // session bus daemon; the second one observes the first connection's
         // ownership exactly as a second `rigbat tray` process would.
-        let first = acquire().await;
+        // A name of this test's own: requesting the production name would
+        // fail whenever the maintainer's tray is running.
+        let name = format!("org.rigbat.TestGuard{}", std::process::id());
+
+        let first = acquire_named(&name).await;
         assert!(matches!(first, SingleInstance::Acquired(_)));
 
-        let second = acquire().await;
+        let second = acquire_named(&name).await;
         assert!(matches!(second, SingleInstance::AlreadyRunning));
     }
 }

@@ -30,7 +30,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind, Transport};
 
-use super::{BatteryBackend, BatterySource};
+use super::{BatteryBackend, BatterySource, hidraw};
 
 // ── Protocol constants ────────────────────────────────────────────────────────
 
@@ -123,17 +123,11 @@ fn try_node(node_name: &str, sources: &mut Vec<Box<dyn BatterySource>>) -> anyho
     let uevent =
         std::fs::read_to_string(&uevent_path).with_context(|| format!("reading {uevent_path}"))?;
 
-    let hid_id_line = uevent
-        .lines()
-        .find(|l| l.starts_with("HID_ID="))
+    let hid_id_value = hidraw::uevent_value(&uevent, "HID_ID")
         .with_context(|| format!("HID_ID not found in {uevent_path}"))?;
 
-    let hid_id_value = hid_id_line
-        .strip_prefix("HID_ID=")
-        .context("stripping HID_ID= prefix")?;
-
-    let (vendor, product) =
-        parse_hid_id(hid_id_value).with_context(|| format!("parsing HID_ID={hid_id_value}"))?;
+    let (vendor, product) = hidraw::parse_hid_id(hid_id_value)
+        .with_context(|| format!("parsing HID_ID={hid_id_value}"))?;
 
     if vendor != VENDOR_ID {
         anyhow::bail!("vendor 0x{vendor:04X} != 0x{VENDOR_ID:04X}");
@@ -151,7 +145,7 @@ fn try_node(node_name: &str, sources: &mut Vec<Box<dyn BatterySource>>) -> anyho
             name: device_desc.name.to_owned(),
             kind: device_desc.kind,
             transport: Transport::Hidraw,
-            locator: Some(node_name.to_owned()),
+            locator: Some(hidraw::stable_locator(&uevent, node_name)),
         },
         dev_path,
     }));
@@ -230,21 +224,6 @@ fn poll_device(dev_path: &std::path::Path) -> anyhow::Result<BatteryReading> {
 
 // ── Pure functions ────────────────────────────────────────────────────────────
 
-/// Parses `HID_ID=bus:vendor:product` → `(vendor, product)`.
-///
-/// Example: `"0003:00002DC8:00006012"` → `(0x2DC8, 0x6012)`.
-pub fn parse_hid_id(s: &str) -> Option<(u16, u16)> {
-    let mut parts = s.splitn(3, ':');
-    let _bus = parts.next()?;
-    let vendor_str = parts.next()?;
-    let product_str = parts.next()?;
-
-    let vendor = u32::from_str_radix(vendor_str.trim(), 16).ok()? as u16;
-    let product = u32::from_str_radix(product_str.trim(), 16).ok()? as u16;
-
-    Some((vendor, product))
-}
-
 /// Parses a streaming input report into a battery reading.
 ///
 /// Requires `buf[0] == REPORT_ID` and `buf.len() >= MIN_REPORT_LEN`; a shorter
@@ -277,31 +256,6 @@ pub fn parse_battery_report(buf: &[u8]) -> Option<BatteryReading> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // parse_hid_id
-
-    #[test]
-    fn parse_hid_id_valid() {
-        assert_eq!(
-            parse_hid_id("0003:00002DC8:00006012"),
-            Some((0x2DC8, 0x6012))
-        );
-    }
-
-    #[test]
-    fn parse_hid_id_garbage_returns_none() {
-        assert_eq!(parse_hid_id("not-a-hid-id"), None);
-    }
-
-    #[test]
-    fn parse_hid_id_too_few_parts_returns_none() {
-        assert_eq!(parse_hid_id("0003:00002DC8"), None);
-    }
-
-    #[test]
-    fn parse_hid_id_invalid_hex_returns_none() {
-        assert_eq!(parse_hid_id("0003:ZZZZZZZZ:00006012"), None);
-    }
 
     // parse_battery_report
 

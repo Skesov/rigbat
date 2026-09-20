@@ -1,3 +1,4 @@
+pub mod backoff;
 pub mod context;
 pub mod registry;
 

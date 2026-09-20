@@ -27,21 +27,31 @@ reverse.
 
 ```text
         domain            pure types + logic (DeviceInfo, BatteryReading, PrimaryStatus,
-          ▲               classify, guess_kind, freedesktop_icon_name, DeviceId, estimate)
+          ▲               classify, guess_kind, freedesktop_icon_name, DeviceId, estimate,
+          │               select_featured, device text)
           │
-        sources           BatterySource / BatteryBackend traits + sysfs/bluez/steelseries impls
-          ▲
+        sources           BatterySource / BatteryBackend traits + sysfs/bluez/
+          ▲               steelseries/eightbitdo impls
         discovery         registry of backends + discover_all()
           ▲
           app             poll_once (list/--json) and Supervisor (tray, --waybar): orchestration
           ▲
    cli / tray / settings  output + input adapters (table/json, ksni icons, egui window)
-   appearance / session / notifications / config / autostart   side services
+   appearance / session / notifications / config / state / autostart   side services
 ```
 
 New infrastructure (a D-Bus client, a HID transport, a renderer) goes behind a **port** — a
 trait in an inner layer — with the concrete dependency living in the implementation. This keeps
 `domain` testable without a bus or a display and lets implementations be swapped.
+
+`cli`, `tray` and `settings` sit at the same level, so none may import another: a sideways edge
+is how one surface's incidental choice becomes another's contract. What they share moves inward
+instead. Two things did, and they are the shape to copy — `domain::text` (`state_str`,
+`format_age`, `format_device_entry`), because a device reads the same in the tray menu, the CLI
+table and the Devices tab, and `domain::primary::select_featured`, because "which device does the
+single view show" is policy, answered identically by the aggregate icon, `--waybar` and the
+settings window's description of it. Both are pure, so both are tested without a bus or a
+display.
 
 ## Ports (contracts)
 
@@ -131,7 +141,7 @@ Waybar:    main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶
                                                                     │ changes, no exit
            session (logind PrepareForSleep) ──RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
            bluez D-Bus signals (debounced) ────RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
-           config file watch ──watch<Config>──▶ loop (live primary_device/shown_devices)
+           config file watch ──watch<Config>──▶ loop (live primary_device/hidden_devices)
 
 Tray:      main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶ tray::manager::run
                                                                     │ reconciles ksni items,
@@ -144,6 +154,7 @@ Tray:      main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶
 
 Settings:  tray menu "Settings…" → spawn `rigbat settings` (separate process)
            egui window edits config.json (atomic temp+rename)
+           state store (SQLite) ──▶ device table rows for devices not currently present
            tray's config file watch reloads ──watch<Config>──▶ live update
 ```
 
@@ -154,11 +165,23 @@ a runtime that eframe itself never enters). It communicates with the tray only t
 
 It does hold a tokio runtime, but nothing on the UI thread ever enters it: device discovery is
 spawned onto it and the result arrives over an `mpsc` channel drained with `try_recv` at the top
-of the frame, so the "Rescan" button cannot block the event loop. The runtime is dropped when the
+of the frame, so the "Refresh" button cannot block the event loop. The runtime is dropped when the
 window closes; that is safe because no `spawn_blocking` is reachable from `discover_all` — an
 in-flight scan is plain async work and is simply cancelled.
 
 ## Configuration and persistence
+
+Two stores, split by what the data **is**, not by convenience:
+
+| Store                                 | Holds                                                         | If it is lost                     |
+| ------------------------------------- | ------------------------------------------------------------- | --------------------------------- |
+| `$XDG_CONFIG_HOME/rigbat/config.json` | user intent (thresholds, intervals, which devices are hidden) | the user's decisions are gone     |
+| `$XDG_STATE_HOME/rigbat/rigbat.db`    | observations (device inventory, reading history)              | rebuilt by watching devices again |
+
+The XDG spec defines `STATE_HOME` as data "not important enough" for `DATA_HOME` — a directory
+whose loss must be survivable. Decisions therefore cannot live there, and an append-only
+observation log has no business in a file the user edits by hand. Desktop practice splits the
+same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
 
 - `config` module, XDG `~/.config/rigbat/config.json`, `serde`. Every field is
   `#[serde(default)]` at the struct level, so older config files load and missing keys fall back
@@ -169,6 +192,77 @@ in-flight scan is plain async work and is simply cancelled.
   reads would make the watcher's own `load()` feed an infinite loop.
 - Per-device overrides: `device_overrides: HashMap<name, DeviceSettings>` with optional poll
   interval and low threshold; `Config::effective_*` resolve override → global → built-in default.
+- `primary_device` pins the device the aggregate icon features; `None` means the first connected
+  visible device. It is set from the selected device's panel on the Devices tab — one device at a
+  time, so it is an action on a device rather than a column every row would have to carry — and
+  the General tab names the current choice beside the single-icon option instead of repeating the
+  control. Forgetting a device clears its pin along with its inventory row.
+- Visibility is recorded as **who to hide** (`hidden_devices`), not who to show. A whitelist has
+  to be rebuilt from the devices visible at that moment, so editing it from a partial view
+  silently drops every device the view did not contain — which is exactly what made checkboxes
+  reset themselves. An exclusion list is only ever edited by the one name a toggle mentions, so a
+  partial view cannot damage what it cannot see. The old `shown_devices` whitelist still
+  deserializes and is converted once, by `app::supervisor` after a discovery sweep that has seen
+  every backend report in — never by `config::load`, which has no device roster to convert
+  against. If a backend is still missing after `MIGRATION_MAX_SWEEPS` sweeps, the conversion runs
+  anyway rather than blocking visibility forever.
+- `state` module (`rusqlite`, bundled SQLite): the device inventory (first seen, last seen,
+  transport, kind) and a reading history collapsed to change points (`LAG()` over equal-percent
+  runs). Schema version lives in `PRAGMA user_version`; WAL plus `busy_timeout` plus
+  `BEGIN IMMEDIATE` let the tray and the settings process write the same file. The store is
+  **optional**: if it cannot be opened, the error is logged and monitoring continues without it —
+  history is a convenience, not a prerequisite for reading a battery.
+- What the history is _for_: the time-remaining estimate needs a run of percent changes, and a
+  restart used to throw that away, so every device showed no estimate until it had discharged a
+  few percent again. `reconcile` seeds a newly-discovered device's in-memory history from the
+  store (`seed_history`, `HISTORY_CAP` = 20 change points, most recent first). A stored point too
+  old for this process's monotonic clock to express is dropped rather than clamped to `now`:
+  clamping would misstate its age and distort the rate the estimate is derived from.
+- Retention: `state::spawn_retention` prunes readings older than `RETENTION_SECS` (14 days) every
+  `RETENTION_INTERVAL` (1 h), and drops readings orphaned by a deleted device. Inventory rows are
+  never pruned on age — a device you own but have not switched on for a month must still be in the
+  table you manage it from. Storing change points rather than samples is what keeps 14 days small:
+  a device at a steady 80% writes one row, not one per poll.
+
+### Device identity
+
+`DeviceId` is `(name, transport, locator)` — the tuple the supervisor keys sources by, the
+notification tracker keys streaks by, and the state store enforces `UNIQUE` on. All three break
+if the locator changes while the device does not: the retained reading is dropped, the low-battery
+streak restarts, and the inventory grows a second row with a fresh "first seen".
+
+The hidraw backends originally used the `hidrawN` node name, which the kernel assigns in
+enumeration order — so one controller produced a new identity on every replug, observed live as
+two inventory rows for the same 8BitDo. `sources::hidraw::stable_locator` replaces it with, in
+order, the device's own serial (`HID_UNIQ`), its USB topology path (`HID_PHYS`), then the node name
+as a last resort. A device with no serial is therefore identified by the port its dongle sits in —
+moving the dongle reads as a different device, which is as far as the hardware allows.
+
+The sysfs backend had the same defect one layer over: it used the `power_supply` directory name,
+and `hid-logitech-hidpp` builds that from a module-global counter —
+`n = atomic_inc_return(&battery_no) - 1; sprintf(battery->name, "hidpp_battery_%ld", n)` — so a
+Logitech mouse is `hidpp_battery_6` now and something else after the next reconnect. The kernel
+registers the supply with the HID device as its parent, so `<supply>/device/uevent` is that
+device's uevent and the same serial-then-USB-path preference applies. A supply with no HID parent
+keeps its directory name.
+
+The remaining mutable part of the identity is the **name**, and it is mutable by the user: a BlueZ
+alias edit renames a device while its hardware identity stays put. `record_seen` treats "same
+transport, same non-NULL locator, different name" as a rename — the row is renamed in place,
+keeping its history and first-seen date — and returns `Seen::Renamed`, which the supervisor turns
+into a `config::rename_device` call so `hidden_devices`, `device_overrides` and `primary_device`
+follow the device instead of silently resetting it to defaults. The live roster is keyed by the
+same identity, so `reconcile` also forgets the entry under the old name immediately: left to the
+vanished path it would sit there as a `Disconnected` duplicate for `DISCONNECTED_RETENTION`, one
+device showing twice in the tray for a day while the Devices tab already shows it once. A NULL locator never matches: with
+no locator the only thing left is the name, and "same transport, no locator" would fuse two
+unrelated devices the moment one was renamed.
+
+Schema v2 and v3 delete the rows the old locators wrote rather than trying to merge them: two rows
+with the same name are equally consistent with one device replugged and two identical devices, and
+a guess here would silently fuse two devices' histories. v3 drops **all** sysfs rows, not only the
+`hidpp_battery_*` ones, because which stored locator the new scheme reproduces cannot be known
+without the device present.
 
 ## Side services
 

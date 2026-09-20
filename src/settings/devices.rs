@@ -9,8 +9,8 @@ use std::cmp::Ordering;
 use std::time::Duration;
 
 use crate::domain::{BatteryReading, DeviceId, DeviceInfo, DeviceKind, Presence};
+use crate::domain::{format_age, state_str};
 use crate::state::DeviceRecord;
-use crate::tray::format_age;
 
 /// One row of the Devices tab table: the union of a device's persisted
 /// inventory record (if any) and its status in the most recent discovery
@@ -233,6 +233,33 @@ fn tie_break(a: &DeviceRow, b: &DeviceRow) -> Ordering {
         ))
 }
 
+/// What pressing Escape does, given what the window currently has open.
+///
+/// Escape dismisses the most transient thing first and only closes the window
+/// when there is nothing left to dismiss — the behaviour every desktop toolkit
+/// implements for a preferences window, and the reason an armed "Delete"
+/// confirmation cannot be escaped into a closed window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscapeAction {
+    CancelDelete,
+    ClearSearch,
+    CloseWindow,
+}
+
+/// `delete_armed` is whether a row's delete is waiting for confirmation;
+/// `search_active` is whether the Devices tab's search box holds text (it is
+/// false on any other tab, where clearing it would dismiss something the user
+/// cannot see).
+pub fn escape_action(delete_armed: bool, search_active: bool) -> EscapeAction {
+    if delete_armed {
+        EscapeAction::CancelDelete
+    } else if search_active {
+        EscapeAction::ClearSearch
+    } else {
+        EscapeAction::CloseWindow
+    }
+}
+
 /// Explicit confirm-before-delete state for the table's Delete cell: a
 /// destructive, irreversible action needs a deliberate second step, not a
 /// first click. One shared slot rather than a per-row flag — only one row's
@@ -254,11 +281,22 @@ pub fn remove_row(rows: &mut Vec<DeviceRow>, store_id: i64) {
 
 /// Formats a unix-seconds timestamp as a relative age ("3d ago") for the
 /// table cell, relative to `now` (also unix seconds). Reuses
-/// `tray::format_age`, which already renders this exact vocabulary for
+/// `domain::format_age`, which already renders this exact vocabulary for
 /// retained readings, instead of a second implementation.
 pub fn relative_label(now: i64, at: i64) -> String {
     let age = Duration::from_secs(now.saturating_sub(at).max(0).unsigned_abs());
     format_age(age)
+}
+
+/// Formats the `Charge` cell: percentage plus charge state (T36), e.g.
+/// `"90%  discharging"`. Reuses `domain::state_str` so a device never reads
+/// two ways in two places — the tray menu and this table spell the same
+/// state identically. A device with no reading keeps the existing dash.
+pub fn charge_cell_text(charge: Option<BatteryReading>) -> String {
+    match charge {
+        Some(r) => format!("{}%  {}", r.percent, state_str(r.state)),
+        None => "—".to_string(),
+    }
 }
 
 /// Formats a unix-seconds timestamp as an absolute UTC date ("2026-09-20")
@@ -284,6 +322,29 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::*;
+
+    #[test]
+    fn escape_closes_when_nothing_is_open() {
+        assert_eq!(escape_action(false, false), EscapeAction::CloseWindow);
+    }
+
+    #[test]
+    fn escape_clears_the_search_before_closing() {
+        assert_eq!(escape_action(false, true), EscapeAction::ClearSearch);
+    }
+
+    /// An armed delete outranks the search box: Escape must not close the
+    /// window while a confirmation is waiting.
+    #[test]
+    fn escape_cancels_an_armed_delete_first() {
+        assert_eq!(escape_action(true, true), EscapeAction::CancelDelete);
+        assert_eq!(escape_action(true, false), EscapeAction::CancelDelete);
+    }
 }
 
 #[cfg(test)]
@@ -725,6 +786,46 @@ mod tests {
         rows[0].store_id = Some(1);
         remove_row(&mut rows, 999);
         assert_eq!(rows.len(), 1);
+    }
+
+    // --- charge_cell_text ----------------------------------------------------
+
+    #[test]
+    fn charge_cell_text_discharging() {
+        assert_eq!(
+            charge_cell_text(Some(BatteryReading::new(
+                90,
+                crate::domain::ChargeState::Discharging
+            ))),
+            "90%  discharging"
+        );
+    }
+
+    #[test]
+    fn charge_cell_text_charging() {
+        assert_eq!(
+            charge_cell_text(Some(BatteryReading::new(
+                42,
+                crate::domain::ChargeState::Charging
+            ))),
+            "42%  charging"
+        );
+    }
+
+    #[test]
+    fn charge_cell_text_full() {
+        assert_eq!(
+            charge_cell_text(Some(BatteryReading::new(
+                100,
+                crate::domain::ChargeState::Full
+            ))),
+            "100%  full"
+        );
+    }
+
+    #[test]
+    fn charge_cell_text_missing_reading_is_dash() {
+        assert_eq!(charge_cell_text(None), "—");
     }
 
     // --- relative_label / absolute_date_label -------------------------------

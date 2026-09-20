@@ -3,21 +3,10 @@ use std::time::Instant;
 use serde_json::{Value, json};
 
 use crate::config::Config;
-use crate::domain::{
-    BatteryReading, ChargeState, DeviceInfo, DeviceState, Presence, PrimaryStatus, classify,
-};
-use crate::tray::format_device_entry;
-use crate::tray::manager::select_featured;
+use crate::domain::{BatteryReading, DeviceInfo, DeviceState, Presence, PrimaryStatus, classify};
+use crate::domain::{format_device_entry, select_featured, state_str};
 
 type Row = (DeviceInfo, Option<BatteryReading>);
-
-fn state_str(state: ChargeState) -> &'static str {
-    match state {
-        ChargeState::Charging => "charging",
-        ChargeState::Discharging => "discharging",
-        ChargeState::Full => "full",
-    }
-}
 
 pub fn to_json(rows: &[Row]) -> Value {
     let items: Vec<Value> = rows

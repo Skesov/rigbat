@@ -19,7 +19,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::domain::{BatteryReading, ChargeState, DeviceId, DeviceKind, Transport};
 
-use super::{DeviceRecord, Store};
+use super::{DeviceRecord, Seen, Store};
 
 /// How long `readings` rows are kept. `domain::estimate` only ever looks at
 /// the most recent `HISTORY_CAP` change points (see `app::supervisor`), so
@@ -77,9 +77,9 @@ fn configure(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Applies the schema exactly once, tracked via `PRAGMA user_version` so a
-/// later schema change is a forward migration from a known starting point,
-/// not a guess about what an existing file already contains.
+/// Brings the file up to `SCHEMA_VERSION`, tracked via `PRAGMA user_version`
+/// so each step is a forward migration from a known starting point, not a
+/// guess about what an existing file already contains.
 fn migrate(conn: &Connection) -> anyhow::Result<()> {
     // The version check and the CREATE must sit inside one write transaction,
     // and it has to be IMMEDIATE so the write lock is taken up front. A
@@ -95,30 +95,20 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .context("reading schema version")?;
-        if version >= 1 {
+        if version >= SCHEMA_VERSION {
             return Ok(());
         }
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS devices (
-                 id          INTEGER PRIMARY KEY,
-                 name        TEXT    NOT NULL,
-                 transport   TEXT    NOT NULL,
-                 locator     TEXT,
-                 kind        TEXT    NOT NULL,
-                 first_seen  INTEGER NOT NULL,
-                 last_seen   INTEGER NOT NULL,
-                 UNIQUE (name, transport, locator)
-             );
-             CREATE TABLE IF NOT EXISTS readings (
-                 device_id   INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-                 at          INTEGER NOT NULL,
-                 percent     INTEGER NOT NULL,
-                 state       TEXT    NOT NULL,
-                 PRIMARY KEY (device_id, at)
-             );
-             PRAGMA user_version = 1;",
-        )
-        .context("applying schema migration")
+        if version < 1 {
+            create_schema(conn)?;
+        }
+        if version < 2 {
+            drop_node_name_locators(conn)?;
+        }
+        if version < 3 {
+            drop_sysfs_rows(conn)?;
+        }
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
+            .context("stamping the schema version")
     })();
 
     match applied {
@@ -134,6 +124,104 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
             Err(e)
         }
     }
+}
+
+/// The schema this build expects. `migrate` runs every step between the
+/// version stamped in the file and this one.
+const SCHEMA_VERSION: i64 = 3;
+
+fn create_schema(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS devices (
+             id          INTEGER PRIMARY KEY,
+             name        TEXT    NOT NULL,
+             transport   TEXT    NOT NULL,
+             locator     TEXT,
+             kind        TEXT    NOT NULL,
+             first_seen  INTEGER NOT NULL,
+             last_seen   INTEGER NOT NULL,
+             UNIQUE (name, transport, locator)
+         );
+         CREATE TABLE IF NOT EXISTS readings (
+             device_id   INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+             at          INTEGER NOT NULL,
+             percent     INTEGER NOT NULL,
+             state       TEXT    NOT NULL,
+             PRIMARY KEY (device_id, at)
+         );",
+    )
+    .context("creating the schema")
+}
+
+/// Finds a row for the same hardware under a different display name: same
+/// transport, same non-NULL locator. That pair is the device's hardware
+/// identity — a serial, a MAC, a USB path — so a row matching it is the same
+/// device wearing a new name, not a different one.
+///
+/// A NULL locator never matches: without a locator the only thing left is the
+/// name, and "same transport, no locator" would fuse two unrelated devices the
+/// moment one of them was renamed.
+fn find_renamed(conn: &Connection, id: &DeviceId) -> anyhow::Result<Option<(i64, String)>> {
+    let Some(locator) = id.locator.as_deref() else {
+        return Ok(None);
+    };
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name FROM devices
+              WHERE transport = ?1 AND locator = ?2 AND name <> ?3
+              ORDER BY last_seen DESC
+              LIMIT 1",
+        )
+        .context("preparing the renamed-device lookup")?;
+    let mut rows = stmt
+        .query(params![id.transport.as_str(), locator, id.name])
+        .context("running the renamed-device lookup")?;
+    match rows.next().context("reading the renamed-device row")? {
+        Some(row) => Ok(Some((row.get(0)?, row.get(1)?))),
+        None => Ok(None),
+    }
+}
+
+/// Clears inventory rows keyed by a `hidrawN` node name.
+///
+/// Before `sources::hidraw::stable_locator`, the hidraw backends used the node
+/// name as the locator, and the node number changes on replug — so one
+/// controller accumulated a row per enumeration order, each with its own
+/// "first seen". There is no honest way to merge those rows: two rows with the
+/// same name may be one device replugged or two identical devices. Dropping
+/// them lets the next discovery sweep re-register each device once under its
+/// serial or USB path. The cost is the first-seen date and the reading history
+/// of hidraw devices only, which is exactly the loss `XDG_STATE_HOME` data is
+/// defined to survive.
+fn drop_node_name_locators(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM devices
+          WHERE transport = 'hidraw' AND locator GLOB 'hidraw[0-9]*'",
+        [],
+    )
+    .context("dropping inventory rows keyed by a hidraw node name")?;
+    Ok(())
+}
+
+/// Clears every sysfs inventory row.
+///
+/// Before `sources::sysfs::stable_locator`, the sysfs backend used the
+/// power_supply directory name as the locator. For a Logitech device that name
+/// comes from a module-global counter in `hid-logitech-hidpp`, so it changed on
+/// every reconnect and each reconnect wrote a new row.
+///
+/// This drops all sysfs rows rather than only the `hidpp_battery_*` ones,
+/// because which stored locator the new scheme would reproduce cannot be known
+/// without the device present: a supply that exposes a HID uevent now keys on
+/// the serial or USB path, and one that does not keeps its directory name. A
+/// row the new scheme would not reproduce is a duplicate that never merges, so
+/// the honest move is to re-register them all on the next sweep. The cost is
+/// first-seen dates and reading history for sysfs devices — loss-survivable by
+/// definition, which is why this data lives in `XDG_STATE_HOME`.
+fn drop_sysfs_rows(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM devices WHERE transport = 'sysfs'", [])
+        .context("dropping sysfs inventory rows keyed by a power_supply directory name")?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -190,12 +278,12 @@ fn find_device_id(conn: &Connection, id: &DeviceId) -> rusqlite::Result<Option<i
 }
 
 impl Store for SqliteStore {
-    fn record_seen(&self, id: &DeviceId, kind: DeviceKind, now: i64) -> anyhow::Result<()> {
+    fn record_seen(&self, id: &DeviceId, kind: DeviceKind, now: i64) -> anyhow::Result<Seen> {
         let mut conn = self.conn();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("beginning record_seen transaction")?;
-        match find_device_id(&tx, id).context("looking up existing device row")? {
+        let outcome = match find_device_id(&tx, id).context("looking up existing device row")? {
             Some(row_id) => {
                 // MAX(...) keeps last_seen monotonic even if the wall clock
                 // steps backward (NTP correction, manual change): an
@@ -208,23 +296,39 @@ impl Store for SqliteStore {
                     params![now, row_id],
                 )
                 .context("updating last_seen")?;
+                Seen::Existing
             }
-            None => {
-                tx.execute(
-                    "INSERT INTO devices (name, transport, locator, kind, first_seen, last_seen)
+            None => match find_renamed(&tx, id).context("looking up a renamed device row")? {
+                Some((row_id, previous_name)) => {
+                    tx.execute(
+                        "UPDATE devices SET name = ?1, kind = ?2, last_seen = MAX(last_seen, ?3)
+                          WHERE id = ?4",
+                        params![id.name, kind.as_str(), now, row_id],
+                    )
+                    .context("renaming device row")?;
+                    Seen::Renamed {
+                        from: previous_name,
+                    }
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO devices (name, transport, locator, kind, first_seen, last_seen)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                    params![
-                        id.name,
-                        id.transport.as_str(),
-                        id.locator,
-                        kind.as_str(),
-                        now
-                    ],
-                )
-                .context("inserting new device row")?;
-            }
-        }
-        tx.commit().context("committing record_seen transaction")
+                        params![
+                            id.name,
+                            id.transport.as_str(),
+                            id.locator,
+                            kind.as_str(),
+                            now
+                        ],
+                    )
+                    .context("inserting new device row")?;
+                    Seen::Inserted
+                }
+            },
+        };
+        tx.commit().context("committing record_seen transaction")?;
+        Ok(outcome)
     }
 
     fn record_reading(
@@ -415,8 +519,144 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(store.list_devices().unwrap().len(), 1);
+
+        cleanup(&path);
+    }
+
+    /// A v1 file carries hidraw rows keyed by the node name, which the
+    /// backends no longer produce. Reopening it must clear exactly those and
+    /// leave every other transport alone.
+    #[test]
+    fn migration_to_v2_drops_hidraw_rows_keyed_by_node_name() {
+        let path = scratch_db_path("v2-migration");
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            let node_keyed = id("8BitDo Ultimate 2", Transport::Hidraw, Some("hidraw13"));
+            store
+                .record_seen(&node_keyed, DeviceKind::Controller, 1000)
+                .unwrap();
+            let serial_keyed = id("8BitDo Ultimate 2", Transport::Hidraw, Some("350857A671"));
+            store
+                .record_seen(&serial_keyed, DeviceKind::Controller, 1000)
+                .unwrap();
+            let bluetooth = id(
+                "NuPhy Air75",
+                Transport::Bluetooth,
+                Some("CF:D9:B2:94:77:5E"),
+            );
+            store
+                .record_seen(&bluetooth, DeviceKind::Keyboard, 1000)
+                .unwrap();
+            store
+                .conn()
+                .execute_batch("PRAGMA user_version = 1")
+                .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        let mut names: Vec<String> = store
+            .list_devices()
+            .unwrap()
+            .into_iter()
+            .map(|d| d.device.locator.unwrap_or_default())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["350857A671", "CF:D9:B2:94:77:5E"]);
+
+        cleanup(&path);
+    }
+
+    /// Same hardware identity, new display name: the row is renamed in place,
+    /// keeping its first-seen date and its readings, instead of a second row
+    /// appearing for what is one device.
+    #[test]
+    fn record_seen_renames_a_row_that_kept_its_locator() {
+        let path = scratch_db_path("rename");
+        let store = SqliteStore::open(&path).unwrap();
+        let before = id("MX Anywhere 3", Transport::Sysfs, Some("e8:1a:2c:3d:4e:5f"));
+        assert_eq!(
+            store.record_seen(&before, DeviceKind::Mouse, 1000).unwrap(),
+            Seen::Inserted
+        );
+        store
+            .record_reading(
+                &before,
+                BatteryReading::new(80, ChargeState::Discharging),
+                1000,
+            )
+            .unwrap();
+
+        let after = id("Work mouse", Transport::Sysfs, Some("e8:1a:2c:3d:4e:5f"));
+        assert_eq!(
+            store.record_seen(&after, DeviceKind::Mouse, 2000).unwrap(),
+            Seen::Renamed {
+                from: "MX Anywhere 3".to_string()
+            }
+        );
+
+        let devices = store.list_devices().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device, after);
+        assert_eq!(devices[0].first_seen, 1000);
+        assert_eq!(store.recent_readings(&after, 10).unwrap().len(), 1);
+
+        cleanup(&path);
+    }
+
+    /// Without a locator the only thing left to match on is the name, so a
+    /// rename is indistinguishable from a different device: insert, never
+    /// rename.
+    #[test]
+    fn record_seen_never_renames_a_row_with_no_locator() {
+        let path = scratch_db_path("rename-null-locator");
+        let store = SqliteStore::open(&path).unwrap();
+        let before = id("headset", Transport::Bluetooth, None);
+        store
+            .record_seen(&before, DeviceKind::Headset, 1000)
+            .unwrap();
+
+        let after = id("other headset", Transport::Bluetooth, None);
+        assert_eq!(
+            store
+                .record_seen(&after, DeviceKind::Headset, 2000)
+                .unwrap(),
+            Seen::Inserted
+        );
+        assert_eq!(store.list_devices().unwrap().len(), 2);
+
+        cleanup(&path);
+    }
+
+    /// A v2 file still keys sysfs rows by the power_supply directory name,
+    /// which `hid-logitech-hidpp` rebuilds from a global counter on every
+    /// reconnect. Reopening clears them and leaves the other transports alone.
+    #[test]
+    fn migration_to_v3_drops_sysfs_rows() {
+        let path = scratch_db_path("v3-migration");
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            let sysfs = id("MX Anywhere 3", Transport::Sysfs, Some("hidpp_battery_6"));
+            store.record_seen(&sysfs, DeviceKind::Mouse, 1000).unwrap();
+            let bluetooth = id(
+                "NuPhy Air75",
+                Transport::Bluetooth,
+                Some("CF:D9:B2:94:77:5E"),
+            );
+            store
+                .record_seen(&bluetooth, DeviceKind::Keyboard, 1000)
+                .unwrap();
+            store
+                .conn()
+                .execute_batch("PRAGMA user_version = 2")
+                .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        let devices = store.list_devices().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device.transport, Transport::Bluetooth);
 
         cleanup(&path);
     }

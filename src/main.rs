@@ -13,7 +13,7 @@ mod state;
 mod tray;
 
 use crate::domain::Presence;
-use crate::tray::manager::select_featured;
+use crate::domain::select_featured;
 
 const USAGE: &str = "\
 rigbat — system tray battery monitor for peripherals
@@ -257,30 +257,18 @@ async fn async_main(invocation: Invocation) {
 }
 
 /// Spawns the two long-lived watchers that need the system bus (resume
-/// detection, BlueZ event watching), reusing the process-wide connection from
-/// `ctx`. Both are optimisations, never dependencies — the periodic discovery
-/// sweep is the safety net — so this runs in its own task: a slow or
-/// unreachable bus must delay neither the tray icon nor the waybar module's
-/// first frame. If the bus is unavailable both are skipped, the same
-/// degradation each watcher applied on its own before the connection was
-/// shared.
+/// detection, BlueZ event watching), handing each the shared `ctx` rather
+/// than a resolved connection. Both are optimisations, never dependencies —
+/// the periodic discovery sweep is the safety net — so a missing or later
+/// lost bus never delays or fails startup: each watcher runs its own
+/// supervising retry loop (`discovery::backoff`) and keeps trying to dial in
+/// through `ctx.system_bus()` in the background.
 fn spawn_bus_dependent_tasks(
     ctx: std::sync::Arc<discovery::Context>,
     refresh: crate::app::refresh::RefreshSignal,
 ) {
-    tokio::spawn(async move {
-        match ctx.system_bus().await {
-            Ok(conn) => {
-                crate::session::watch_resume(refresh.clone(), conn.clone());
-                crate::sources::bluez::watch_events(refresh, conn);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "system D-Bus unavailable: {e:#}; no resume re-poll, no BlueZ event watching"
-                );
-            }
-        }
-    });
+    crate::session::watch_resume(refresh.clone(), ctx.clone());
+    crate::sources::bluez::watch_events(refresh, ctx);
 }
 
 /// Prints the human-facing explanation for a second `rigbat tray` standing

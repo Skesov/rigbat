@@ -5,12 +5,16 @@ System tray battery monitor for gaming peripherals (Linux), written in Rust.
 ## Status
 
 Working: `rigbat list` / `--json` / `--wide` / `--waybar` / `tray` / `settings`. Sources: sysfs,
-bluez, steelseries, eightbitdo (via `discovery::discover_all`, re-discovered live so hotplugged devices
-appear; BlueZ signals debounced). Devices retain their last reading across drops (`Presence`:
-Online/Unreachable/Disconnected). Tray: left-click menu listing device status, device-type glyph,
-light/dark theme, display modes, time-remaining estimate, low-battery notifications, separate
-settings window, per-device poll intervals/thresholds, config persistence. Diagnostics via
-`tracing`. Packaging: udev rule, desktop entry, systemd user service.
+bluez, steelseries, eightbitdo (via `discovery::discover_all`, re-discovered live so hotplugged
+devices appear; BlueZ signals debounced, and a backend whose sweep _fails_ does not retire its
+devices — an empty result and an error are different things). Devices retain their last reading
+across drops (`Presence`: Online/Unreachable/Disconnected) and render dimmed while unreachable,
+except a low reading, which never dims. Tray: left-click menu listing device status, device-type
+glyph, light/dark theme, display modes, time-remaining estimate, low-battery notifications
+(confirmed by two distinct readings), separate settings window with a device inventory table,
+per-device poll intervals/thresholds and aggregate-icon pin, config persistence. A second `rigbat tray` exits instead of
+doubling every icon. Diagnostics via `tracing`. Packaging: udev rule, desktop entry, systemd user
+service.
 
 ## Compatibility
 
@@ -58,6 +62,15 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
 - **Tray:** `ksni`, SNI-only. XEmbed is not embedded — closed by external `snixembed`. No GTK dependency.
 - **Icon:** render behind the `IconRenderer -> Vec<ksni::Icon>` port (multiple sizes for HiDPI). Implementation in `tiny-skia`; migration to SVG/resvg is a new implementation behind the same port.
 - **Extensibility:** sources are built-in adapters behind a trait, no dlopen plugins (YAGNI).
+- **Two stores, split by what the data _is_:** `config.json` under `XDG_CONFIG_HOME` holds user
+  intent (thresholds, intervals, `hidden_devices`); a SQLite database under `XDG_STATE_HOME` holds
+  observations (device inventory, reading history). The XDG spec defines `STATE_HOME` as data not
+  important enough for `DATA_HOME` — a directory whose loss must be survivable — so decisions do
+  not belong there. Desktop practice agrees: Chrome keeps `Preferences` as JSON beside `History` as
+  SQLite. The store is optional: if it cannot be opened, monitoring continues without it.
+- **Hide, don't show:** the config records which devices to _hide_. A whitelist has to be rebuilt
+  from whatever is connected at the moment, which silently drops the rest; an exclusion list is
+  edited one entry at a time, so a partial view cannot damage what it cannot see.
 
 Full rationale, data flow, and contracts: [`docs/architecture.md`](docs/architecture.md).
 
@@ -65,21 +78,25 @@ Full rationale, data flow, and contracts: [`docs/architecture.md`](docs/architec
 
 ```text
 src/
-├── domain/        # types, classify, guess_kind, freedesktop_icon_name, estimate
-├── sources/       # BatterySource + BatteryBackend; sysfs/bluez/steelseries
-├── discovery/     # discover_all + registry::backends() + Context (shared system bus)
+├── domain/        # types, classify, guess_kind, freedesktop_icon_name, estimate,
+│                 # select_featured, device text (state_str/format_age/entry line)
+├── sources/       # BatterySource + BatteryBackend; sysfs/bluez/steelseries/eightbitdo
+├── discovery/     # discover_all + registry::backends() + Context (shared system bus) + backoff
 ├── cli/           # output adapter: table / --json / --wide / --waybar
 ├── tray/          # ksni + IconRenderer (tiny-skia) + device-type corner glyph
 ├── appearance/    # theme from xdg-portal (light/dark)
 ├── notifications/ # low-battery desktop notifications (zbus)
 ├── session/       # logind PrepareForSleep → resume re-poll
-├── settings/      # eframe/egui settings window (separate process)
+├── settings/      # eframe/egui settings window (separate process) + device table state
 ├── autostart/     # ~/.config/autostart/rigbat.desktop
 ├── app/           # poll_once + Supervisor (owns discovery) + refresh signal + wiring
+├── state/         # SQLite device inventory + reading history (XDG_STATE_HOME)
 └── config/        # XDG ~/.config/rigbat/config.json
 ```
 
-Dependencies point inward: `domain` does not import `zbus`/`tiny-skia`/`nix`.
+Dependencies point inward: `domain` does not import `zbus`/`tiny-skia`/`nix`, and no adapter
+imports another adapter — text or policy that `cli`, `tray` and `settings` all render lives in
+`domain`, not in whichever surface happened to need it first.
 
 ## Conventions
 

@@ -3,6 +3,7 @@ use crate::domain::{BatteryReading, DeviceInfo};
 
 pub mod bluez;
 pub mod eightbitdo;
+pub mod hidraw;
 pub mod steelseries;
 pub mod sysfs;
 

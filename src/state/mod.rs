@@ -53,12 +53,26 @@ pub struct DeviceRecord {
 /// root. All methods are synchronous: SQLite I/O here is the same kind of
 /// brief, direct blocking call `config::save` already makes from async
 /// contexts in this codebase, not something that needs `spawn_blocking`.
+/// What `record_seen` did to the inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Seen {
+    /// A row already existed under this exact identity; only `last_seen` moved.
+    Existing,
+    /// No row matched, so one was inserted.
+    Inserted,
+    /// A row with the same transport and locator existed under a different
+    /// name and was renamed in place, keeping its history and first-seen date.
+    /// The caller moves the per-device config entries across — the store never
+    /// depends on `config`.
+    Renamed { from: String },
+}
+
 pub trait Store: Send + Sync {
     /// Upserts a `devices` row for `id`: inserts it with
     /// `first_seen = last_seen = now` if this is the first time it has been
     /// seen, or advances `last_seen` otherwise. Called once per discovered
     /// device on every discovery sweep.
-    fn record_seen(&self, id: &DeviceId, kind: DeviceKind, now: i64) -> anyhow::Result<()>;
+    fn record_seen(&self, id: &DeviceId, kind: DeviceKind, now: i64) -> anyhow::Result<Seen>;
 
     /// Records one successful poll as a `readings` row. A no-op (not an
     /// error) if `id` has no `devices` row yet — `record_seen` is always

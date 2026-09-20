@@ -151,8 +151,11 @@ pub struct DeviceInfo {
     pub name: String,
     pub kind: DeviceKind,
     pub transport: Transport,
-    /// Source-specific stable locator for debugging: BlueZ MAC, sysfs power_supply
-    /// directory name, or hidraw node path. None if the source cannot provide one.
+    /// Source-specific locator that survives a replug: BlueZ MAC, sysfs
+    /// power_supply directory name, or — for hidraw — the device's serial or
+    /// USB path (`sources::hidraw::stable_locator`), never the `hidrawN` node
+    /// name, which the kernel reassigns in enumeration order. None if the
+    /// source cannot provide one.
     pub locator: Option<String>,
 }
 

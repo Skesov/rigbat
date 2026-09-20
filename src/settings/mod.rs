@@ -29,6 +29,12 @@ const DEVICE_DETAIL_PANEL_WIDTH: f32 = 240.0;
 const TABLE_ROW_HEIGHT: f32 = 22.0;
 const TABLE_HEADER_HEIGHT: f32 = 24.0;
 
+/// Width of the separator column between `Tray icon` (a checkbox that only
+/// hides an icon) and `Actions` (`Delete`, which destroys the inventory
+/// record): visible space plus a vertical rule so the two controls do not
+/// read as one action a stray click could confuse (T36).
+const TOGGLE_ACTIONS_GAP_WIDTH: f32 = 20.0;
+
 /// Height reserved for the shared status bar (separator + "Changes saved." +
 /// Close) at the bottom of the window, below both tabs.
 const STATUS_BAR_HEIGHT: f32 = 40.0;
@@ -168,7 +174,7 @@ impl SettingsApp {
     ///
     /// Polls every discovered device (unlike the pre-T35 discovery-only
     /// scan) because the Devices tab needs each one's charge; this only
-    /// runs on an explicit Rescan click or window open, not on a timer, so
+    /// runs on an explicit Refresh click or window open, not on a timer, so
     /// the extra device wake-up this costs is the same one-off the user just
     /// asked for, not the continuous drain `POLL_INTERVAL_RANGE` guards
     /// against. The inventory read is a direct, synchronous `Store` call
@@ -237,15 +243,21 @@ impl SettingsApp {
         self.scan_rx = None;
     }
 
-    /// Renders a "Rescan" button, disabled and relabeled while a scan is
+    /// Renders a "Refresh" button, disabled and relabeled while a scan is
     /// already in flight.
-    fn render_rescan_button(&mut self, ui: &mut egui::Ui) {
+    ///
+    /// Named the same as the tray menu's "Refresh" item (T36): the tray's
+    /// item re-triggers a running daemon's discovery-and-poll, this one runs
+    /// a one-shot discovery-and-poll in the settings process, but both mean
+    /// "go look again now" from the user's side, and nothing about the
+    /// difference is visible in this window — so it gets the same name.
+    fn render_refresh_button(&mut self, ui: &mut egui::Ui) {
         let egui_ctx = ui.ctx().clone();
         ui.add_enabled_ui(!self.scanning, |ui| {
             let label = if self.scanning {
-                "Scanning…"
+                "Refreshing…"
             } else {
-                "Rescan"
+                "Refresh"
             };
             if ui.button(label).clicked() {
                 self.spawn_scan(egui_ctx.clone());
@@ -259,6 +271,41 @@ impl SettingsApp {
     /// dragged pixel — same rule the pre-T35 collapsing-header version
     /// followed, this is that same body applied to one selected device
     /// instead of looped over every discovered one.
+    ///
+    /// Unchecked, each checkbox's own label states the effective (global)
+    /// value it falls back to — e.g. "Use default (20%)" (T36) — so the
+    /// relationship to the General tab's sliders is visible in the control
+    /// itself, not only in a separate line of helper text.
+    /// The aggregate icon's device picker (R27): `primary_device` steered the
+    /// single-icon mode since M2 but became unreachable when T22 removed the
+    /// tray-menu control that wrote it, leaving it editable only by hand in
+    /// `config.json`.
+    ///
+    /// It lives here rather than as a table column because it is an action on
+    /// one device, not a property of every row — a tenth column for a setting
+    /// that applies to exactly one device at a time would cost every row width
+    /// to show a value that is empty in all but one of them. The General tab
+    /// names the current choice and points here, so the setting is discoverable
+    /// from the section whose behaviour it changes without duplicating the
+    /// control.
+    fn render_primary_control(&mut self, ui: &mut egui::Ui, name: &str) {
+        let mut is_primary = self.config.primary_device.as_deref() == Some(name);
+        if ui
+            .checkbox(&mut is_primary, "Use for the single tray icon")
+            .changed()
+        {
+            let name = name.to_string();
+            self.persist(ui, move |target| {
+                toggle_primary(&mut target.primary_device, &name, is_primary);
+            });
+        }
+        if self.config.tray_mode == TrayMode::PerDevice {
+            ui.label(
+                egui::RichText::new("Applies when the tray shows one icon for all devices.").weak(),
+            );
+        }
+    }
+
     fn render_device_override_controls(&mut self, ui: &mut egui::Ui, name: &str) {
         let default_threshold = self.config.low_threshold;
         let default_interval = self.config.poll_interval_secs;
@@ -277,10 +324,12 @@ impl SettingsApp {
             .unwrap_or(default_interval);
 
         let mut save = false;
-        if ui
-            .checkbox(&mut threshold_on, "Override low battery threshold")
-            .changed()
-        {
+        let threshold_label = if threshold_on {
+            "Override low battery threshold".to_string()
+        } else {
+            format!("Use default ({default_threshold}%)")
+        };
+        if ui.checkbox(&mut threshold_on, threshold_label).changed() {
             save = true;
         }
         if threshold_on {
@@ -288,10 +337,12 @@ impl SettingsApp {
             save |= resp.drag_stopped() || resp.lost_focus();
         }
 
-        if ui
-            .checkbox(&mut interval_on, "Override poll interval")
-            .changed()
-        {
+        let interval_label = if interval_on {
+            "Override poll interval".to_string()
+        } else {
+            format!("Use default ({default_interval} s)")
+        };
+        if ui.checkbox(&mut interval_on, interval_label).changed() {
             save = true;
         }
         if interval_on {
@@ -316,7 +367,7 @@ impl SettingsApp {
         }
     }
 
-    /// The Devices tab: search box, Rescan, then the inventory table beside
+    /// The Devices tab: search box, Refresh, then the inventory table beside
     /// the selected device's override panel. Source is the union
     /// `apply_scan_result` already merged into `self.device_rows` — union,
     /// not `self.devices` alone, is the whole point of T35: a device the
@@ -329,14 +380,14 @@ impl SettingsApp {
                     .hint_text("Search devices…")
                     .desired_width(220.0),
             );
-            self.render_rescan_button(ui);
+            self.render_refresh_button(ui);
         });
         ui.add_space(8.0);
 
         let filtered = devices::filter_rows(&self.device_rows, &self.device_search);
         if filtered.is_empty() {
             let message = if self.device_rows.is_empty() {
-                "No devices recorded yet. Connect a device, then press Rescan."
+                "No devices recorded yet. Connect a device, then press Refresh."
             } else {
                 "No devices match your search."
             };
@@ -368,26 +419,28 @@ impl SettingsApp {
             .id_salt("devices_table")
             .striped(true)
             .resizable(true)
-            .column(Column::initial(160.0).at_least(100.0).resizable(true))
-            .column(Column::initial(80.0).at_least(60.0).resizable(true))
-            .column(Column::initial(90.0).at_least(70.0).resizable(true))
-            .column(Column::initial(64.0).at_least(50.0).resizable(true))
-            .column(Column::initial(96.0).at_least(70.0).resizable(true))
-            .column(Column::initial(96.0).at_least(70.0).resizable(true))
-            .column(Column::initial(96.0).at_least(70.0).resizable(true))
-            .column(Column::initial(56.0).at_least(50.0).resizable(false))
-            .column(Column::initial(96.0).at_least(70.0).resizable(false))
+            .column(Column::initial(190.0).at_least(110.0).resizable(true))
+            .column(Column::initial(76.0).at_least(60.0).resizable(true))
+            .column(Column::initial(86.0).at_least(70.0).resizable(true))
+            .column(Column::initial(116.0).at_least(90.0).resizable(true))
+            .column(Column::initial(92.0).at_least(70.0).resizable(true))
+            .column(Column::initial(82.0).at_least(70.0).resizable(true))
+            .column(Column::initial(82.0).at_least(70.0).resizable(true))
+            .column(Column::initial(62.0).at_least(56.0).resizable(false))
+            .column(Column::exact(TOGGLE_ACTIONS_GAP_WIDTH).resizable(false))
+            .column(Column::initial(76.0).at_least(70.0).resizable(false))
             .header(TABLE_HEADER_HEIGHT, |mut header| {
-                let columns: [(&str, Option<SortColumn>); 9] = [
+                let columns: [(&str, Option<SortColumn>); 10] = [
                     ("Name", Some(SortColumn::Name)),
                     ("Type", Some(SortColumn::Type)),
-                    ("Transport", Some(SortColumn::Transport)),
+                    ("Connection", Some(SortColumn::Transport)),
                     ("Charge", Some(SortColumn::Charge)),
-                    ("Presence", Some(SortColumn::Presence)),
+                    ("Status", Some(SortColumn::Presence)),
                     ("First seen", Some(SortColumn::FirstSeen)),
                     ("Last seen", Some(SortColumn::LastSeen)),
-                    ("Shown", None),
+                    ("Tray icon", None),
                     ("", None),
+                    ("Actions", None),
                 ];
                 for (label, sort_column) in columns {
                     header.col(|ui| match sort_column {
@@ -416,7 +469,7 @@ impl SettingsApp {
         }
     }
 
-    /// Renders one table row's nine cells, in the same order as
+    /// Renders one table row's ten cells, in the same order as
     /// `render_device_table`'s header.
     fn render_device_row(
         &mut self,
@@ -426,7 +479,16 @@ impl SettingsApp {
     ) {
         table_row.col(|ui| {
             let is_selected = self.selected_device.as_deref() == Some(row.device.name.as_str());
-            if ui.selectable_label(is_selected, &row.device.name).clicked() {
+            // Truncated, not wrapped: the row height is fixed, so a wrapped
+            // second line spills into the row below.
+            let label = egui::Label::new(&row.device.name)
+                .truncate()
+                .selectable(false);
+            let resp = ui
+                .add(egui::Button::selectable(is_selected, ""))
+                .on_hover_text(&row.device.name);
+            ui.put(resp.rect.shrink2(egui::vec2(4.0, 0.0)), label);
+            if resp.clicked() {
                 self.selected_device = Some(row.device.name.clone());
             }
         });
@@ -437,11 +499,7 @@ impl SettingsApp {
             ui.label(row.device.transport.as_str());
         });
         table_row.col(|ui| {
-            let text = match row.charge {
-                Some(r) => format!("{}%", r.percent),
-                None => "—".to_string(),
-            };
-            ui.label(text);
+            ui.label(devices::charge_cell_text(row.charge));
         });
         table_row.col(|ui| {
             let (label, weak) = match row.presence {
@@ -463,6 +521,11 @@ impl SettingsApp {
                 });
             }
         });
+        // Separator column (T36): visible space plus a rule between the
+        // Tray icon toggle and Delete so the two never read as one action.
+        table_row.col(|ui| {
+            ui.add(egui::Separator::default().vertical());
+        });
         table_row.col(|ui| self.render_delete_cell(ui, row));
     }
 
@@ -471,6 +534,9 @@ impl SettingsApp {
     /// per T35 ("do not delete on first click"). A row the scan discovered
     /// but the inventory has not persisted yet (`store_id: None`) has
     /// nothing to delete.
+    ///
+    /// Only the armed `Confirm` is tinted: a red `Delete` on every row turns
+    /// the column into a wall of warnings for an action nobody asked for yet.
     fn render_delete_cell(&mut self, ui: &mut egui::Ui, row: &DeviceRow) {
         let Some(store_id) = row.store_id else {
             ui.label("—");
@@ -479,21 +545,23 @@ impl SettingsApp {
 
         if self.delete_state == DeleteState::Confirming(store_id) {
             ui.horizontal(|ui| {
-                if ui.small_button("Confirm").clicked() {
+                if destructive_small_button(ui, "Confirm").clicked() {
                     self.delete_device(ui, store_id, &row.device.name);
                 }
                 if ui.small_button("Cancel").clicked() {
                     self.delete_state = DeleteState::Idle;
                 }
             });
-        } else if ui.small_button("Delete").clicked() {
+        } else if neutral_small_button(ui, "Delete").clicked() {
             self.delete_state = DeleteState::Confirming(store_id);
         }
     }
 
-    /// Forgets a device (T34): deletes its inventory row and readings, and
-    /// its `hidden_devices` entry — nothing left to show it as hidden once
-    /// it no longer exists. Store I/O happens directly on the UI thread,
+    /// Forgets a device (T34): deletes its inventory row and readings, its
+    /// `hidden_devices` entry — nothing left to show it as hidden once it no
+    /// longer exists — and its pin on the aggregate icon, which would
+    /// otherwise reattach itself the moment a sold device is plugged in
+    /// somewhere else and seen again. Store I/O happens directly on the UI thread,
     /// the same as `persist`'s `config::save`/`load`: a deliberate,
     /// infrequent, user-confirmed click, not the per-frame inventory read
     /// `spawn_scan` keeps off the UI thread.
@@ -506,15 +574,36 @@ impl SettingsApp {
             return;
         }
 
-        let hidden_name = name.to_string();
+        let forgotten = name.to_string();
         self.persist(ui, move |target| {
-            toggle_hidden(&mut target.hidden_devices, &hidden_name, true);
+            toggle_hidden(&mut target.hidden_devices, &forgotten, true);
+            toggle_primary(&mut target.primary_device, &forgotten, false);
         });
         devices::remove_row(&mut self.device_rows, store_id);
         if self.selected_device.as_deref() == Some(name) {
             self.selected_device = None;
         }
         self.delete_state = DeleteState::Idle;
+    }
+
+    /// Escape, resolved by `devices::escape_action`: dismiss the armed delete
+    /// confirmation, else clear the device search, else close the window.
+    ///
+    /// The escalation matters more than the closing does — a window that
+    /// closed on the first Escape would discard an armed confirmation by
+    /// doing the one thing that looks like "never mind" and is not.
+    fn handle_escape(&mut self, ui: &egui::Ui) {
+        if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return;
+        }
+        let search_active = self.tab == Tab::Devices && !self.device_search.is_empty();
+        match devices::escape_action(self.delete_state != DeleteState::Idle, search_active) {
+            devices::EscapeAction::CancelDelete => self.delete_state = DeleteState::Idle,
+            devices::EscapeAction::ClearSearch => self.device_search.clear(),
+            devices::EscapeAction::CloseWindow => {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close)
+            }
+        }
     }
 
     /// The panel beside the table: the selected device's name and its
@@ -525,16 +614,26 @@ impl SettingsApp {
     /// selected row moving under a re-sort or a search filter.
     fn render_device_detail(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        match self.selected_device.clone() {
-            Some(name) => {
-                ui.strong(&name);
-                ui.add_space(4.0);
-                self.render_device_override_controls(ui, &name);
+        // Framed: an unframed column of text sitting to the right of the table
+        // reads as stray content rather than as this row's settings.
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            match self.selected_device.clone() {
+                Some(name) => {
+                    ui.strong(&name);
+                    ui.add_space(4.0);
+                    self.render_primary_control(ui, &name);
+                    ui.add_space(4.0);
+                    self.render_device_override_controls(ui, &name);
+                }
+                None => {
+                    ui.weak("Select a device");
+                    ui.add_space(2.0);
+                    ui.weak("to pin it to the single tray icon, or to");
+                    ui.weak("change its threshold or poll interval.");
+                }
             }
-            None => {
-                ui.weak("Select a device to edit its overrides.");
-            }
-        }
+        });
     }
 }
 
@@ -546,10 +645,25 @@ fn header_label(label: &str, column: SortColumn, sort: SortState) -> String {
         return label.to_string();
     }
     let arrow = match sort.direction {
-        devices::SortDirection::Ascending => "▼",
-        devices::SortDirection::Descending => "▲",
+        devices::SortDirection::Ascending => "\u{23f7}",
+        devices::SortDirection::Descending => "\u{23f6}",
     };
     format!("{label} {arrow}")
+}
+
+/// A `small_button` tinted with the theme's error colour (T36): reinforces —
+/// does not replace — the two-step confirm that already marks the action as
+/// destructive.
+///
+/// Only the armed step is tinted. A red `Delete` on every row turns the whole
+/// column into a wall of warnings for an action nobody has asked for yet.
+fn destructive_small_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let color = ui.visuals().error_fg_color;
+    ui.add(egui::Button::new(egui::RichText::new(label).color(color)).small())
+}
+
+fn neutral_small_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(egui::Button::new(label).small())
 }
 
 /// Renders a First-seen/Last-seen cell: the relative age, with the absolute
@@ -573,6 +687,7 @@ impl eframe::App for SettingsApp {
     /// Called each frame; `ui` is the root central panel provided by eframe 0.34.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_scan();
+        self.handle_escape(ui);
 
         // Apply a 16 px inner margin on all sides per the design system. We
         // replace the default CentralPanel frame with one that only changes
@@ -646,19 +761,19 @@ impl SettingsApp {
             self.persist(ui, move |target| target.tray_mode = tray_mode);
         }
 
-        if per_device {
-            ui.indent("tray_device_picker", |ui| {
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new("Choose which devices get an icon on the Devices tab.")
-                        .weak(),
-                );
-            });
-        }
+        let hint = if per_device {
+            "Choose which devices get an icon on the Devices tab.".to_string()
+        } else {
+            aggregate_icon_hint(self.config.primary_device.as_deref())
+        };
+        ui.indent("tray_device_picker", |ui| {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(hint).weak());
+        });
 
         // ── Battery ───────────────────────────────────────────────────────────
         ui.add_space(16.0);
-        Self::section_header(ui, "Battery");
+        Self::section_header(ui, "Defaults for all devices");
 
         let mut threshold = self.config.low_threshold;
         let resp = ui.add(
@@ -684,8 +799,11 @@ impl SettingsApp {
             self.persist(ui, move |target| target.poll_interval_secs = interval);
         }
         ui.label(
-            egui::RichText::new("Per-device overrides live on the Devices tab: select a row.")
-                .weak(),
+            egui::RichText::new(
+                "Applies to every device that has no setting of its own. \
+                 To change one device, select its row on the Devices tab.",
+            )
+            .weak(),
         );
 
         // ── Notifications ─────────────────────────────────────────────────────
@@ -814,6 +932,32 @@ fn toggle_hidden(hidden_devices: &mut Vec<String>, name: &str, show: bool) {
     }
 }
 
+/// What the General tab says the single tray icon will show. Names the pinned
+/// device when there is one, so the user can see the setting's current value
+/// without opening the tab that owns the control.
+fn aggregate_icon_hint(primary_device: Option<&str>) -> String {
+    match primary_device {
+        Some(name) => format!("The single icon shows {name}. Change it on the Devices tab."),
+        None => "The single icon shows the first connected device. Pin one on the Devices tab."
+            .to_string(),
+    }
+}
+
+/// Sets or clears the device the aggregate tray icon features.
+///
+/// `make_primary = true` pins `name`, replacing whatever was pinned before —
+/// exactly one device can be featured, so this is a move, not an addition.
+/// `false` clears the pin only if `name` is the device currently pinned:
+/// unchecking the box on a device that was never primary must not silently
+/// unpin a different one.
+fn toggle_primary(primary_device: &mut Option<String>, name: &str, make_primary: bool) {
+    if make_primary {
+        *primary_device = Some(name.to_string());
+    } else if primary_device.as_deref() == Some(name) {
+        *primary_device = None;
+    }
+}
+
 /// Re-reads the on-disk config via `load_config`, applies `edit` — the one
 /// change a call site just made — to that fresh copy, and writes the result
 /// back via `save_config`. Returns the saved config on success.
@@ -853,7 +997,7 @@ where
 /// Keeps a tokio runtime alive for the life of the window (unlike the old
 /// discover-once-and-drop approach) so devices that connect after the window
 /// opens still show up: a scan is spawned on it at startup and again on
-/// every "Rescan" click, never entered blockingly from `ui()`.
+/// every "Refresh" click, never entered blockingly from `ui()`.
 pub fn run() -> anyhow::Result<()> {
     use anyhow::Context as _;
 
@@ -875,8 +1019,8 @@ pub fn run() -> anyhow::Result<()> {
         viewport: egui::ViewportBuilder::default()
             // Wide enough for the Devices tab's nine-column table plus its
             // detail panel; General's narrower content still fits fine.
-            .with_inner_size([820.0, 560.0])
-            .with_min_inner_size([480.0, 320.0])
+            .with_inner_size([1120.0, 620.0])
+            .with_min_inner_size([720.0, 360.0])
             .with_title("rigbat")
             .with_app_id("rigbat"),
         ..Default::default()
@@ -1153,6 +1297,46 @@ mod tests {
         let mut hidden = Vec::new();
         toggle_hidden(&mut hidden, "mouse", false);
         assert_eq!(hidden, vec!["mouse".to_string()]);
+    }
+
+    #[test]
+    fn toggle_primary_pins_the_named_device() {
+        let mut primary = None;
+        toggle_primary(&mut primary, "mouse", true);
+        assert_eq!(primary, Some("mouse".to_string()));
+    }
+
+    #[test]
+    fn toggle_primary_replaces_the_previous_pin() {
+        let mut primary = Some("mouse".to_string());
+        toggle_primary(&mut primary, "keyboard", true);
+        assert_eq!(primary, Some("keyboard".to_string()));
+    }
+
+    #[test]
+    fn toggle_primary_unpinning_clears_the_pin() {
+        let mut primary = Some("mouse".to_string());
+        toggle_primary(&mut primary, "mouse", false);
+        assert_eq!(primary, None);
+    }
+
+    /// Unchecking the box on a device that was never primary must leave the
+    /// device that is alone.
+    #[test]
+    fn toggle_primary_unpinning_another_device_is_a_no_op() {
+        let mut primary = Some("mouse".to_string());
+        toggle_primary(&mut primary, "keyboard", false);
+        assert_eq!(primary, Some("mouse".to_string()));
+    }
+
+    #[test]
+    fn aggregate_icon_hint_names_the_pinned_device() {
+        assert!(aggregate_icon_hint(Some("MX Anywhere 3")).contains("MX Anywhere 3"));
+    }
+
+    #[test]
+    fn aggregate_icon_hint_describes_the_automatic_choice() {
+        assert!(aggregate_icon_hint(None).contains("first connected"));
     }
 
     #[test]

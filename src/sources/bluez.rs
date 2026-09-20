@@ -8,6 +8,7 @@
 /// - Name: `Device1.Alias` → `Device1.Name` → address from the object path.
 /// - Charge: `Battery1.Percentage` (u8).
 /// - No charging info in Battery1 → always `ChargeState::Discharging`.
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -16,7 +17,7 @@ use tokio::time::Instant;
 use zbus::zvariant::OwnedObjectPath;
 
 use crate::app::refresh::RefreshSignal;
-use crate::discovery::Context;
+use crate::discovery::{Context, backoff};
 use crate::domain::{BatteryReading, ChargeState, DeviceInfo, Transport, guess_kind};
 
 use super::{BatteryBackend, BatterySource};
@@ -139,13 +140,46 @@ async fn discover_inner(ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySour
 }
 
 /// Subscribes to BlueZ D-Bus signals and triggers `refresh` when a device is
-/// added, removed, or reports a new battery level. Best-effort: if the
-/// system bus or BlueZ is unavailable the task exits and rigbat falls back
-/// to the supervisor's periodic discovery.
-pub fn watch_events(refresh: RefreshSignal, conn: zbus::Connection) {
+/// added, removed, or reports a new battery level. Runs under a supervising
+/// retry loop with exponential backoff (`discovery::backoff`): a lost system
+/// bus, a BlueZ that leaves in a way `NameOwnerChanged` cannot recover from,
+/// or any other stream ending is not fatal — the loop re-dials through
+/// `ctx.system_bus()` (which re-connects a closed one) and resubscribes.
+/// Still an optimisation, never a dependency: the supervisor's periodic
+/// discovery sweep is the safety net while a watcher is down.
+pub fn watch_events(refresh: RefreshSignal, ctx: Arc<Context>) {
     tokio::spawn(async move {
-        if let Err(e) = watch_events_inner(refresh, conn).await {
-            tracing::warn!("bluez event watcher stopped: {e:#}");
+        let mut delay = backoff::INITIAL_DELAY;
+        let mut consecutive_failures: u32 = 0;
+        loop {
+            let attempt_start = Instant::now();
+            let result: anyhow::Result<()> = async {
+                let conn = ctx.system_bus().await?;
+                watch_events_inner(refresh.clone(), conn).await
+            }
+            .await;
+
+            if backoff::is_healthy_run(attempt_start.elapsed()) {
+                delay = backoff::INITIAL_DELAY;
+                consecutive_failures = 0;
+            }
+
+            let detail = match &result {
+                Ok(()) => "stream ended".to_owned(),
+                Err(e) => format!("{e:#}"),
+            };
+            if consecutive_failures == 0 {
+                tracing::warn!("bluez event watcher stopped: {detail}");
+            } else {
+                tracing::debug!(
+                    failures = consecutive_failures,
+                    "bluez event watcher stopped: {detail}"
+                );
+            }
+            consecutive_failures = consecutive_failures.saturating_add(1);
+
+            tokio::time::sleep(delay).await;
+            delay = backoff::next_delay(delay);
         }
     });
 }
@@ -244,26 +278,22 @@ async fn watch_events_inner(refresh: RefreshSignal, conn: zbus::Connection) -> a
             }
             item = subs.interfaces_added.next() => {
                 if item.is_none() {
-                    tracing::warn!(
-                        "bluez InterfacesAdded stream ended; Bluetooth updates fall back to periodic discovery"
-                    );
+                    tracing::debug!("bluez InterfacesAdded stream ended; watcher will retry");
                     return Ok(());
                 }
                 fire_or_defer(&refresh, &mut debouncer, &mut deferred);
             }
             item = subs.interfaces_removed.next() => {
                 if item.is_none() {
-                    tracing::warn!(
-                        "bluez InterfacesRemoved stream ended; Bluetooth updates fall back to periodic discovery"
-                    );
+                    tracing::debug!("bluez InterfacesRemoved stream ended; watcher will retry");
                     return Ok(());
                 }
                 fire_or_defer(&refresh, &mut debouncer, &mut deferred);
             }
             item = subs.properties_changed.next() => {
                 let Some(Ok(msg)) = item else {
-                    tracing::warn!(
-                        "bluez PropertiesChanged stream ended or errored; Bluetooth updates fall back to periodic discovery"
+                    tracing::debug!(
+                        "bluez PropertiesChanged stream ended or errored; watcher will retry"
                     );
                     return Ok(());
                 };
@@ -278,9 +308,7 @@ async fn watch_events_inner(refresh: RefreshSignal, conn: zbus::Connection) -> a
             }
             item = name_owner_changed.next() => {
                 let Some(signal) = item else {
-                    tracing::warn!(
-                        "bluez NameOwnerChanged stream ended; Bluetooth updates fall back to periodic discovery"
-                    );
+                    tracing::debug!("bluez NameOwnerChanged stream ended; watcher will retry");
                     return Ok(());
                 };
                 let Ok(args) = signal.args() else {

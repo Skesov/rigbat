@@ -9,9 +9,9 @@ use crate::app::supervisor::TrayState;
 use crate::appearance::ColorScheme;
 use crate::config::{Config, TrayMode};
 use crate::domain::{
-    DeviceState, Presence, PrimaryStatus, classify, classify_stale, freedesktop_icon_name,
+    DeviceState, Presence, PrimaryStatus, classify, classify_stale, format_device_entry,
+    freedesktop_icon_name, select_featured,
 };
-use crate::tray::format_device_entry;
 use crate::tray::icon::{IconRenderer, Theme, TinySkiaRenderer};
 
 // ---------------------------------------------------------------------------
@@ -65,31 +65,6 @@ pub fn desired_keys(mode: TrayMode, shown: &[String]) -> Vec<Option<String>> {
 // ---------------------------------------------------------------------------
 // featured_name — the device the aggregate icon represents
 // ---------------------------------------------------------------------------
-
-/// Picks the featured device by name from an already-shown-filtered roster.
-///
-/// `shown` is `(name, online)` pairs; `online` is the tiebreak signal used
-/// when there is no explicit choice — `Presence::Online` for the tray, but
-/// callers with no presence information (the one-shot CLI path) can pass any
-/// other "prefer this one" signal, such as "this poll returned a reading".
-///
-/// Priority: explicit choice (if still shown) → first online → first shown → None.
-/// Extracted from `featured_name` so the `--waybar` CLI mode can reuse the
-/// exact selection the aggregate tray icon uses, instead of reimplementing it
-/// against a `Row` shape that carries no `DeviceState`/`Presence`.
-pub fn select_featured(shown: &[(&str, bool)], primary_device: Option<&str>) -> Option<String> {
-    if let Some(name) = primary_device
-        && shown.iter().any(|(n, _)| *n == name)
-    {
-        return Some(name.to_string());
-    }
-
-    shown
-        .iter()
-        .find(|(_, online)| *online)
-        .or_else(|| shown.first())
-        .map(|(name, _)| name.to_string())
-}
 
 /// Returns the device the single (aggregate) icon represents.
 ///
@@ -449,7 +424,7 @@ pub async fn run(
 mod tests {
     use std::time::Instant;
 
-    use super::{desired_keys, featured_name, resolve_for, sanitize, select_featured};
+    use super::{desired_keys, featured_name, resolve_for, sanitize};
     use crate::app::supervisor::TrayState;
     use crate::config::{Config, TrayMode};
     use crate::domain::{
@@ -506,43 +481,6 @@ mod tests {
     fn desired_keys_empty_shown_returns_one_none_regardless_of_mode() {
         assert_eq!(desired_keys(TrayMode::PrimaryOnly, &[]), vec![None]);
         assert_eq!(desired_keys(TrayMode::PerDevice, &[]), vec![None]);
-    }
-
-    // --- select_featured ------------------------------------------------------
-
-    #[test]
-    fn select_featured_explicit_choice_wins_when_shown() {
-        let shown = [("mouse", true), ("keyboard", false)];
-        assert_eq!(
-            select_featured(&shown, Some("keyboard")),
-            Some("keyboard".to_string())
-        );
-    }
-
-    #[test]
-    fn select_featured_explicit_choice_ignored_when_not_shown() {
-        let shown = [("mouse", true), ("keyboard", false)];
-        assert_eq!(
-            select_featured(&shown, Some("gamepad")),
-            Some("mouse".to_string())
-        );
-    }
-
-    #[test]
-    fn select_featured_no_choice_prefers_online() {
-        let shown = [("mouse", false), ("keyboard", true)];
-        assert_eq!(select_featured(&shown, None), Some("keyboard".to_string()));
-    }
-
-    #[test]
-    fn select_featured_no_online_falls_back_to_first() {
-        let shown = [("mouse", false), ("keyboard", false)];
-        assert_eq!(select_featured(&shown, None), Some("mouse".to_string()));
-    }
-
-    #[test]
-    fn select_featured_empty_returns_none() {
-        assert_eq!(select_featured(&[], None), None);
     }
 
     // --- featured_name -------------------------------------------------------
