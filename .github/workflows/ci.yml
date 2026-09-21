@@ -22,7 +22,7 @@ jobs:
     name: gates (fmt, clippy, test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # winit and glow reach X11, Wayland, xkbcommon and GL through dlopen at
       # runtime, but their build scripts still need the development headers.
@@ -57,7 +57,7 @@ jobs:
         # Keep in step with `rust-version` in Cargo.toml.
         rust: ["1.96"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install build dependencies
         run: |
           sudo apt-get update
