@@ -687,7 +687,7 @@ fn pixmap_to_icon(pixmap: Pixmap) -> ksni::Icon {
     let h = pixmap.height() as i32;
     let rgba_data = pixmap.data();
     let mut argb_data = Vec::with_capacity(rgba_data.len());
-    for chunk in rgba_data.chunks_exact(4) {
+    for chunk in rgba_data.as_chunks::<4>().0.iter() {
         argb_data.push(chunk[3]); // A
         argb_data.push(chunk[0]); // R
         argb_data.push(chunk[1]); // G
@@ -772,7 +772,7 @@ mod tests {
         // Helper: convert ARGB (network byte order) back to premultiplied RGBA and save.
         let save = |icon: &ksni::Icon, path: &str| {
             let mut rgba = Vec::with_capacity(icon.data.len());
-            for px in icon.data.chunks_exact(4) {
+            for px in icon.data.as_chunks::<4>().0.iter() {
                 rgba.extend_from_slice(&[px[1], px[2], px[3], px[0]]);
             }
             let size = IntSize::from_wh(icon.width as u32, icon.height as u32).unwrap();
@@ -1001,7 +1001,7 @@ mod tests {
         draw_number(&mut pixmap, 5, 2.0, 2.0, 3.0, color);
 
         // At least one pixel must be non-transparent after drawing.
-        let has_opaque = pixmap.data().chunks_exact(4).any(|px| px[3] != 0);
+        let has_opaque = pixmap.data().as_chunks::<4>().0.iter().any(|px| px[3] != 0);
         assert!(has_opaque, "draw_number produced no visible pixels");
     }
 
@@ -1012,7 +1012,7 @@ mod tests {
         let color = Color::from_rgba8(255, 255, 255, 255);
         // Cell of 4 px → three digits use 3*(3*4 + 4) - 4 = 44 px wide, fits in 64.
         draw_number(&mut pixmap, 100, 0.0, 0.0, 4.0, color);
-        let has_opaque = pixmap.data().chunks_exact(4).any(|px| px[3] != 0);
+        let has_opaque = pixmap.data().as_chunks::<4>().0.iter().any(|px| px[3] != 0);
         assert!(has_opaque);
     }
 
@@ -1088,7 +1088,13 @@ mod tests {
     /// Mean alpha (icon data is ARGB, alpha is byte 0 of each pixel) across
     /// all pixels of the first icon.
     fn mean_alpha(icon: &ksni::Icon) -> f64 {
-        let alphas: Vec<u8> = icon.data.chunks_exact(4).map(|px| px[0]).collect();
+        let alphas: Vec<u8> = icon
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| px[0])
+            .collect();
         alphas.iter().map(|&a| f64::from(a)).sum::<f64>() / alphas.len() as f64
     }
 
@@ -1164,8 +1170,10 @@ mod tests {
         let mut fill_pixel_dimmed = false;
         for (f, s) in fresh_icon
             .data
-            .chunks_exact(4)
-            .zip(stale_icon.data.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(stale_icon.data.as_chunks::<4>().0.iter())
         {
             if f[0] == 255 && f == s {
                 mark_pixel_unchanged = true;
@@ -1251,7 +1259,7 @@ mod tests {
     /// Helper: extract RGBA bytes from ksni::Icon (ARGB network order → RGBA).
     fn icon_to_rgba(icon: &ksni::Icon) -> Vec<u8> {
         let mut rgba = Vec::with_capacity(icon.data.len());
-        for px in icon.data.chunks_exact(4) {
+        for px in icon.data.as_chunks::<4>().0.iter() {
             rgba.extend_from_slice(&[px[1], px[2], px[3], px[0]]);
         }
         rgba
@@ -1532,7 +1540,9 @@ mod tests {
     /// (premultiplied) byte representation the pixmap stores.
     fn opaque_colors(icon: &ksni::Icon) -> std::collections::HashSet<(u8, u8, u8, u8)> {
         icon_to_rgba(icon)
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[3] != 0)
             .map(|px| (px[0], px[1], px[2], px[3]))
             .collect()
@@ -1541,7 +1551,9 @@ mod tests {
     /// Number of opaque pixels in the icon.
     fn opaque_pixel_count(icon: &ksni::Icon) -> usize {
         icon_to_rgba(icon)
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[3] != 0)
             .count()
     }
