@@ -58,22 +58,18 @@ fn parse_args(args: &[String]) -> Invocation {
 
     let wide = args.iter().any(|a| a == "--wide");
     // --json and --waybar are legacy flag-style mode selectors, not subcommand
-    // names. Check for them before falling back to the first non-flag positional.
+    // names.
     let json = args.iter().any(|a| a == "--json");
     let waybar = args.iter().any(|a| a == "--waybar");
     if json && waybar {
         return Invocation::UsageError("--json and --waybar are mutually exclusive".to_string());
     }
-    if json {
-        return Invocation::Json;
-    }
-    if waybar {
-        return Invocation::Waybar;
-    }
 
+    // Unknown flags are rejected before any mode is chosen. Returning on
+    // --json first would swallow them: `rigbat --oops --json` printed JSON.
     if let Some(unknown_flag) = args
         .iter()
-        .find(|a| a.starts_with('-') && a.as_str() != "--wide")
+        .find(|a| a.starts_with('-') && !MODE_FLAGS.contains(&a.as_str()))
     {
         return Invocation::Unknown(unknown_flag.to_string());
     }
@@ -84,6 +80,20 @@ fn parse_args(args: &[String]) -> Invocation {
         Some(tok) => tok.as_str(),
     };
 
+    // A mode selector only makes sense for the one-shot reading. Pairing it
+    // with a subcommand used to win silently, so `rigbat tray --json` printed
+    // one JSON line and exited 0 instead of starting the daemon.
+    if (json || waybar) && mode != "list" {
+        let flag = if json { "--json" } else { "--waybar" };
+        return Invocation::UsageError(format!("{flag} cannot be combined with `{mode}`"));
+    }
+    if json {
+        return Invocation::Json;
+    }
+    if waybar {
+        return Invocation::Waybar;
+    }
+
     match mode {
         "list" => Invocation::List { wide },
         "tray" => Invocation::Tray,
@@ -92,10 +102,14 @@ fn parse_args(args: &[String]) -> Invocation {
     }
 }
 
+/// Flags that select a mode or shape its output, as opposed to an unknown
+/// flag, which is a usage error wherever it appears.
+const MODE_FLAGS: [&str; 3] = ["--wide", "--json", "--waybar"];
+
 // print!/println!/eprintln! here are the CLI's own output (--help, --version,
-// usage errors), not diagnostics — hence the narrow allow of the project's
-// tracing-only print lints.
-#[allow(clippy::print_stdout, clippy::print_stderr)]
+// usage errors), not diagnostics — hence the narrow exemption from the
+// project's tracing-only print lints.
+#[expect(clippy::print_stdout, clippy::print_stderr)]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let invocation = parse_args(&args);
@@ -274,7 +288,7 @@ fn spawn_bus_dependent_tasks(
 /// Prints the human-facing explanation for a second `rigbat tray` standing
 /// down. Not a `tracing` log line: this is addressed to whoever is watching
 /// the terminal, not the journal.
-#[allow(clippy::print_stderr)]
+#[expect(clippy::print_stderr)]
 fn announce_already_running() {
     eprintln!(
         "another rigbat tray is already running in this session; leaving it in charge \
@@ -355,7 +369,7 @@ async fn run_tray() {
 const FIRST_SWEEP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 // See cli::print_json: the waybar module line is program output on stdout.
-#[allow(clippy::print_stdout)]
+#[expect(clippy::print_stdout)]
 fn print_line(line: &str) {
     println!("{line}");
 }
@@ -527,6 +541,49 @@ mod tests {
     fn json_mode() {
         assert_eq!(parse_args(&s(&["--json"])), Invocation::Json);
         assert_eq!(parse_args(&s(&["--json", "--wide"])), Invocation::Json);
+    }
+
+    /// `--json` is a mode, so pairing it with a subcommand is a contradiction,
+    /// not a preference. It used to win silently: `rigbat tray --json` printed
+    /// one reading and exited 0 instead of starting the daemon.
+    #[test]
+    fn mode_flag_with_a_subcommand_is_a_usage_error() {
+        for (argv, expected) in [
+            (
+                vec!["tray", "--json"],
+                "--json cannot be combined with `tray`",
+            ),
+            (
+                vec!["settings", "--json"],
+                "--json cannot be combined with `settings`",
+            ),
+            (
+                vec!["tray", "--waybar"],
+                "--waybar cannot be combined with `tray`",
+            ),
+        ] {
+            assert_eq!(
+                parse_args(&s(&argv)),
+                Invocation::UsageError(expected.to_string()),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mode_flag_with_the_list_subcommand_is_accepted() {
+        assert_eq!(parse_args(&s(&["list", "--json"])), Invocation::Json);
+        assert_eq!(parse_args(&s(&["list", "--waybar"])), Invocation::Waybar);
+    }
+
+    /// An unknown flag was swallowed whenever a mode flag sat beside it,
+    /// because the mode returned before anything validated the rest.
+    #[test]
+    fn unknown_flag_is_reported_even_beside_a_mode_flag() {
+        assert_eq!(
+            parse_args(&s(&["--oops", "--json"])),
+            Invocation::Unknown("--oops".to_string())
+        );
     }
 
     #[test]
