@@ -21,10 +21,21 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
     # Major bumps arrive as their own pull requests: they need a human to read
-    # the changelog, and rigbat pins egui_extras to eframe's exact egui build.
+    # the changelog.
+    #
+    # eframe and egui_extras are excluded from anything but a patch bump, and
+    # proved it on the first run: Dependabot's eframe 0.34 -> 0.36 pull request
+    # failed with `eframe::egui::Button` not satisfying `egui::widgets::Widget`
+    # — two egui versions in one graph. `egui_extras` is pinned to eframe's
+    # exact egui build by hand, so the two only move together, and which
+    # version matches is something a human reads off eframe's release notes.
     ignore:
+      - dependency-name: "eframe"
+        update-types:
+          ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "egui_extras"
-        update-types: ["version-update:semver-major"]
+        update-types:
+          ["version-update:semver-major", "version-update:semver-minor"]
 
   # The actions used by ci.yml and release.yml. Pinned action versions rot the
   # same way crate versions do, and a stale checkout or toolchain action is how
