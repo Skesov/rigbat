@@ -29,6 +29,17 @@ const SAVED_VISIBLE_SECS: u64 = 2;
 /// because it is keyed by device name, not by row index.
 const DEVICE_DETAIL_HEIGHT: f32 = 104.0;
 
+/// The window's opening size, and the smallest the user may make it.
+///
+/// The minimum is not a guess: below about 940 px the Devices tab's table
+/// silently drops its two right-hand columns — `Tray icon` and the `Delete`
+/// action — leaving no way to reach either, because the table has no
+/// horizontal scrolling and a settings window should not need any.
+/// `device_table_fits_at_the_minimum_window_width` pins it to that fact, so
+/// adding a column fails a test rather than shrinking the window's promise.
+const WINDOW_DEFAULT_SIZE: [f32; 2] = [980.0, 620.0];
+const WINDOW_MIN_SIZE: [f32; 2] = [940.0, 360.0];
+
 /// Row and header heights for the Devices tab table.
 const TABLE_ROW_HEIGHT: f32 = 22.0;
 const TABLE_HEADER_HEIGHT: f32 = 24.0;
@@ -1100,12 +1111,10 @@ pub fn run() -> anyhow::Result<()> {
     let discovery_ctx = Arc::new(crate::discovery::Context::new());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            // The Devices tab's columns add up to 882 px plus inter-column
-            // spacing and the 16 px page margins; 980 clears that without
-            // leaving a wide empty gutter. The per-device settings sit under
-            // the table, so they cost no width at all.
-            .with_inner_size([980.0, 620.0])
-            .with_min_inner_size([720.0, 360.0])
+            // Sizes live next to the table they are derived from — see
+            // `WINDOW_MIN_SIZE`.
+            .with_inner_size(WINDOW_DEFAULT_SIZE)
+            .with_min_inner_size(WINDOW_MIN_SIZE)
             .with_title("rigbat")
             .with_app_id("rigbat"),
         ..Default::default()
@@ -1201,6 +1210,148 @@ mod tests {
         std::fs::write(wants.join("other.service"), "").unwrap();
         assert!(!systemd_service_enabled_at(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The narrowest a string may be drawn and still count as readable. A
+    /// couple of characters' worth: enough to fail a label clipped down to its
+    /// container's padding, not so much that a short cell value fails.
+    const MIN_READABLE_WIDTH: f32 = 24.0;
+
+    /// Runs two frames of `contents` in a headless egui context and returns
+    /// every string it painted *visibly* — text whose galley survives its own
+    /// clip rectangle by at least `MIN_READABLE_WIDTH`.
+    ///
+    /// Two frames because `egui_extras`' table sizes itself from the previous
+    /// frame's state, so the first one can lay out degenerately.
+    ///
+    /// Clipping is the whole point. R45 painted the device name with its full
+    /// text, at a position inside a rectangle a few pixels wide, so a test
+    /// that only collected galley strings passed against the broken build —
+    /// verified by reintroducing the bug and watching it stay green. What the
+    /// user saw was the clip.
+    fn painted_text(contents: impl FnMut(&mut egui::Ui)) -> Vec<String> {
+        painted_text_at(WINDOW_DEFAULT_SIZE, contents)
+    }
+
+    /// `painted_text` at a chosen window size. The root clip rectangle is the
+    /// screen, so anything laid out past the window's edge is filtered out by
+    /// the same rule that filters anything clipped inside it.
+    fn painted_text_at(size: [f32; 2], mut contents: impl FnMut(&mut egui::Ui)) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(size[0], size[1]),
+            )),
+            ..Default::default()
+        };
+        let mut painted = Vec::new();
+        for _ in 0..2 {
+            let output = ctx.run_ui(input(), |ui| contents(ui));
+            painted.clear();
+            for clipped in output.shapes {
+                collect_text(&clipped.shape, clipped.clip_rect, &mut painted);
+            }
+        }
+        painted
+    }
+
+    fn collect_text(shape: &egui::Shape, clip: egui::Rect, out: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => {
+                let drawn = egui::Rect::from_min_size(text.pos, text.galley.size());
+                let visible = drawn.intersect(clip);
+                if visible.width() >= MIN_READABLE_WIDTH && visible.height() > 0.0 {
+                    out.push(text.galley.text().to_owned());
+                }
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_text(shape, clip, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rows_for(names: &[&str]) -> Vec<devices::DeviceRow> {
+        devices::merge_devices(
+            Vec::new(),
+            names.iter().map(|n| (device(n), None)).collect(),
+        )
+    }
+
+    /// The regression R45 left in the shipped build: the name cell drew its
+    /// selectable button, then the name into that button's rect — which was
+    /// only as wide as the button's padding, so nothing was left to read.
+    #[test]
+    fn device_table_paints_every_device_name() {
+        let mut app = settings_app_with(Config::default());
+        let rows = rows_for(&["MX Anywhere 3", "NuPhy Air75"]);
+
+        let painted = painted_text(|ui| app.render_device_table(ui, &rows, 1_700_000_000));
+
+        for name in ["MX Anywhere 3", "NuPhy Air75"] {
+            assert!(
+                painted.iter().any(|t| t == name),
+                "{name:?} was not painted; got {painted:?}"
+            );
+        }
+    }
+
+    /// The window promises a minimum size; at that size the table must still
+    /// show the two columns that carry its only actions. Below roughly 940 px
+    /// `Tray icon` and `Actions` fall off the right edge, and the table has no
+    /// horizontal scrolling to reach them with — measured, not assumed: at
+    /// 720 px (the previous minimum) both headers are gone, along with
+    /// `Last seen`.
+    #[test]
+    fn device_table_fits_at_the_minimum_window_width() {
+        let mut app = settings_app_with(Config::default());
+        let rows = rows_for(&["SteelSeries Arctis Nova Pro Wireless Headset"]);
+
+        let painted = painted_text_at(WINDOW_MIN_SIZE, |ui| {
+            app.render_device_table(ui, &rows, 1_700_000_000)
+        });
+
+        for header in ["Name ⏷", "Charge", "Last seen", "Tray icon", "Actions"] {
+            assert!(
+                painted.iter().any(|t| t == header),
+                "{header:?} is not visible at the minimum window width; got {painted:?}"
+            );
+        }
+    }
+
+    /// The band under the table draws nothing at all until a row is selected
+    /// — not a placeholder explaining that selecting a row would fill it.
+    #[test]
+    fn device_detail_paints_nothing_until_a_row_is_selected() {
+        let mut app = settings_app_with(Config::default());
+
+        let painted = painted_text(|ui| app.render_device_detail(ui));
+
+        assert!(
+            painted.is_empty(),
+            "expected nothing painted, got {painted:?}"
+        );
+    }
+
+    #[test]
+    fn device_detail_paints_the_selected_device_and_its_controls() {
+        let mut app = settings_app_with(Config::default());
+        app.selected_device = Some("MX Anywhere 3".to_string());
+
+        let painted = painted_text(|ui| app.render_device_detail(ui));
+
+        assert!(painted.iter().any(|t| t == "MX Anywhere 3"), "{painted:?}");
+        assert!(
+            painted.iter().any(|t| t == "Use for the single tray icon"),
+            "{painted:?}"
+        );
+        assert!(
+            painted.iter().any(|t| t.starts_with("Use default (20%")),
+            "{painted:?}"
+        );
     }
 
     fn settings_app_with(config: Config) -> SettingsApp {

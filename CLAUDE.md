@@ -112,6 +112,10 @@ imports another adapter — text or policy that `cli`, `tray` and `settings` all
 
 - Gates (must pass before commit): `cargo fmt`, `cargo build`, `cargo test`,
   `cargo clippy --all-targets -- -D warnings`.
+- Settings-window rendering has its own coverage: `settings::tests::painted_text` runs a frame in
+  a headless `egui::Context` and returns the strings that survived their clip rectangle, so a
+  widget drawn into a few pixels fails the test instead of shipping. Assert against what is
+  painted, never only that the code ran.
 - Adding infrastructure (a new D-Bus/HID/GUI dependency): put it behind a port (a trait) plus
   an implementation; never import it into `domain` — dependency direction stays inward.
 - Where to change what: new device → `CONTRIBUTING.md`; CLI flag → `main.rs` dispatch + `cli/`;
