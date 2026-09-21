@@ -36,7 +36,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # a zbus connection on a thread without a tokio runtime, which panics in the
 # runtime-less `rigbat settings` process. a11y on the settings dialog can be
 # revisited if the upstream runtime requirement is relaxed.
-eframe = { version = "0.34.3", default-features = false, features = [
+eframe = { version = "0.36.2", default-features = false, features = [
     "default_fonts",
     "glow",
     "wayland",
