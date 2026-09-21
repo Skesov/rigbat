@@ -194,7 +194,7 @@ mod tests {
     #[test]
     // clippy::panic has no allow-in-tests config (unlike unwrap_used/expect_used);
     // this panic is the test's own failure message for an unexpected match arm.
-    #[allow(clippy::panic)]
+    #[expect(clippy::panic)]
     fn steady_discharge_yields_a_plausible_remaining_range() {
         let base = Instant::now();
         // 1% per 6 minutes, held for 36 minutes: 6 downward transitions.

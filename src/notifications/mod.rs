@@ -26,7 +26,7 @@ const LOW_CONFIRMATIONS: u8 = 2;
     default_path = "/org/freedesktop/Notifications"
 )]
 trait Notifications {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn notify(
         &self,
         app_name: &str,

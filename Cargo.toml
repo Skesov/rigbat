@@ -58,6 +58,10 @@ dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
 panic = "deny"
+# Denies `#[allow]`, so a suppression must be `#[expect]` — which clippy
+# reports when it stops being needed. An `allow` that outlives its reason is
+# invisible; an unfulfilled `expect` fails the gate.
+allow_attributes = "deny"
 # indexing_slicing evaluated and rejected: measured at 125 diagnostics across
 # icon.rs's geometry/glyph tables plus routine slice indexing in nearly every
 # test module, and clippy has no allow-in-tests config for it (unlike

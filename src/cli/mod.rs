@@ -32,8 +32,9 @@ pub fn to_json(rows: &[Row]) -> Value {
 }
 
 // The battery table/JSON/waybar line is the program's output on stdout, not
-// a diagnostic — hence the narrow allow of the project's tracing-only print lint.
-#[allow(clippy::print_stdout)]
+// a diagnostic — hence the narrow exemption from the project's tracing-only
+// print lint.
+#[expect(clippy::print_stdout)]
 pub fn print_json(rows: &[Row]) {
     let value = to_json(rows);
     // serde_json::to_string_pretty cannot fail on a valid Value
@@ -133,7 +134,7 @@ pub fn render_waybar_line(states: &[DeviceState], cfg: &Config, now: Instant) ->
 }
 
 // See print_json: the battery table is program output on stdout.
-#[allow(clippy::print_stdout)]
+#[expect(clippy::print_stdout)]
 pub fn print_table(rows: &[Row]) {
     if rows.is_empty() {
         println!("No devices found");
@@ -160,7 +161,7 @@ pub fn print_table(rows: &[Row]) {
 }
 
 // See print_json: the wide battery table is program output on stdout.
-#[allow(clippy::print_stdout)]
+#[expect(clippy::print_stdout)]
 pub fn print_table_wide(rows: &[Row]) {
     if rows.is_empty() {
         println!("No devices found");

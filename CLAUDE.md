@@ -110,6 +110,9 @@ imports another adapter — text or policy that `cli`, `tray` and `settings` all
 - These rules (plus no `unsafe`) are enforced by `[lints.clippy]` in `Cargo.toml`, not only by
   review — `cargo clippy --all-targets -- -D warnings` fails the gate on a violation.
   (`clippy.toml` only exempts `#[cfg(test)]` code from the no-unwrap rule.)
+- Suppressions are `#[expect(...)]`, never `#[allow(...)]`: `allow_attributes = "deny"` makes
+  that the only option, and clippy reports an `expect` that has stopped being needed. Each one
+  says above it why the rule does not apply there.
 
 ## Development
 
