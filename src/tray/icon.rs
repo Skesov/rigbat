@@ -169,18 +169,25 @@ fn render_mode(
             maybe_draw_kind_glyph(&mut pixmap, kind, size, color);
             Some(pixmap_to_icon(pixmap))
         }
+        // The glyph goes on before the digits in both percent modes. Its first
+        // step punches a transparent ring around itself, and the canvas is
+        // square (`WIDE_ASPECT`), so at 22 px the centred digit block reaches
+        // into the same bottom-right corner — drawing the glyph last erased
+        // part of the last digit (21 px at 22 px, 163 px at 64 px, measured).
+        // Digits carry the reading and the glyph only identifies the device,
+        // so where they collide the digits win.
         DisplayMode::PercentOnly => {
             let mut pixmap = Pixmap::new(w, size)?;
-            draw_percent_centered(&mut pixmap, percent, color);
             maybe_draw_kind_glyph(&mut pixmap, kind, size, color);
+            draw_percent_centered(&mut pixmap, percent, color);
             Some(pixmap_to_icon(pixmap))
         }
         DisplayMode::PercentInIcon => {
             let mut pixmap = Pixmap::new(w, size)?;
             // Draw battery outline only (no fill bar — number takes priority).
             draw_battery_outline_only(&mut pixmap, color);
-            draw_percent_in_battery(&mut pixmap, percent, color);
             maybe_draw_kind_glyph(&mut pixmap, kind, size, color);
+            draw_percent_in_battery(&mut pixmap, percent, color);
             Some(pixmap_to_icon(pixmap))
         }
     }
@@ -353,8 +360,10 @@ fn draw_cross_line(pixmap: &mut Pixmap, g: &BatteryGeom, color: Color) {
 
 /// Calls `draw_kind_glyph` only for drawable kinds; no-op for `None`/`Other`.
 ///
-/// The glyph occupies the bottom-right corner so it does not collide with the
-/// centered digit block in PercentOnly/PercentInIcon modes.
+/// The glyph occupies the bottom-right corner. That corner is not free in the
+/// percent modes — the canvas is square and the centred digit block reaches
+/// into it — so `render_mode` draws the glyph *before* the digits there and
+/// lets the digits win the overlap.
 fn maybe_draw_kind_glyph(pixmap: &mut Pixmap, kind: Option<DeviceKind>, size: u32, color: Color) {
     let k = match kind {
         Some(DeviceKind::Mouse) => DeviceKind::Mouse,
@@ -367,8 +376,6 @@ fn maybe_draw_kind_glyph(pixmap: &mut Pixmap, kind: Option<DeviceKind>, size: u3
     let glyph = ((size as f32 / 3.0).round() as u32).max(6);
     let margin = ((size as f32 / 22.0).round() as u32).max(1);
 
-    // At 22px the glyph (7px) fits in the corner without touching the centered
-    // digit block (which occupies the top and centre rows), so no skip needed.
     let x0 = size.saturating_sub(glyph + margin);
     let y0 = size.saturating_sub(glyph + margin);
 
@@ -695,6 +702,57 @@ fn pixmap_to_icon(pixmap: Pixmap) -> ksni::Icon {
 
 #[cfg(test)]
 mod tests {
+
+    /// The device-kind glyph punches a transparent ring around itself so it
+    /// reads against a battery fill. The canvas is square, the digit block is
+    /// centred and reaches the same bottom-right corner, so drawing the glyph
+    /// after the digits erased part of the last digit — 21 px at 22 px, 163 px
+    /// at 64 px, measured. `render_mode` draws the glyph first in the percent
+    /// modes; this asserts no digit pixel is lost at any published size.
+    #[test]
+    fn kind_glyph_never_erases_a_digit() {
+        use crate::config::DisplayMode;
+
+        let theme = Theme::dark();
+        let color = {
+            let [r, g, b, a] = theme.normal;
+            Color::from_rgba8(r, g, b, a)
+        };
+        let renderer = TinySkiaRenderer {
+            sizes: vec![22, 32, 48, 64],
+        };
+
+        for mode in [DisplayMode::PercentOnly, DisplayMode::PercentInIcon] {
+            let icons = renderer.render(
+                PrimaryStatus::Ok { percent: 88 },
+                Some(DeviceKind::Mouse),
+                &theme,
+                mode,
+                false,
+            );
+
+            for icon in icons {
+                let (w, h) = (icon.width as u32, icon.height as u32);
+                let mut digits = Pixmap::new(w, h).expect("digit mask pixmap");
+                match mode {
+                    DisplayMode::PercentOnly => draw_percent_centered(&mut digits, 88, color),
+                    DisplayMode::PercentInIcon => draw_percent_in_battery(&mut digits, 88, color),
+                    DisplayMode::IconOnly => unreachable!("not under test"),
+                }
+
+                let mut lost = 0usize;
+                for (i, pixel) in digits.pixels().iter().enumerate() {
+                    if pixel.alpha() > 0 && icon.data[i * 4] == 0 {
+                        lost += 1;
+                    }
+                }
+                assert_eq!(
+                    lost, 0,
+                    "{mode:?} at {w}x{h}: the glyph erased {lost} digit pixels"
+                );
+            }
+        }
+    }
     use super::*;
     use crate::config::DisplayMode;
 
