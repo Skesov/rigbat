@@ -19,6 +19,7 @@ pub fn backends() -> Vec<Box<dyn BatteryBackend>> {
         Box::new(SysfsBackend),
         Box::new(BluezBackend),
         Box::new(SteelSeriesBackend),
+        Box::new(EightBitDoBackend),
     ]
 }
 ```

@@ -18,6 +18,24 @@ System tray battery monitor for gaming peripherals.
 - Sends desktop notifications when battery is low
 - Works with wired, wireless, and Bluetooth devices
 
+## Supported devices
+
+Two backends read a battery from any device the kernel already knows about, so most peripherals
+work without rigbat knowing their model:
+
+- **sysfs** (`/sys/class/power_supply`) — anything the kernel exposes a battery for, which
+  includes Logitech devices over a Unifying or Bolt receiver via `hid-logitech-hidpp`, and many
+  Bluetooth peripherals through `hid-generic`.
+- **BlueZ** — any Bluetooth device that implements `org.bluez.Battery1`.
+
+Two more speak a vendor protocol over `/dev/hidraw`, and those need the device to be in the table:
+
+- **SteelSeries** — Aerox 5 Wireless.
+- **8BitDo** — Ultimate 2 Wireless, in DInput mode only (see below).
+
+Adding a device to either table is a small, well-scoped change: see
+[CONTRIBUTING.md](CONTRIBUTING.md) and [docs/adding-a-device.md](docs/adding-a-device.md).
+
 ## Supported connection types
 
 - USB HID (wired and wireless dongles)
@@ -26,9 +44,28 @@ System tray battery monitor for gaming peripherals.
 
 ## Requirements
 
+To run it:
+
 - Linux
 - System tray support (StatusNotifierItem / XEmbed)
-- Rust toolchain (stable, edition 2024, MSRV 1.96) to build from source
+
+To build it from source:
+
+- Rust toolchain (stable, edition 2024, MSRV 1.96)
+- A C compiler — `rusqlite` is built with `bundled`, which compiles SQLite
+- Development headers for the windowing stack the settings window uses. On Debian or Ubuntu:
+
+  ```sh
+  sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+      libxrandr-dev libxi-dev libgl1-mesa-dev pkg-config
+  ```
+
+  On Arch: `pacman -S libxkbcommon wayland libx11 libxcursor libxrandr libxi mesa pkgconf`.
+  On Fedora: `dnf install libxkbcommon-devel wayland-devel libX11-devel libXcursor-devel
+libXrandr-devel libXi-devel mesa-libGL-devel pkgconf-pkg-config`.
+
+  The tray itself reaches X11, Wayland and GL through `dlopen` at runtime; these are what the
+  build scripts need.
 
 ## Build and install
 
@@ -217,3 +254,8 @@ Raise verbosity with `RIGBAT_LOG` (falls back to `RUST_LOG`), default `info` for
 RIGBAT_LOG=debug rigbat tray
 RIGBAT_LOG=rigbat::sources=trace rigbat tray   # one module only
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE). Use it, change it, ship it in something you sell; keep the
+copyright notice, and understand there is no warranty.

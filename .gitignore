@@ -1,1 +1,9 @@
 /target
+
+# Maintainer-local working files: planning notes, task specs, review reports,
+# and per-machine assistant instructions. Kept out of the repository on
+# purpose — they are scratch, not documentation. The published docs are
+# README.md, CONTRIBUTING.md, CLAUDE.md and docs/.
+.workbench/
+.claude/
+CLAUDE.local.md
