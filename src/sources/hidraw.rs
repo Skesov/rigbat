@@ -59,14 +59,15 @@ pub fn stable_locator(uevent: &str, node_name: &str) -> String {
 mod tests {
     use super::*;
 
-    // Captured from /sys/class/hidraw/hidraw11/device/uevent (8BitDo Ultimate 2,
-    // a device that reports a serial) and hidraw6 (SteelSeries Aerox 5, which
-    // reports none).
+    // The shape of a real `/sys/class/hidraw/hidrawN/device/uevent`: one device
+    // that reports a serial (8BitDo Ultimate 2) and one that does not
+    // (SteelSeries Aerox 5). Identifiers are placeholders — a serial or a MAC
+    // captured from a real device names somebody's hardware.
     const WITH_UNIQ: &str = "DRIVER=hid-generic\n\
          HID_ID=0003:00002DC8:00006013\n\
          HID_NAME=8BitDo Ultimate 2\n\
          HID_PHYS=usb-0000:13:00.0-1.2/input0\n\
-         HID_UNIQ=350857A671\n";
+         HID_UNIQ=A1B2C3D4E5\n";
     const WITHOUT_UNIQ: &str = "DRIVER=hid-generic\n\
          HID_ID=0003:00001038:00001852\n\
          HID_NAME=SteelSeries SteelSeries Aerox 5 Wireless\n\
@@ -121,7 +122,7 @@ mod tests {
 
     #[test]
     fn stable_locator_prefers_the_serial() {
-        assert_eq!(stable_locator(WITH_UNIQ, "hidraw11"), "350857A671");
+        assert_eq!(stable_locator(WITH_UNIQ, "hidraw11"), "A1B2C3D4E5");
     }
 
     #[test]

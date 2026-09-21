@@ -431,7 +431,7 @@ mod tests {
         let sysfs = DeviceId {
             name: "MX Anywhere 3".to_owned(),
             transport: Transport::Sysfs,
-            locator: Some("cd:a5:74:20:ae:a6".to_owned()),
+            locator: Some("00:00:5e:00:53:01".to_owned()),
         };
         let bluetooth = DeviceId {
             transport: Transport::Bluetooth,

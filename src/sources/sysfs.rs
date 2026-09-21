@@ -229,11 +229,11 @@ mod tests {
         std::fs::create_dir_all(dir.join("device")).unwrap();
         std::fs::write(
             dir.join("device/uevent"),
-            "HID_ID=0003:0000046D:0000B02Y\nHID_PHYS=usb-0000:10:00.0-3/input2:1\nHID_UNIQ=e8:1a:2c:3d:4e:5f\n",
+            "HID_ID=0003:0000046D:0000B02Y\nHID_PHYS=usb-0000:10:00.0-3/input2:1\nHID_UNIQ=00:00:5e:00:53:01\n",
         )
         .unwrap();
 
-        assert_eq!(stable_locator(&dir, "hidpp_battery_6"), "e8:1a:2c:3d:4e:5f");
+        assert_eq!(stable_locator(&dir, "hidpp_battery_6"), "00:00:5e:00:53:01");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -535,7 +535,7 @@ mod tests {
     fn record_seen_adopts_a_corrected_kind() {
         let path = scratch_db_path("kind-update");
         let store = SqliteStore::open(&path).unwrap();
-        let id = id("8BitDo Ultimate 2", Transport::Hidraw, Some("350857A671"));
+        let id = id("8BitDo Ultimate 2", Transport::Hidraw, Some("A1B2C3D4E5"));
 
         store.record_seen(&id, DeviceKind::Other, 1000).unwrap();
         store
@@ -562,14 +562,14 @@ mod tests {
             store
                 .record_seen(&node_keyed, DeviceKind::Controller, 1000)
                 .unwrap();
-            let serial_keyed = id("8BitDo Ultimate 2", Transport::Hidraw, Some("350857A671"));
+            let serial_keyed = id("8BitDo Ultimate 2", Transport::Hidraw, Some("A1B2C3D4E5"));
             store
                 .record_seen(&serial_keyed, DeviceKind::Controller, 1000)
                 .unwrap();
             let bluetooth = id(
                 "NuPhy Air75",
                 Transport::Bluetooth,
-                Some("CF:D9:B2:94:77:5E"),
+                Some("00:00:5E:00:53:02"),
             );
             store
                 .record_seen(&bluetooth, DeviceKind::Keyboard, 1000)
@@ -588,7 +588,7 @@ mod tests {
             .map(|d| d.device.locator.unwrap_or_default())
             .collect();
         names.sort();
-        assert_eq!(names, vec!["350857A671", "CF:D9:B2:94:77:5E"]);
+        assert_eq!(names, vec!["00:00:5E:00:53:02", "A1B2C3D4E5"]);
 
         cleanup(&path);
     }
@@ -600,7 +600,7 @@ mod tests {
     fn record_seen_renames_a_row_that_kept_its_locator() {
         let path = scratch_db_path("rename");
         let store = SqliteStore::open(&path).unwrap();
-        let before = id("MX Anywhere 3", Transport::Sysfs, Some("e8:1a:2c:3d:4e:5f"));
+        let before = id("MX Anywhere 3", Transport::Sysfs, Some("00:00:5e:00:53:01"));
         assert_eq!(
             store.record_seen(&before, DeviceKind::Mouse, 1000).unwrap(),
             Seen::Inserted
@@ -613,7 +613,7 @@ mod tests {
             )
             .unwrap();
 
-        let after = id("Work mouse", Transport::Sysfs, Some("e8:1a:2c:3d:4e:5f"));
+        let after = id("Work mouse", Transport::Sysfs, Some("00:00:5e:00:53:01"));
         assert_eq!(
             store.record_seen(&after, DeviceKind::Mouse, 2000).unwrap(),
             Seen::Renamed {
@@ -667,7 +667,7 @@ mod tests {
             let bluetooth = id(
                 "NuPhy Air75",
                 Transport::Bluetooth,
-                Some("CF:D9:B2:94:77:5E"),
+                Some("00:00:5E:00:53:02"),
             );
             store
                 .record_seen(&bluetooth, DeviceKind::Keyboard, 1000)

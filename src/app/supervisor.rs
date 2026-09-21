@@ -2001,7 +2001,7 @@ mod tests {
             name: "MX Anywhere 3".to_owned(),
             kind: DeviceKind::Mouse,
             transport: Transport::Sysfs,
-            locator: Some("e8:1a:2c:3d:4e:5f".to_owned()),
+            locator: Some("00:00:5e:00:53:01".to_owned()),
         };
         let after = DeviceInfo {
             name: "Work mouse".to_owned(),
