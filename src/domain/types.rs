@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::domain::estimate::Estimate;
 
@@ -219,8 +219,111 @@ pub struct DeviceState {
     pub estimate: Estimate,
 }
 
+impl DeviceState {
+    /// Whether this device still has something to say on a status bar.
+    ///
+    /// An `Online` device always does. One that is not online is showing a
+    /// memory, and a memory has a shelf life:
+    ///
+    /// - no reading at all means nothing to display. A wireless dongle stays
+    ///   enumerated while its mouse is switched off, so the device is
+    ///   discovered, polled and never answers — an icon for it is an empty
+    ///   battery outline that has never meant anything.
+    /// - a reading older than `max_age` is no longer worth a slot. "88%, two
+    ///   days ago" is not a battery level, it is a fact about last Tuesday.
+    ///
+    /// The device stays in the roster and keeps being polled either way, so it
+    /// returns the moment it answers again. This governs display only.
+    pub fn is_currently_informative(&self, now: Instant, max_age: Duration) -> bool {
+        if self.presence == Presence::Online {
+            return true;
+        }
+        match (self.last_reading, self.last_seen) {
+            (Some(_), Some(seen)) => now.saturating_duration_since(seen) <= max_age,
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    fn state_at(
+        presence: Presence,
+        reading: Option<BatteryReading>,
+        seen: Option<Instant>,
+    ) -> DeviceState {
+        DeviceState {
+            info: DeviceInfo {
+                name: "mouse".to_owned(),
+                kind: DeviceKind::Mouse,
+                transport: Transport::Hidraw,
+                locator: None,
+            },
+            last_reading: reading,
+            last_seen: seen,
+            presence,
+            estimate: Estimate::Unknown,
+        }
+    }
+
+    #[test]
+    fn online_device_is_always_informative() {
+        let now = Instant::now();
+        let state = state_at(Presence::Online, None, None);
+        assert!(state.is_currently_informative(now, DAY));
+    }
+
+    #[test]
+    fn offline_device_that_never_answered_is_not_informative() {
+        let now = Instant::now();
+        for presence in [Presence::Unreachable, Presence::Disconnected] {
+            let state = state_at(presence, None, None);
+            assert!(!state.is_currently_informative(now, DAY));
+        }
+    }
+
+    #[test]
+    fn offline_device_keeps_a_recent_reading() {
+        let now = Instant::now();
+        let seen = now.checked_sub(Duration::from_secs(3600));
+        let state = state_at(
+            Presence::Unreachable,
+            Some(BatteryReading::new(88, ChargeState::Discharging)),
+            seen,
+        );
+        assert!(state.is_currently_informative(now, DAY));
+    }
+
+    #[test]
+    fn offline_device_loses_a_reading_older_than_the_cap() {
+        let now = Instant::now();
+        let seen = now.checked_sub(DAY + Duration::from_secs(1));
+        let state = state_at(
+            Presence::Unreachable,
+            Some(BatteryReading::new(88, ChargeState::Discharging)),
+            seen,
+        );
+        assert!(!state.is_currently_informative(now, DAY));
+    }
+
+    /// Exactly at the cap still counts: the boundary belongs to the side that
+    /// keeps showing something.
+    #[test]
+    fn offline_device_at_exactly_the_cap_is_still_informative() {
+        let now = Instant::now();
+        let seen = now.checked_sub(DAY);
+        let state = state_at(
+            Presence::Unreachable,
+            Some(BatteryReading::new(88, ChargeState::Discharging)),
+            seen,
+        );
+        assert!(state.is_currently_informative(now, DAY));
+    }
+
     use super::*;
 
     /// Logitech ships a "G Pro" mouse and a "G Pro X" headset, so the

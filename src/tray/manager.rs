@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ksni::{MenuItem, ToolTip, Tray, TrayMethods};
 use tokio::sync::watch;
@@ -45,6 +45,26 @@ fn name_hash(s: &str) -> u32 {
     hash
 }
 
+/// How long a device that is not `Online` keeps its tray presence after its
+/// last reading.
+///
+/// Matches the supervisor's `DISCONNECTED_RETENTION` deliberately: the roster
+/// and the tray forget a silent device on the same schedule, so an icon never
+/// outlives the entry behind it. A day is long enough that a peripheral left
+/// off overnight is where the user left it, and short enough that a mouse
+/// unused for a week is not still claiming a slot.
+const RETAINED_ICON_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Whether a device should appear in the tray at all: not hidden by the user,
+/// and still saying something (`DeviceState::is_currently_informative`).
+///
+/// Every place that turns `TrayState` into tray output goes through this, so
+/// the icon list, the menu roster and the aggregate icon's pick can never
+/// disagree about which devices exist.
+fn tray_visible(device: &DeviceState, cfg: &Config, now: Instant) -> bool {
+    cfg.is_shown(&device.info.name) && device.is_currently_informative(now, RETAINED_ICON_MAX_AGE)
+}
+
 // ---------------------------------------------------------------------------
 // desired_keys: compute the set of icon keys from mode and shown device names
 // ---------------------------------------------------------------------------
@@ -70,11 +90,15 @@ pub fn desired_keys(mode: TrayMode, shown: &[String]) -> Vec<Option<String>> {
 ///
 /// Priority: explicit user choice (if still shown) → first connected shown
 /// device → first shown device → None.
-fn featured_name(state: &crate::app::supervisor::TrayState, cfg: &Config) -> Option<String> {
+fn featured_name(
+    state: &crate::app::supervisor::TrayState,
+    cfg: &Config,
+    now: Instant,
+) -> Option<String> {
     let shown: Vec<(&str, bool)> = state
         .devices
         .iter()
-        .filter(|d| cfg.is_shown(&d.info.name))
+        .filter(|d| tray_visible(d, cfg, now))
         .map(|d| (d.info.name.as_str(), d.presence == Presence::Online))
         .collect();
 
@@ -117,18 +141,21 @@ struct Resolved {
 /// priority, hiding a low battery behind a stale green icon. So a stale
 /// reading is classified by `classify_stale`, which looks only at the
 /// percentage.
-fn resolve_for(key: Option<&str>, state: &TrayState, cfg: &Config) -> Option<Resolved> {
+fn resolve_for(
+    key: Option<&str>,
+    state: &TrayState,
+    cfg: &Config,
+    now: Instant,
+) -> Option<Resolved> {
     let name = match key {
-        Some(name) => {
-            if cfg.is_shown(name) {
-                name.to_string()
-            } else {
-                return None;
-            }
-        }
-        None => featured_name(state, cfg)?,
+        Some(name) => name.to_string(),
+        None => featured_name(state, cfg, now)?,
     };
-    let device = state.devices.iter().find(|d| d.info.name == name)?;
+    let device = state
+        .devices
+        .iter()
+        .find(|d| d.info.name == name)
+        .filter(|d| tray_visible(d, cfg, now))?;
     let low_threshold = cfg.effective_low_threshold(&device.info.name);
     let (status, stale) = if device.presence == Presence::Online {
         (classify(device.last_reading, low_threshold), false)
@@ -164,7 +191,7 @@ impl RigbatTray {
     fn resolve(&self) -> Option<Resolved> {
         let state = self.rx.borrow();
         let cfg = self.config.borrow();
-        resolve_for(self.key.as_deref(), &state, &cfg)
+        resolve_for(self.key.as_deref(), &state, &cfg, Instant::now())
         // `state` and `cfg` (watch::Ref) are dropped here, before any await.
     }
 }
@@ -236,7 +263,7 @@ impl Tray for RigbatTray {
             let rows: Vec<(String, String, String)> = state
                 .devices
                 .iter()
-                .filter(|d| cfg.is_shown(&d.info.name))
+                .filter(|d| tray_visible(d, &cfg, now))
                 .map(|d| {
                     let prefix = if highlight.as_deref() == Some(d.info.name.as_str()) {
                         "\u{25cf} " // "● "
@@ -337,9 +364,10 @@ async fn reconcile(
     let desired: Vec<Option<String>> = {
         let state = rx.borrow();
         let cfg = config_rx.borrow();
+        let now = Instant::now();
         let mut shown: Vec<String> = Vec::new();
         for d in &state.devices {
-            if cfg.is_shown(&d.info.name) && !shown.contains(&d.info.name) {
+            if tray_visible(d, &cfg, now) && !shown.contains(&d.info.name) {
                 shown.push(d.info.name.clone());
             }
         }
@@ -424,12 +452,13 @@ pub async fn run(
 mod tests {
     use std::time::Instant;
 
-    use super::{desired_keys, featured_name, resolve_for, sanitize};
+    use super::{RETAINED_ICON_MAX_AGE, desired_keys, featured_name, resolve_for, sanitize};
     use crate::app::supervisor::TrayState;
     use crate::config::{Config, TrayMode};
     use crate::domain::{
         BatteryReading, ChargeState, DeviceInfo, DeviceKind, DeviceState, Presence, PrimaryStatus,
     };
+    use std::time::Duration;
 
     // --- sanitize -----------------------------------------------------------
 
@@ -501,6 +530,19 @@ mod tests {
     /// Builds a `TrayState` from (info, reading) pairs: `Some` reading means
     /// `Online`, `None` means never seen (`Unreachable`, nothing retained) —
     /// matching what these tests exercised before presence existed.
+    /// A device that is not `Online` but still remembers a reading taken
+    /// `age` ago — the state a sleeping Bluetooth peripheral is in, and the
+    /// one `RETAINED_ICON_MAX_AGE` puts a shelf life on.
+    fn retained(name: &str, percent: u8, age: Duration) -> DeviceState {
+        DeviceState {
+            info: make_info(name),
+            last_reading: Some(make_reading(percent)),
+            last_seen: Instant::now().checked_sub(age),
+            presence: Presence::Unreachable,
+            estimate: crate::domain::Estimate::Unknown,
+        }
+    }
+
     fn make_state(devices: Vec<(DeviceInfo, Option<BatteryReading>)>) -> TrayState {
         TrayState {
             devices: devices
@@ -534,7 +576,10 @@ mod tests {
             (make_info("keyboard"), Some(make_reading(50))),
         ]);
         let cfg = cfg_with_primary(Some("keyboard"));
-        assert_eq!(featured_name(&state, &cfg), Some("keyboard".to_string()));
+        assert_eq!(
+            featured_name(&state, &cfg, Instant::now()),
+            Some("keyboard".to_string())
+        );
     }
 
     #[test]
@@ -548,7 +593,10 @@ mod tests {
             (make_info("gamepad"), Some(make_reading(30))),
         ]);
         // "gamepad" is not shown, so falls back to first connected shown: "mouse"
-        assert_eq!(featured_name(&state, &cfg), Some("mouse".to_string()));
+        assert_eq!(
+            featured_name(&state, &cfg, Instant::now()),
+            Some("mouse".to_string())
+        );
     }
 
     #[test]
@@ -558,25 +606,60 @@ mod tests {
             (make_info("keyboard"), Some(make_reading(60))),
         ]);
         let cfg = cfg_with_primary(None);
-        assert_eq!(featured_name(&state, &cfg), Some("keyboard".to_string()));
+        assert_eq!(
+            featured_name(&state, &cfg, Instant::now()),
+            Some("keyboard".to_string())
+        );
     }
 
     #[test]
     fn featured_name_no_connected_returns_first_shown() {
+        let state = TrayState {
+            devices: vec![
+                retained("mouse", 80, Duration::from_secs(60)),
+                retained("keyboard", 40, Duration::from_secs(60)),
+            ],
+        };
+        let cfg = cfg_with_primary(None);
+        // Nothing online; falls back to the first device still worth showing.
+        assert_eq!(
+            featured_name(&state, &cfg, Instant::now()),
+            Some("mouse".to_string())
+        );
+    }
+
+    /// Devices that have never answered — a dongle enumerated while its mouse
+    /// is switched off — have nothing to feature.
+    #[test]
+    fn featured_name_ignores_devices_that_never_answered() {
         let state = make_state(vec![
             (make_info("mouse"), None),
             (make_info("keyboard"), None),
         ]);
         let cfg = cfg_with_primary(None);
-        // No connected device; falls back to first shown.
-        assert_eq!(featured_name(&state, &cfg), Some("mouse".to_string()));
+        assert_eq!(featured_name(&state, &cfg, Instant::now()), None);
+    }
+
+    /// A reading old enough to be a fact about last week is not a battery
+    /// level, and stops counting as one.
+    #[test]
+    fn featured_name_ignores_a_reading_past_its_shelf_life() {
+        let state = TrayState {
+            devices: vec![retained(
+                "mouse",
+                80,
+                RETAINED_ICON_MAX_AGE + Duration::from_secs(60),
+            )],
+        };
+        let cfg = cfg_with_primary(None);
+        assert_eq!(featured_name(&state, &cfg, Instant::now()), None);
     }
 
     #[test]
     fn featured_name_no_devices_returns_none() {
         let state = make_state(vec![]);
         let cfg = cfg_with_primary(None);
-        assert_eq!(featured_name(&state, &cfg), None);
+        assert_eq!(featured_name(&state, &cfg, Instant::now()), None);
     }
 
     #[test]
@@ -588,7 +671,7 @@ mod tests {
             (make_info("keyboard"), Some(make_reading(50))),
         ]);
         // Both present devices are hidden.
-        assert_eq!(featured_name(&state, &cfg), None);
+        assert_eq!(featured_name(&state, &cfg, Instant::now()), None);
     }
 
     // --- resolve_for ----------------------------------------------------------
@@ -597,7 +680,7 @@ mod tests {
     fn resolve_for_per_device_key_present_and_shown() {
         let state = make_state(vec![(make_info("mouse"), Some(make_reading(80)))]);
         let cfg = cfg_with_primary(None);
-        let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
+        let resolved = resolve_for(Some("mouse"), &state, &cfg, Instant::now()).unwrap();
         assert_eq!(resolved.state.info.name, "mouse");
         assert_eq!(resolved.state.last_reading, Some(make_reading(80)));
     }
@@ -607,14 +690,14 @@ mod tests {
         let mut cfg = cfg_with_primary(None);
         cfg.hidden_devices = vec!["mouse".to_string()];
         let state = make_state(vec![(make_info("mouse"), Some(make_reading(80)))]);
-        assert!(resolve_for(Some("mouse"), &state, &cfg).is_none());
+        assert!(resolve_for(Some("mouse"), &state, &cfg, Instant::now()).is_none());
     }
 
     #[test]
     fn resolve_for_per_device_key_absent_from_state_returns_none() {
         let state = make_state(vec![(make_info("keyboard"), Some(make_reading(50)))]);
         let cfg = cfg_with_primary(None);
-        assert!(resolve_for(Some("mouse"), &state, &cfg).is_none());
+        assert!(resolve_for(Some("mouse"), &state, &cfg, Instant::now()).is_none());
     }
 
     #[test]
@@ -624,7 +707,7 @@ mod tests {
             (make_info("keyboard"), Some(make_reading(50))),
         ]);
         let cfg = cfg_with_primary(Some("keyboard"));
-        let resolved = resolve_for(None, &state, &cfg).unwrap();
+        let resolved = resolve_for(None, &state, &cfg, Instant::now()).unwrap();
         assert_eq!(resolved.state.info.name, "keyboard");
     }
 
@@ -632,7 +715,7 @@ mod tests {
     fn resolve_for_aggregate_key_no_devices_returns_none() {
         let state = make_state(vec![]);
         let cfg = cfg_with_primary(None);
-        assert!(resolve_for(None, &state, &cfg).is_none());
+        assert!(resolve_for(None, &state, &cfg, Instant::now()).is_none());
     }
 
     #[test]
@@ -643,7 +726,7 @@ mod tests {
         // Global threshold (20) would already flag 15% as Low; override it down
         // so the global default alone would report Ok, isolating the override.
         cfg.low_threshold = 5;
-        let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
+        let resolved = resolve_for(Some("mouse"), &state, &cfg, Instant::now()).unwrap();
         assert!(matches!(resolved.status, PrimaryStatus::Ok { .. }));
 
         cfg.device_overrides.insert(
@@ -653,7 +736,7 @@ mod tests {
                 low_threshold: Some(20),
             },
         );
-        let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
+        let resolved = resolve_for(Some("mouse"), &state, &cfg, Instant::now()).unwrap();
         assert!(matches!(resolved.status, PrimaryStatus::Low { .. }));
     }
 
@@ -669,13 +752,17 @@ mod tests {
                 estimate: crate::domain::Estimate::Unknown,
             }],
         };
-        let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
+        let resolved = resolve_for(Some("mouse"), &state, &cfg, Instant::now()).unwrap();
         assert!(matches!(resolved.status, PrimaryStatus::Low { .. }));
         assert!(resolved.stale);
     }
 
     #[test]
-    fn resolve_for_unreachable_device_with_no_reading_reports_offline_not_stale() {
+    /// The icon this removed: a wireless dongle stays enumerated while its
+    /// mouse is off, so the device is discovered and polled and never answers.
+    /// An empty battery outline that has never meant anything is worse than no
+    /// icon — the user reported one sitting in the tray for days.
+    fn resolve_for_unreachable_device_with_no_reading_shows_nothing() {
         let cfg = cfg_with_primary(None);
         let state = TrayState {
             devices: vec![DeviceState {
@@ -686,9 +773,31 @@ mod tests {
                 estimate: crate::domain::Estimate::Unknown,
             }],
         };
-        let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
-        assert_eq!(resolved.status, PrimaryStatus::Offline);
-        assert!(!resolved.stale);
+        assert!(resolve_for(Some("mouse"), &state, &cfg, Instant::now()).is_none());
+    }
+
+    #[test]
+    fn resolve_for_keeps_a_recent_retained_reading() {
+        let cfg = cfg_with_primary(None);
+        let state = TrayState {
+            devices: vec![retained("mouse", 88, Duration::from_secs(3600))],
+        };
+        let resolved = resolve_for(Some("mouse"), &state, &cfg, Instant::now()).unwrap();
+        assert_eq!(resolved.status, PrimaryStatus::Ok { percent: 88 });
+        assert!(resolved.stale);
+    }
+
+    #[test]
+    fn resolve_for_drops_a_retained_reading_past_its_shelf_life() {
+        let cfg = cfg_with_primary(None);
+        let state = TrayState {
+            devices: vec![retained(
+                "mouse",
+                88,
+                RETAINED_ICON_MAX_AGE + Duration::from_secs(1),
+            )],
+        };
+        assert!(resolve_for(Some("mouse"), &state, &cfg, Instant::now()).is_none());
     }
 
     #[test]
@@ -705,7 +814,7 @@ mod tests {
                 estimate: crate::domain::Estimate::Unknown,
             }],
         };
-        let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
+        let resolved = resolve_for(Some("mouse"), &state, &cfg, Instant::now()).unwrap();
         assert_eq!(resolved.status, PrimaryStatus::Ok { percent: 80 });
         assert!(resolved.stale);
     }
@@ -724,7 +833,7 @@ mod tests {
                 estimate: crate::domain::Estimate::Unknown,
             }],
         };
-        let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
+        let resolved = resolve_for(Some("mouse"), &state, &cfg, Instant::now()).unwrap();
         assert_eq!(resolved.status, PrimaryStatus::Low { percent: 15 });
         assert!(resolved.stale);
     }
@@ -733,7 +842,7 @@ mod tests {
     fn resolve_for_online_device_is_never_stale() {
         let state = make_state(vec![(make_info("mouse"), Some(make_reading(80)))]);
         let cfg = cfg_with_primary(None);
-        let resolved = resolve_for(Some("mouse"), &state, &cfg).unwrap();
+        let resolved = resolve_for(Some("mouse"), &state, &cfg, Instant::now()).unwrap();
         assert!(!resolved.stale);
     }
 }

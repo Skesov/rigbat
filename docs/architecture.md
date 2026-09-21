@@ -124,6 +124,16 @@ flows out through channels.
   and above the 3:1 WCAG 2.1 SC 1.4.11 floor for graphical objects (the standard's exemption
   covers inactive _controls_, not information displays). A `Low` status never dims at all — a
   warning that has gone stale is exactly the one that must not get quieter.
+- **Shelf life**: dimming says "remembered", but a memory stops being worth a tray slot. A device
+  that is not `Online` loses its icon and its menu row once `DeviceState::is_currently_informative`
+  says no — its reading is older than `RETAINED_ICON_MAX_AGE` (24 h, matching the supervisor's
+  `DISCONNECTED_RETENTION` so an icon never outlives the roster entry behind it), or it has no
+  reading at all. The second case is the common one: a wireless dongle stays enumerated while its
+  mouse is switched off, so the device is discovered, polled, and never answers — an empty battery
+  outline that has never meant anything. Display only: the device stays in the roster, keeps being
+  polled, and reappears on its next successful reading. Every path from `TrayState` to tray output
+  goes through one predicate (`tray_visible`), so the icon list, the menu roster and the aggregate
+  icon's pick cannot disagree about which devices exist.
 - **Estimate**: on every reading the manager derives a time-remaining estimate
   (`domain::estimate`) from the device's percent-change history, refusing rather than guessing
   when the evidence is thin (coarse-bucket readings, a short window, an uneven step rate — see

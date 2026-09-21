@@ -12,7 +12,9 @@ System tray battery monitor for gaming peripherals.
 - Supports multiple devices simultaneously; the settings window lists every device ever seen —
   hide the ones you do not care about, delete the ones you no longer own
 - Keeps showing the last known charge when a device sleeps or goes out of range, drawn dimmed so
-  a remembered reading is never mistaken for a live one
+  a remembered reading is never mistaken for a live one — and drops the icon once that reading is
+  over a day old, or if the device has never answered at all, so a peripheral you have not
+  switched on for a week stops occupying the tray. It comes back the moment it answers
 - Sends desktop notifications when battery is low
 - Works with wired, wireless, and Bluetooth devices
 

@@ -9,7 +9,10 @@ bluez, steelseries, eightbitdo (via `discovery::discover_all`, re-discovered liv
 devices appear; BlueZ signals debounced, and a backend whose sweep _fails_ does not retire its
 devices — an empty result and an error are different things). Devices retain their last reading
 across drops (`Presence`: Online/Unreachable/Disconnected) and render dimmed while unreachable,
-except a low reading, which never dims. Tray: left-click menu listing device status, device-type
+except a low reading, which never dims. A device that is not online loses its tray icon once its
+reading passes `RETAINED_ICON_MAX_AGE` (24 h) or if it never produced one — an enumerated dongle
+whose mouse is switched off is not a battery level. It keeps being polled and returns on its next
+answer. Tray: left-click menu listing device status, device-type
 glyph, light/dark theme, display modes, time-remaining estimate, low-battery notifications
 (confirmed by two distinct readings), separate settings window with a device inventory table,
 per-device poll intervals/thresholds and aggregate-icon pin, config persistence. A second `rigbat tray` exits instead of
