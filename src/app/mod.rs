@@ -12,9 +12,15 @@ pub async fn poll_once(
     sources: Vec<Box<dyn BatterySource>>,
 ) -> Vec<(DeviceInfo, Option<BatteryReading>)> {
     let mut set: JoinSet<(DeviceInfo, Option<BatteryReading>)> = JoinSet::new();
+    // A panicking source loses the reading it was producing; without this map
+    // it would also lose the device, which would then be missing from the
+    // table entirely instead of reading `offline` like every other failure.
+    let mut spawned: std::collections::HashMap<tokio::task::Id, DeviceInfo> =
+        std::collections::HashMap::new();
 
     for mut s in sources {
-        set.spawn(async move {
+        let info = s.device().clone();
+        let handle = set.spawn(async move {
             let reading = match s.poll().await {
                 Ok(r) => Some(r),
                 Err(e) => {
@@ -27,12 +33,20 @@ pub async fn poll_once(
             };
             (s.device().clone(), reading)
         });
+        spawned.insert(handle.id(), info);
     }
 
     let mut rows = Vec::new();
     while let Some(result) = set.join_next().await {
-        if let Ok(row) = result {
-            rows.push(row);
+        match result {
+            Ok(row) => rows.push(row),
+            Err(e) => match spawned.get(&e.id()) {
+                Some(info) => {
+                    tracing::error!(device = %info.name, "polling task ended unexpectedly: {e}");
+                    rows.push((info.clone(), None));
+                }
+                None => tracing::error!("a polling task ended unexpectedly: {e}"),
+            },
         }
     }
 
@@ -55,6 +69,12 @@ mod tests {
         info: DeviceInfo,
     }
 
+    /// A source whose poll panics, to prove the device still reaches the table
+    /// as offline instead of disappearing from it.
+    struct PanicSource {
+        info: DeviceInfo,
+    }
+
     #[async_trait::async_trait]
     impl BatterySource for OkSource {
         fn device(&self) -> &DeviceInfo {
@@ -74,6 +94,20 @@ mod tests {
 
         async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
             anyhow::bail!("device unavailable")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BatterySource for PanicSource {
+        fn device(&self) -> &DeviceInfo {
+            &self.info
+        }
+
+        // clippy::panic has no allow-in-tests config (unlike unwrap_used/expect_used);
+        // this panic is the failure being simulated.
+        #[expect(clippy::panic)]
+        async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
+            panic!("source exploded")
         }
     }
 
@@ -101,6 +135,29 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0.name, "mouse");
         assert!(rows[0].1.is_none());
+    }
+
+    /// A panicking source used to vanish from the output: `join_next` yields
+    /// `Err` and the row was dropped, so the table was one device short with
+    /// no explanation. The doc contract is that a failure reads as offline.
+    #[tokio::test]
+    async fn panicking_source_is_reported_offline_not_dropped() {
+        let sources: Vec<Box<dyn BatterySource>> = vec![
+            Box::new(PanicSource {
+                info: device("mouse"),
+            }),
+            Box::new(OkSource {
+                info: device("keyboard"),
+                reading: reading(80),
+            }),
+        ];
+
+        let rows = poll_once(sources).await;
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0.name, "keyboard");
+        assert_eq!(rows[1].0.name, "mouse");
+        assert!(rows[1].1.is_none(), "a panicking source reads as offline");
     }
 
     #[tokio::test]

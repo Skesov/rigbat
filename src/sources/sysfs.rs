@@ -28,7 +28,16 @@ impl SysfsSource {
 
         let mut sources = Vec::new();
 
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    // The hidraw backends log the same case; a directory entry
+                    // that cannot be read is worth one line, not silence.
+                    tracing::warn!("skipping power_supply entry: {e}");
+                    continue;
+                }
+            };
             let entry_path = entry.path();
 
             let kind = std::fs::read_to_string(entry_path.join("type"))
@@ -181,7 +190,14 @@ impl BatteryBackend for SysfsBackend {
         &self,
         _ctx: &crate::discovery::Context,
     ) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
-        Ok(SysfsSource::enumerate()?
+        // The walk is `std::fs` on a sysfs tree: fast, but still blocking,
+        // and it runs on the same runtime as every source task. Off-thread for
+        // the same reason `poll` is (R35): how long a sysfs read takes is the
+        // kernel's business, not rigbat's.
+        let sources = tokio::task::spawn_blocking(SysfsSource::enumerate)
+            .await
+            .context("spawn_blocking")??;
+        Ok(sources
             .into_iter()
             .map(|s| Box::new(s) as Box<dyn BatterySource>)
             .collect())

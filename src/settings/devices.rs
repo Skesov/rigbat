@@ -233,6 +233,29 @@ fn tie_break(a: &DeviceRow, b: &DeviceRow) -> Ordering {
         ))
 }
 
+/// What the `Actions` cell offers for one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteCell {
+    /// The row exists only in this scan; the inventory has no row to delete.
+    Unavailable,
+    /// The neutral `Delete` button, which arms the confirmation and nothing else.
+    Arm,
+    /// `Confirm` / `Cancel`: this row, and only this row, is armed.
+    Confirm,
+}
+
+/// Decides which of the three states the cell is in. Extracted from the
+/// rendering so the "never delete on the first click" rule is testable: the
+/// test that used to carry that name asserted `DeleteState::Confirming(7)`
+/// equals itself and would have passed with the confirmation removed.
+pub fn delete_cell(state: DeleteState, store_id: Option<i64>) -> DeleteCell {
+    match store_id {
+        None => DeleteCell::Unavailable,
+        Some(id) if state == DeleteState::Confirming(id) => DeleteCell::Confirm,
+        Some(_) => DeleteCell::Arm,
+    }
+}
+
 /// What pressing Escape does, given what the window currently has open.
 ///
 /// Escape dismisses the most transient thing first and only closes the window
@@ -747,24 +770,53 @@ mod tests {
         assert_eq!(DeleteState::default(), DeleteState::Idle);
     }
 
+    /// The rule this replaces a tautology for: one click never deletes.
     #[test]
-    fn delete_requires_confirmation_before_removal() {
-        let mut rows = vec![row("mouse", Transport::Sysfs, None)];
+    fn first_click_only_arms_the_confirmation() {
+        assert_eq!(delete_cell(DeleteState::Idle, Some(7)), DeleteCell::Arm);
+    }
+
+    #[test]
+    fn the_armed_row_is_the_only_one_offering_confirm() {
+        assert_eq!(
+            delete_cell(DeleteState::Confirming(7), Some(7)),
+            DeleteCell::Confirm
+        );
+        assert_eq!(
+            delete_cell(DeleteState::Confirming(7), Some(8)),
+            DeleteCell::Arm,
+            "arming one row must not arm its neighbours"
+        );
+    }
+
+    /// A device the current scan found but the inventory has not persisted yet
+    /// has no row to delete.
+    #[test]
+    fn a_row_with_no_inventory_id_offers_nothing_to_delete() {
+        assert_eq!(
+            delete_cell(DeleteState::Idle, None),
+            DeleteCell::Unavailable
+        );
+        assert_eq!(
+            delete_cell(DeleteState::Confirming(7), None),
+            DeleteCell::Unavailable
+        );
+    }
+
+    /// Confirming is what removes the row, and it removes exactly one.
+    #[test]
+    fn confirming_removes_only_the_named_row() {
+        let mut rows = vec![
+            row("mouse", Transport::Sysfs, None),
+            row("keyboard", Transport::Bluetooth, None),
+        ];
         rows[0].store_id = Some(7);
+        rows[1].store_id = Some(8);
 
-        // Clicking Delete only arms confirmation; the row survives untouched.
-        let state = DeleteState::Confirming(7);
-        assert_eq!(state, DeleteState::Confirming(7));
-        assert_eq!(rows.len(), 1, "arming confirmation must not remove the row");
-
-        // Cancelling drops back to Idle, still without touching the row.
-        let cancelled = DeleteState::Idle;
-        assert_eq!(cancelled, DeleteState::Idle);
-        assert_eq!(rows.len(), 1);
-
-        // Only confirming removes it.
         remove_row(&mut rows, 7);
-        assert!(rows.is_empty());
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].device.name, "keyboard");
     }
 
     #[test]

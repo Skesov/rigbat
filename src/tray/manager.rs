@@ -251,13 +251,18 @@ impl Tray for RigbatTray {
         // Build the full-roster menu shared by both PrimaryOnly and PerDevice modes.
         // Collect all data from borrows before building menu items (borrows are sync,
         // no await here, but keeping scopes tight documents intent).
-        // Determine which device name to mark with the bullet.
-        let highlight: Option<String> = self.resolve().map(|r| r.state.info.name);
         let now = Instant::now();
 
         let rows = {
             let state = self.rx.borrow();
             let cfg = self.config.borrow();
+
+            // The bullet and the rows come from one pair of borrows. Resolving
+            // the highlight separately re-borrowed the channels, so a state
+            // change landing between the two could bullet a device the rows
+            // below no longer described.
+            let highlight: Option<String> =
+                resolve_for(self.key.as_deref(), &state, &cfg, now).map(|r| r.state.info.name);
 
             // Collect (dev_name, label, icon_name) for each shown device.
             let rows: Vec<(String, String, String)> = state

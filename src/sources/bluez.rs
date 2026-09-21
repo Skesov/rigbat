@@ -113,14 +113,16 @@ async fn discover_inner(ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySour
             .unwrap_or("")
             .replace('_', ":");
 
-        let display_name = device_name(alias.as_deref(), name_prop.as_deref(), &addr_fallback);
-
-        // Locator is the bare MAC for debugging (greppable in bluetoothctl); strip the
-        // `dev:` prefix left over from the object-path component `dev_XX_XX_…`.
+        // The bare MAC, greppable in bluetoothctl: strip the `dev:` prefix left
+        // over from the object-path component `dev_XX_XX_…`. It is both the
+        // locator and the name fallback — a device with neither Alias nor Name
+        // used to read as `dev:AA:BB:…` in the tray and the device table.
         let locator = addr_fallback
             .strip_prefix("dev:")
             .unwrap_or(&addr_fallback)
             .to_owned();
+
+        let display_name = device_name(alias.as_deref(), name_prop.as_deref(), &locator);
 
         let info = DeviceInfo {
             kind: guess_kind(&display_name),
@@ -273,8 +275,12 @@ async fn watch_events_inner(refresh: RefreshSignal, conn: zbus::Connection) -> a
                 }
             } => {
                 deferred = None;
-                debouncer.should_fire(Instant::now());
-                refresh.trigger();
+                // Only fire if the window really has elapsed. A signal landing
+                // right at the boundary takes the immediate path, and this arm
+                // then fired a second time for the same burst.
+                if debouncer.should_fire(Instant::now()) {
+                    refresh.trigger();
+                }
             }
             item = subs.interfaces_added.next() => {
                 if item.is_none() {
@@ -346,6 +352,8 @@ fn fire_or_defer(
 ) {
     let now = Instant::now();
     if debouncer.should_fire(now) {
+        // Firing now covers whatever the pending sleep was deferring.
+        *deferred = None;
         refresh.trigger();
     } else if deferred.is_none()
         && let Some(deadline) = debouncer.deadline()

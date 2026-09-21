@@ -85,7 +85,13 @@ impl BatteryBackend for EightBitDoBackend {
         &self,
         _ctx: &crate::discovery::Context,
     ) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
-        discover_inner()
+        // The walk is `std::fs` on a sysfs tree: fast, but still blocking,
+        // and it runs on the same runtime as every source task. Off-thread for
+        // the same reason `poll` is (R35): how long a sysfs read takes is the
+        // kernel's business, not rigbat's.
+        tokio::task::spawn_blocking(discover_inner)
+            .await
+            .context("spawn_blocking")?
     }
 }
 

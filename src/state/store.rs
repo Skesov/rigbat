@@ -291,9 +291,13 @@ impl Store for SqliteStore {
                 // failure mode than one that briefly lags a backward step.
                 // `readings.at` is not guarded the same way — see
                 // `record_reading`.
+                // `kind` is written on every sweep, not only on insert: a
+                // device classified wrongly once (or reclassified by a later
+                // `guess_kind`) would otherwise keep the old type in the
+                // inventory forever, since nothing else updates the row.
                 tx.execute(
-                    "UPDATE devices SET last_seen = MAX(last_seen, ?1) WHERE id = ?2",
-                    params![now, row_id],
+                    "UPDATE devices SET last_seen = MAX(last_seen, ?1), kind = ?2 WHERE id = ?3",
+                    params![now, kind.as_str(), row_id],
                 )
                 .context("updating last_seen")?;
                 Seen::Existing
@@ -521,6 +525,27 @@ mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(store.list_devices().unwrap().len(), 1);
+
+        cleanup(&path);
+    }
+
+    /// The kind comes from `guess_kind`, which improves over time; a row
+    /// classified wrongly once must not keep the old type forever.
+    #[test]
+    fn record_seen_adopts_a_corrected_kind() {
+        let path = scratch_db_path("kind-update");
+        let store = SqliteStore::open(&path).unwrap();
+        let id = id("8BitDo Ultimate 2", Transport::Hidraw, Some("350857A671"));
+
+        store.record_seen(&id, DeviceKind::Other, 1000).unwrap();
+        store
+            .record_seen(&id, DeviceKind::Controller, 2000)
+            .unwrap();
+
+        let devices = store.list_devices().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].kind, DeviceKind::Controller);
+        assert_eq!(devices[0].first_seen, 1000);
 
         cleanup(&path);
     }

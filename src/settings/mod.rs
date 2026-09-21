@@ -384,10 +384,15 @@ impl SettingsApp {
     /// as the on-disk config has it — the two controls are rendered
     /// separately, so neither may write the other's field from a snapshot.
     fn save_threshold_override(&mut self, ui: &egui::Ui, name: &str, threshold: Option<u8>) {
-        let default_threshold = self.config.low_threshold;
-        let default_interval = self.config.poll_interval_secs;
         let name = name.to_string();
         self.persist(ui, move |target| {
+            // Defaults come from `target`, the config being written, not from
+            // the window's snapshot: `apply_device_override` drops an override
+            // equal to the current default, and a second settings window (there
+            // is no single-instance guard) can have changed that default since
+            // this one opened.
+            let default_threshold = target.low_threshold;
+            let default_interval = target.poll_interval_secs;
             let interval = target
                 .device_overrides
                 .get(&name)
@@ -405,10 +410,10 @@ impl SettingsApp {
 
     /// The interval half of `save_threshold_override`.
     fn save_interval_override(&mut self, ui: &egui::Ui, name: &str, interval: Option<u64>) {
-        let default_threshold = self.config.low_threshold;
-        let default_interval = self.config.poll_interval_secs;
         let name = name.to_string();
         self.persist(ui, move |target| {
+            let default_threshold = target.low_threshold;
+            let default_interval = target.poll_interval_secs;
             let threshold = target
                 .device_overrides
                 .get(&name)
@@ -621,22 +626,27 @@ impl SettingsApp {
     /// Only the armed `Confirm` is tinted: a red `Delete` on every row turns
     /// the column into a wall of warnings for an action nobody asked for yet.
     fn render_delete_cell(&mut self, ui: &mut egui::Ui, row: &DeviceRow) {
-        let Some(store_id) = row.store_id else {
-            ui.label("—");
-            return;
-        };
-
-        if self.delete_state == DeleteState::Confirming(store_id) {
-            ui.horizontal(|ui| {
-                if destructive_small_button(ui, "Confirm").clicked() {
-                    self.delete_device(ui, store_id, &row.device.name);
+        match devices::delete_cell(self.delete_state, row.store_id) {
+            devices::DeleteCell::Unavailable => {
+                ui.label("—");
+            }
+            devices::DeleteCell::Confirm => {
+                let Some(store_id) = row.store_id else { return };
+                ui.horizontal(|ui| {
+                    if destructive_small_button(ui, "Confirm").clicked() {
+                        self.delete_device(ui, store_id, &row.device.name);
+                    }
+                    if ui.small_button("Cancel").clicked() {
+                        self.delete_state = DeleteState::Idle;
+                    }
+                });
+            }
+            devices::DeleteCell::Arm => {
+                let Some(store_id) = row.store_id else { return };
+                if neutral_small_button(ui, "Delete").clicked() {
+                    self.delete_state = DeleteState::Confirming(store_id);
                 }
-                if ui.small_button("Cancel").clicked() {
-                    self.delete_state = DeleteState::Idle;
-                }
-            });
-        } else if neutral_small_button(ui, "Delete").clicked() {
-            self.delete_state = DeleteState::Confirming(store_id);
+            }
         }
     }
 
@@ -816,9 +826,15 @@ impl SettingsApp {
     fn render_general_tab(&mut self, ui: &mut egui::Ui) {
         // ── Tray display ──────────────────────────────────────────────────────
         Self::section_header(ui, "Tray display");
+        // Bound to a local copy, not to `self.config`: `persist` adopts the
+        // saved config only when the write succeeds, so a failed save leaves
+        // `self.config` as it was and the next frame redraws the real value.
+        // Writing through `&mut self.config` instead left the window showing a
+        // setting that is not on disk, with nothing to correct it.
+        let mut display_mode = self.config.display_mode;
         for mode in DisplayMode::ALL {
             if ui
-                .radio_value(&mut self.config.display_mode, mode, mode.label())
+                .radio_value(&mut display_mode, mode, mode.label())
                 .changed()
             {
                 // Persist immediately; the tray watches the file and re-renders.
@@ -903,14 +919,12 @@ impl SettingsApp {
         // ── Notifications ─────────────────────────────────────────────────────
         ui.add_space(16.0);
         Self::section_header(ui, "Notifications");
+        // A local copy for the same reason as `display_mode` above.
+        let mut notifications_enabled = self.config.notifications_enabled;
         if ui
-            .checkbox(
-                &mut self.config.notifications_enabled,
-                "Low battery notifications",
-            )
+            .checkbox(&mut notifications_enabled, "Low battery notifications")
             .changed()
         {
-            let notifications_enabled = self.config.notifications_enabled;
             self.persist(ui, move |target| {
                 target.notifications_enabled = notifications_enabled;
             });

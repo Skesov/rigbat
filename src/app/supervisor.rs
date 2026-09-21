@@ -460,6 +460,38 @@ impl DeviceRegistry {
             }
         }
 
+        // A task whose backend's sweep failed is not in `fresh_ids`, so the
+        // crash check above never looked at it. Its device is not retired
+        // either (an error is not an empty result), which left a panicked task
+        // frozen — last reading intact, presence Online — for as long as the
+        // backend kept failing. Respawning needs a source object only a
+        // successful sweep can hand over, so the honest move is to demote the
+        // entry and drop the dead handle; the next sweep that succeeds
+        // respawns it through the path above.
+        let crashed: Vec<DeviceId> = self
+            .tasks
+            .iter()
+            .filter(|(id, handle)| !fresh_ids.contains(id) && handle.is_finished())
+            .filter(|(id, _)| {
+                self.entries
+                    .get(*id)
+                    .is_some_and(|e| !succeeded_backends.contains(&e.backend))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in crashed {
+            self.tasks.remove(&id);
+            if let Some(entry) = self.entries.get_mut(&id) {
+                tracing::error!(
+                    device = %entry.info.name,
+                    "polling task ended unexpectedly while its backend was failing; \
+                     marking unreachable until discovery can respawn it"
+                );
+                entry.presence = Presence::Unreachable;
+                entry.consecutive_failures = OFFLINE_AFTER_FAILURES;
+            }
+        }
+
         let vanished: Vec<DeviceId> = self
             .tasks
             .keys()
@@ -481,6 +513,11 @@ impl DeviceRegistry {
             }
             if let Some(entry) = self.entries.get_mut(&id) {
                 entry.presence = Presence::Disconnected;
+                // Reset the debounce counter: the failures that preceded the
+                // disconnect belong to the connection that ended. Left as they
+                // were, one failed poll after it reconnects re-trips
+                // `Unreachable` instead of getting the usual grace.
+                entry.consecutive_failures = 0;
                 tracing::info!(device = %entry.info.name, "device vanished");
             }
         }
@@ -1411,7 +1448,7 @@ mod tests {
 
         // clippy::panic has no allow-in-tests config (unlike unwrap_used/expect_used);
         // this panic simulates a crashing source task for the respawn test below.
-        #[allow(clippy::panic)]
+        #[expect(clippy::panic)]
         async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
             panic!("simulated source panic");
         }

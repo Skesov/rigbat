@@ -87,7 +87,12 @@ pub fn rename_device(cfg: &mut Config, from: &str, to: &str) -> bool {
             changed = true;
         }
     }
-    cfg.hidden_devices.dedup();
+    // Keep the first entry for `to` and drop any later one. `Vec::dedup` is
+    // wrong here: it only collapses *adjacent* duplicates, so renaming with
+    // `["old", "other", "new"]` left `["new", "other", "new"]`.
+    let mut seen_to = false;
+    cfg.hidden_devices
+        .retain(|entry| entry != to || !std::mem::replace(&mut seen_to, true));
 
     if let Some(settings) = cfg.device_overrides.remove(from) {
         cfg.device_overrides.insert(to.to_string(), settings);
@@ -382,6 +387,22 @@ mod tests {
                 .get("new")
                 .and_then(|d| d.low_threshold),
             Some(35)
+        );
+    }
+
+    /// `Vec::dedup` collapses only adjacent duplicates, so a hidden list where
+    /// the old and new names are separated by another device kept both.
+    #[test]
+    fn rename_device_does_not_duplicate_a_non_adjacent_hidden_entry() {
+        let mut cfg = Config {
+            hidden_devices: vec!["old".to_string(), "other".to_string(), "new".to_string()],
+            ..Config::default()
+        };
+
+        assert!(rename_device(&mut cfg, "old", "new"));
+        assert_eq!(
+            cfg.hidden_devices,
+            vec!["new".to_string(), "other".to_string()]
         );
     }
 

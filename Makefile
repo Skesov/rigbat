@@ -26,7 +26,7 @@ ICON_DEST  := $(XDG_DATA)/icons/hicolor/scalable/apps/rigbat.svg
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build run test test-live install udev-install service enable disable restart status logs uninstall
+.PHONY: help build run test test-live install udev-install service enable disable restart status logs uninstall fmt lint gates
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -40,6 +40,15 @@ run: ## Run the tray in the foreground (Ctrl-C to stop)
 
 test: ## Run the unit tests (the gate suite's test step)
 	cargo test
+
+fmt: ## Format the sources (the gate suite's format step)
+	cargo fmt
+
+lint: ## Deny-warnings clippy over every target (the gate suite's lint step)
+	cargo clippy --all-targets -- -D warnings
+
+gates: fmt lint test ## Run every gate that must pass before a commit
+	@echo "All gates passed."
 
 test-live: ## Run the #[ignore]d tests that need a live session (D-Bus, a writable temp dir)
 	cargo test -- --ignored
