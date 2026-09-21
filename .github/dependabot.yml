@@ -1,0 +1,41 @@
+version: 2
+
+updates:
+  # Rust dependencies. Grouped so a quiet week produces one pull request
+  # instead of eight: every gate runs per pull request, and reviewing eight
+  # one-line bumps costs more attention than it protects.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    # `chore(deps)` is a conventional-commit type release-please keeps out of
+    # the changelog — a dependency bump is not a user-facing change. A bump
+    # that fixes something a user would notice gets a hand-written `fix:`
+    # commit instead.
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      patch-and-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    # Major bumps arrive as their own pull requests: they need a human to read
+    # the changelog, and rigbat pins egui_extras to eframe's exact egui build.
+    ignore:
+      - dependency-name: "egui_extras"
+        update-types: ["version-update:semver-major"]
+
+  # The actions used by ci.yml and release.yml. Pinned action versions rot the
+  # same way crate versions do, and a stale checkout or toolchain action is how
+  # a green pipeline stops testing what it claims to.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns: ["*"]

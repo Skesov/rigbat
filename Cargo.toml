@@ -6,6 +6,13 @@ rust-version = "1.96"
 description = "System tray battery monitor for gaming peripherals"
 license = "MIT"
 repository = "https://github.com/Skesov/rigbat"
+homepage = "https://github.com/Skesov/rigbat"
+readme = "README.md"
+keywords = ["battery", "tray", "peripherals", "bluetooth", "hid"]
+categories = ["command-line-utilities", "os::linux-apis", "gui"]
+# The packaged crate is what `cargo install rigbat` builds from; CI
+# configuration and agent instructions are not part of that.
+exclude = [".github/", "CLAUDE.md", "release-please-config.json", ".release-please-manifest.json"]
 
 [dependencies]
 async-trait = "0.1"
