@@ -99,3 +99,20 @@ make test-live         # cargo test -- --ignored
 
 See [docs/adding-a-device.md](docs/adding-a-device.md) for how to discover where a
 device's battery data lives and how to reverse-engineer HID protocols.
+
+## License of contributions
+
+rigbat is dual-licensed under [Apache-2.0](LICENSE-APACHE) and [MIT](LICENSE-MIT), and a
+contribution arrives under both. In the words the Rust ecosystem uses:
+
+> Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in
+> the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without
+> any additional terms or conditions.
+
+Two licences rather than one because they cover different things: MIT is short and permissive,
+Apache-2.0 adds an explicit patent grant from each contributor for their own contribution. Nothing
+here asks you to sign anything, and you keep the copyright on what you write.
+
+Only submit code you have the right to submit. Code copied from another project carries that
+project's licence with it, and code written for an employer usually belongs to the employer — in
+either case it cannot simply be pasted in here.

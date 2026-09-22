@@ -80,7 +80,7 @@ jobs:
           cp "target/${TARGET}/release/rigbat" "${staging}/"
           strip "${staging}/rigbat" || true
           cp README.md CHANGELOG.md "${staging}/"
-          if [ -f LICENSE ]; then cp LICENSE "${staging}/"; fi
+          cp LICENSE-MIT LICENSE-APACHE "${staging}/"
           cp -r packaging "${staging}/"
           tar czf "${name}.tar.gz" -C "$(dirname "${staging}")" "${name}"
           sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"

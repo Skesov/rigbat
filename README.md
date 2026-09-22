@@ -257,5 +257,14 @@ RIGBAT_LOG=rigbat::sources=trace rigbat tray   # one module only
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Use it, change it, ship it in something you sell; keep the
-copyright notice, and understand there is no warranty.
+Dual-licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Use it, change it, ship it in something you sell; keep the notice, and understand
+there is no warranty. Two licences because that is the Rust ecosystem's convention: MIT is short,
+Apache-2.0 carries an explicit patent grant that some legal departments require.
+
+Unless you state otherwise, any contribution you intentionally submit for inclusion in this work,
+as defined in the Apache-2.0 license, is dual-licensed as above, with no additional terms.
