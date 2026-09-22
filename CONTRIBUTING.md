@@ -95,6 +95,19 @@ all three; run them yourself on a desktop machine with:
 make test-live         # cargo test -- --ignored
 ```
 
+## Adding a translation
+
+The tray menu, the settings window and the low-battery notification read their text from
+Fluent catalogues in `i18n/<lang>/rigbat.ftl`; the CLI stays English.
+
+1. Copy `i18n/en/rigbat.ftl` to `i18n/<lang>/rigbat.ftl` and translate the values. Keep message
+   ids and `{ $placeholders }` unchanged.
+2. Add the language to `Lang` in `src/i18n/mod.rs` (`ALL`, `tag`, `native_name`, `from_tag`,
+   `id`, `loader`).
+3. Run `cargo test`. `i18n::tests` fails on a missing or extra message, and
+   `settings::tests::device_table_text_is_not_clipped_in_any_language` fails on a column header
+   too wide for its column — shorten the text rather than widening the column.
+
 ## Figuring out the protocol
 
 See [docs/adding-a-device.md](docs/adding-a-device.md) for how to discover where a

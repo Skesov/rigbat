@@ -13,6 +13,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::i18n::{Lang, fl, loader};
+
 /// Below this span, two transitions cannot be told apart from a coincidence
 /// of poll timing — the estimate needs to see the trend hold for a while.
 const MIN_WINDOW: Duration = Duration::from_secs(30 * 60);
@@ -130,14 +132,16 @@ pub fn round_coarse(d: Duration) -> Duration {
     }
 }
 
-/// Formats a coarsely-rounded duration as `~2h` or `~45m`.
-pub fn format_coarse(d: Duration) -> String {
-    let rounded = round_coarse(d);
-    let secs = rounded.as_secs();
+/// Formats a coarsely-rounded duration as `~2h` or `~45m` (`~2 ч`, `~45 мин`).
+pub fn format_coarse(d: Duration, lang: Lang) -> String {
+    let l = loader(lang);
+    let secs = round_coarse(d).as_secs();
     if secs < 3600 {
-        format!("~{}m", secs / 60)
+        let count = secs / 60;
+        fl!(l, "estimate-minutes", count = count)
     } else {
-        format!("~{}h", secs / 3600)
+        let count = secs / 3600;
+        fl!(l, "estimate-hours", count = count)
     }
 }
 
@@ -256,14 +260,27 @@ mod tests {
 
     #[test]
     fn round_coarse_boundaries() {
-        assert_eq!(format_coarse(Duration::from_secs(59 * 60)), "~1h");
-        assert_eq!(format_coarse(Duration::from_secs(61 * 60)), "~1h");
-        assert_eq!(format_coarse(Duration::from_secs(25 * 3600)), "~25h");
+        assert_eq!(format_coarse(Duration::from_secs(59 * 60), Lang::En), "~1h");
+        assert_eq!(format_coarse(Duration::from_secs(61 * 60), Lang::En), "~1h");
+        assert_eq!(
+            format_coarse(Duration::from_secs(25 * 3600), Lang::En),
+            "~25h"
+        );
     }
 
     #[test]
     fn round_coarse_under_an_hour_rounds_to_nearest_quarter() {
-        assert_eq!(format_coarse(Duration::from_secs(5 * 60)), "~15m");
-        assert_eq!(format_coarse(Duration::from_secs(44 * 60)), "~45m");
+        assert_eq!(format_coarse(Duration::from_secs(5 * 60), Lang::En), "~15m");
+        assert_eq!(
+            format_coarse(Duration::from_secs(44 * 60), Lang::En),
+            "~45m"
+        );
+    }
+
+    #[test]
+    fn format_coarse_in_russian() {
+        let ru = |d| format_coarse(d, Lang::Ru);
+        assert_eq!(ru(Duration::from_secs(44 * 60)), "~45 мин");
+        assert_eq!(ru(Duration::from_secs(25 * 3600)), "~25 ч");
     }
 }

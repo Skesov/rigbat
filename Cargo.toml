@@ -48,6 +48,15 @@ eframe = { version = "0.34.3", default-features = false, features = [
 egui_extras = { version = "=0.34.3", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+# UI translations (R60): embedded Fluent catalogues from i18n/.
+i18n-embed = { version = "0.16", default-features = false, features = ["fluent-system", "rust-embed"] }
+i18n-embed-fl = "0.10"
+rust-embed = "8"
+unic-langid = { version = "0.9", features = ["macros"] }
+
+[dev-dependencies]
+# Catalogue syntax check in i18n::tests.
+fluent-syntax = "0.12"
 
 [lints.rust]
 unsafe_code = "forbid"

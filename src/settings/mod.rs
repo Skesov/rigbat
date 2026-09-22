@@ -12,6 +12,7 @@ use egui_extras::{Column, Size, StripBuilder, TableBuilder};
 use crate::autostart;
 use crate::config::{self, Config, DeviceSettings, DisplayMode, TrayMode};
 use crate::domain::{BatteryReading, DeviceInfo, Presence};
+use crate::i18n::{self, Lang, fl, loader};
 use crate::state;
 use devices::{DeleteState, DeviceRow, SortColumn, SortState};
 
@@ -268,11 +269,12 @@ impl SettingsApp {
     /// difference is visible in this window — so it gets the same name.
     fn render_refresh_button(&mut self, ui: &mut egui::Ui) {
         let egui_ctx = ui.ctx().clone();
+        let l = loader(self.config.lang());
         ui.add_enabled_ui(!self.scanning, |ui| {
             let label = if self.scanning {
-                "Refreshing…"
+                fl!(l, "button-refreshing")
             } else {
-                "Refresh"
+                fl!(l, "button-refresh")
             };
             if ui.button(label).clicked() {
                 self.spawn_scan(egui_ctx.clone());
@@ -304,9 +306,10 @@ impl SettingsApp {
     /// from the section whose behaviour it changes without duplicating the
     /// control.
     fn render_primary_control(&mut self, ui: &mut egui::Ui, name: &str) {
+        let l = loader(self.config.lang());
         let mut is_primary = self.config.primary_device.as_deref() == Some(name);
         if ui
-            .checkbox(&mut is_primary, "Use for the single tray icon")
+            .checkbox(&mut is_primary, fl!(l, "detail-use-for-single-icon"))
             .changed()
         {
             let name = name.to_string();
@@ -315,9 +318,7 @@ impl SettingsApp {
             });
         }
         if self.config.tray_mode == TrayMode::PerDevice {
-            ui.label(
-                egui::RichText::new("Applies when the tray shows one icon for all devices.").weak(),
-            );
+            ui.label(egui::RichText::new(fl!(l, "detail-single-icon-hint")).weak());
         }
     }
 
@@ -336,10 +337,11 @@ impl SettingsApp {
             .and_then(|d| d.low_threshold)
             .unwrap_or(default_threshold);
 
+        let l = loader(self.config.lang());
         let label = if on {
-            "Override low battery threshold".to_string()
+            fl!(l, "detail-override-threshold")
         } else {
-            format!("Use default ({default_threshold}%)")
+            fl!(l, "detail-default-threshold", percent = default_threshold)
         };
         let mut save = ui.checkbox(&mut on, label).changed();
         if on {
@@ -364,14 +366,18 @@ impl SettingsApp {
             .and_then(|d| d.poll_interval_secs)
             .unwrap_or(default_interval);
 
+        let l = loader(self.config.lang());
         let label = if on {
-            "Override poll interval".to_string()
+            fl!(l, "detail-override-interval")
         } else {
-            format!("Use default ({default_interval} s)")
+            fl!(l, "detail-default-interval", secs = default_interval)
         };
         let mut save = ui.checkbox(&mut on, label).changed();
         if on {
-            let resp = ui.add(egui::Slider::new(&mut value, POLL_INTERVAL_RANGE).suffix(" s"));
+            let resp = ui.add(
+                egui::Slider::new(&mut value, POLL_INTERVAL_RANGE)
+                    .suffix(fl!(l, "unit-seconds-suffix")),
+            );
             save |= resp.drag_stopped() || resp.lost_focus();
         }
 
@@ -436,10 +442,12 @@ impl SettingsApp {
     /// inventory remembers but the current scan did not find must still
     /// show up here.
     fn render_devices_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.config.lang();
+        let l = loader(lang);
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.device_search)
-                    .hint_text("Search devices…")
+                    .hint_text(fl!(l, "device-search-hint"))
                     .desired_width(220.0),
             );
             self.render_refresh_button(ui);
@@ -449,16 +457,16 @@ impl SettingsApp {
         let filtered = devices::filter_rows(&self.device_rows, &self.device_search);
         if filtered.is_empty() {
             let message = if self.device_rows.is_empty() {
-                "No devices recorded yet. Connect a device, then press Refresh."
+                fl!(l, "devices-empty")
             } else {
-                "No devices match your search."
+                fl!(l, "devices-no-match")
             };
             ui.label(egui::RichText::new(message).weak());
             return;
         }
 
         let mut rows = filtered;
-        devices::sort_rows(&mut rows, self.device_sort);
+        devices::sort_rows(&mut rows, self.device_sort, lang);
         let now = state::now_unix();
 
         // The detail band claims no height at all while nothing is selected,
@@ -482,6 +490,7 @@ impl SettingsApp {
     /// a virtualised body (`TableBody::rows` — the inventory grows without
     /// bound, so only visible rows are built), resizable columns.
     fn render_device_table(&mut self, ui: &mut egui::Ui, rows: &[DeviceRow], now: i64) {
+        let l = loader(self.config.lang());
         let sort = self.device_sort;
         let mut clicked_sort: Option<SortColumn> = None;
 
@@ -500,22 +509,22 @@ impl SettingsApp {
             .column(Column::exact(TOGGLE_ACTIONS_GAP_WIDTH).resizable(false))
             .column(Column::initial(76.0).at_least(70.0).resizable(false))
             .header(TABLE_HEADER_HEIGHT, |mut header| {
-                let columns: [(&str, Option<SortColumn>); 10] = [
-                    ("Name", Some(SortColumn::Name)),
-                    ("Type", Some(SortColumn::Type)),
-                    ("Connection", Some(SortColumn::Transport)),
-                    ("Charge", Some(SortColumn::Charge)),
-                    ("Status", Some(SortColumn::Presence)),
-                    ("First seen", Some(SortColumn::FirstSeen)),
-                    ("Last seen", Some(SortColumn::LastSeen)),
-                    ("Tray icon", None),
-                    ("", None),
-                    ("Actions", None),
+                let columns: [(String, Option<SortColumn>); 10] = [
+                    (fl!(l, "col-name"), Some(SortColumn::Name)),
+                    (fl!(l, "col-type"), Some(SortColumn::Type)),
+                    (fl!(l, "col-connection"), Some(SortColumn::Transport)),
+                    (fl!(l, "col-charge"), Some(SortColumn::Charge)),
+                    (fl!(l, "col-status"), Some(SortColumn::Presence)),
+                    (fl!(l, "col-first-seen"), Some(SortColumn::FirstSeen)),
+                    (fl!(l, "col-last-seen"), Some(SortColumn::LastSeen)),
+                    (fl!(l, "col-tray-icon"), None),
+                    (String::new(), None),
+                    (fl!(l, "col-actions"), None),
                 ];
                 for (label, sort_column) in columns {
                     header.col(|ui| match sort_column {
                         Some(column) => {
-                            if ui.button(header_label(label, column, sort)).clicked() {
+                            if ui.button(header_label(&label, column, sort)).clicked() {
                                 clicked_sort = Some(column);
                             }
                         }
@@ -547,6 +556,8 @@ impl SettingsApp {
         row: &DeviceRow,
         now: i64,
     ) {
+        let lang = self.config.lang();
+        let l = loader(lang);
         table_row.col(|ui| {
             let is_selected = self.selected_device.as_deref() == Some(row.device.name.as_str());
             // An empty selectable button covering the cell carries the row's
@@ -581,25 +592,25 @@ impl SettingsApp {
             }
         });
         table_row.col(|ui| {
-            ui.label(row.kind.as_str());
+            ui.label(row.kind.label(lang));
         });
         table_row.col(|ui| {
             ui.label(row.device.transport.as_str());
         });
         table_row.col(|ui| {
-            ui.label(devices::charge_cell_text(row.charge));
+            ui.label(devices::charge_cell_text(row.charge, lang));
         });
         table_row.col(|ui| {
             let (label, weak) = match row.presence {
-                Presence::Online => ("Online", false),
-                Presence::Unreachable => ("Unreachable", false),
-                Presence::Disconnected => ("Disconnected", true),
+                Presence::Online => (fl!(l, "presence-online"), false),
+                Presence::Unreachable => (fl!(l, "presence-unreachable"), false),
+                Presence::Disconnected => (fl!(l, "presence-disconnected"), true),
             };
             let text = egui::RichText::new(label);
             ui.label(if weak { text.weak() } else { text });
         });
-        table_row.col(|ui| render_seen_cell(ui, row.first_seen, now));
-        table_row.col(|ui| render_seen_cell(ui, row.last_seen, now));
+        table_row.col(|ui| render_seen_cell(ui, row.first_seen, now, lang));
+        table_row.col(|ui| render_seen_cell(ui, row.last_seen, now, lang));
         table_row.col(|ui| {
             let mut shown = self.config.is_shown(&row.device.name);
             if ui.checkbox(&mut shown, "").changed() {
@@ -618,7 +629,7 @@ impl SettingsApp {
     }
 
     /// Delete needs a deliberate second click: the first arms
-    /// `self.delete_state` and swaps the cell to Confirm/Cancel in place,
+    /// `self.delete_state` and swaps the cell to Yes/No in place,
     /// per T35 ("do not delete on first click"). A row the scan discovered
     /// but the inventory has not persisted yet (`store_id: None`) has
     /// nothing to delete.
@@ -626,6 +637,7 @@ impl SettingsApp {
     /// Only the armed `Confirm` is tinted: a red `Delete` on every row turns
     /// the column into a wall of warnings for an action nobody asked for yet.
     fn render_delete_cell(&mut self, ui: &mut egui::Ui, row: &DeviceRow) {
+        let l = loader(self.config.lang());
         match devices::delete_cell(self.delete_state, row.store_id) {
             devices::DeleteCell::Unavailable => {
                 ui.label("—");
@@ -633,17 +645,17 @@ impl SettingsApp {
             devices::DeleteCell::Confirm => {
                 let Some(store_id) = row.store_id else { return };
                 ui.horizontal(|ui| {
-                    if destructive_small_button(ui, "Confirm").clicked() {
+                    if destructive_small_button(ui, &fl!(l, "button-confirm")).clicked() {
                         self.delete_device(ui, store_id, &row.device.name);
                     }
-                    if ui.small_button("Cancel").clicked() {
+                    if ui.small_button(fl!(l, "button-cancel")).clicked() {
                         self.delete_state = DeleteState::Idle;
                     }
                 });
             }
             devices::DeleteCell::Arm => {
                 let Some(store_id) = row.store_id else { return };
-                if neutral_small_button(ui, "Delete").clicked() {
+                if neutral_small_button(ui, &fl!(l, "button-delete")).clicked() {
                     self.delete_state = DeleteState::Confirming(store_id);
                 }
             }
@@ -759,10 +771,10 @@ fn neutral_small_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 /// UTC date as a hover tooltip (judgement call, not GNOME-sourced — see
 /// T35's spec). A missing timestamp (a discovered-but-not-yet-recorded
 /// device) renders as a plain dash.
-fn render_seen_cell(ui: &mut egui::Ui, at: Option<i64>, now: i64) {
+fn render_seen_cell(ui: &mut egui::Ui, at: Option<i64>, now: i64, lang: Lang) {
     match at {
         Some(at) => {
-            let relative = devices::relative_label(now, at);
+            let relative = devices::relative_label(now, at, lang);
             let absolute = devices::absolute_date_label(at);
             ui.label(relative).on_hover_text(absolute);
         }
@@ -813,8 +825,12 @@ impl SettingsApp {
     /// Hand-rolled tab bar: `SelectableLabel`s bound to `Tab`, not
     /// `egui_dock` (see `Tab`'s doc comment for why).
     fn render_tab_bar(&mut self, ui: &mut egui::Ui) {
+        let l = loader(self.config.lang());
         ui.horizontal(|ui| {
-            for (tab, label) in [(Tab::General, "General"), (Tab::Devices, "Devices")] {
+            for (tab, label) in [
+                (Tab::General, fl!(l, "tab-general")),
+                (Tab::Devices, fl!(l, "tab-devices")),
+            ] {
                 if ui.selectable_label(self.tab == tab, label).clicked() {
                     self.tab = tab;
                 }
@@ -824,8 +840,10 @@ impl SettingsApp {
     }
 
     fn render_general_tab(&mut self, ui: &mut egui::Ui) {
+        let lang = self.config.lang();
+        let l = loader(lang);
         // ── Tray display ──────────────────────────────────────────────────────
-        Self::section_header(ui, "Tray display");
+        Self::section_header(ui, &fl!(l, "section-tray-display"));
         // Bound to a local copy, not to `self.config`: `persist` adopts the
         // saved config only when the write succeeds, so a failed save leaves
         // `self.config` as it was and the next frame redraws the real value.
@@ -834,7 +852,7 @@ impl SettingsApp {
         let mut display_mode = self.config.display_mode;
         for mode in DisplayMode::ALL {
             if ui
-                .radio_value(&mut display_mode, mode, mode.label())
+                .radio_value(&mut display_mode, mode, mode.label(lang))
                 .changed()
             {
                 // Persist immediately; the tray watches the file and re-renders.
@@ -845,7 +863,7 @@ impl SettingsApp {
         ui.add_space(8.0);
         let mut per_device = self.config.tray_mode == TrayMode::PerDevice;
         if ui
-            .checkbox(&mut per_device, "Show one icon per device")
+            .checkbox(&mut per_device, fl!(l, "tray-per-device"))
             .changed()
         {
             let tray_mode = if per_device {
@@ -857,9 +875,9 @@ impl SettingsApp {
         }
 
         let hint = if per_device {
-            "Choose which devices get an icon on the Devices tab.".to_string()
+            fl!(l, "tray-per-device-hint")
         } else {
-            aggregate_icon_hint(self.config.primary_device.as_deref())
+            aggregate_icon_hint(self.config.primary_device.as_deref(), lang)
         };
         // The pin is set from a device's row, so a pin naming a device the
         // Devices tab has no row for — one retired before the inventory
@@ -873,7 +891,7 @@ impl SettingsApp {
             ui.horizontal_wrapped(|ui| {
                 ui.label(egui::RichText::new(hint).weak());
                 if pinned {
-                    clear_pin = ui.small_button("Clear").clicked();
+                    clear_pin = ui.small_button(fl!(l, "button-clear")).clicked();
                 }
             });
         });
@@ -883,12 +901,12 @@ impl SettingsApp {
 
         // ── Battery ───────────────────────────────────────────────────────────
         ui.add_space(16.0);
-        Self::section_header(ui, "Defaults for all devices");
+        Self::section_header(ui, &fl!(l, "section-defaults"));
 
         let mut threshold = self.config.low_threshold;
         let resp = ui.add(
             egui::Slider::new(&mut threshold, LOW_THRESHOLD_RANGE)
-                .text("Low battery threshold")
+                .text(fl!(l, "default-low-threshold"))
                 .suffix("%"),
         );
         if resp.drag_stopped() || resp.lost_focus() {
@@ -899,30 +917,22 @@ impl SettingsApp {
         let resp = ui
             .add(
                 egui::Slider::new(&mut interval, POLL_INTERVAL_RANGE)
-                    .text("Check every")
-                    .suffix(" s"),
+                    .text(fl!(l, "default-poll-interval"))
+                    .suffix(fl!(l, "unit-seconds-suffix")),
             )
-            .on_hover_text(
-                "Polling more often than this wakes the device constantly and drains its battery.",
-            );
+            .on_hover_text(fl!(l, "poll-interval-hint"));
         if resp.drag_stopped() || resp.lost_focus() {
             self.persist(ui, move |target| target.poll_interval_secs = interval);
         }
-        ui.label(
-            egui::RichText::new(
-                "Applies to every device that has no setting of its own. \
-                 To change one device, select its row on the Devices tab.",
-            )
-            .weak(),
-        );
+        ui.label(egui::RichText::new(fl!(l, "defaults-hint")).weak());
 
         // ── Notifications ─────────────────────────────────────────────────────
         ui.add_space(16.0);
-        Self::section_header(ui, "Notifications");
+        Self::section_header(ui, &fl!(l, "section-notifications"));
         // A local copy for the same reason as `display_mode` above.
         let mut notifications_enabled = self.config.notifications_enabled;
         if ui
-            .checkbox(&mut notifications_enabled, "Low battery notifications")
+            .checkbox(&mut notifications_enabled, fl!(l, "notifications-enabled"))
             .changed()
         {
             self.persist(ui, move |target| {
@@ -932,20 +942,14 @@ impl SettingsApp {
 
         // ── Startup ───────────────────────────────────────────────────────────
         ui.add_space(16.0);
-        Self::section_header(ui, "Startup");
+        Self::section_header(ui, &fl!(l, "section-startup"));
         if self.systemd_service_enabled {
             ui.add_enabled_ui(false, |ui| {
-                ui.checkbox(&mut self.autostart_enabled, "Start with session");
+                ui.checkbox(&mut self.autostart_enabled, fl!(l, "autostart-enabled"));
             });
-            ui.label(
-                egui::RichText::new(
-                    "Managed by the systemd user service. Disable it with: \
-                     systemctl --user disable --now rigbat.service",
-                )
-                .weak(),
-            );
+            ui.label(egui::RichText::new(fl!(l, "autostart-managed-by-systemd")).weak());
         } else if ui
-            .checkbox(&mut self.autostart_enabled, "Start with session")
+            .checkbox(&mut self.autostart_enabled, fl!(l, "autostart-enabled"))
             .changed()
         {
             match autostart::set_enabled(self.autostart_enabled) {
@@ -962,17 +966,47 @@ impl SettingsApp {
             }
         }
 
+        // ── Language ──────────────────────────────────────────────────────────
+        ui.add_space(16.0);
+        Self::section_header(ui, &fl!(l, "section-language"));
+        let mut choice = self.config.language.as_deref().and_then(Lang::from_tag);
+        let system = format!(
+            "{} ({})",
+            fl!(l, "language-system"),
+            i18n::system().native_name()
+        );
+        let selected = choice.map_or_else(|| system.clone(), |lang| lang.native_name().to_owned());
+        let mut changed = false;
+        egui::ComboBox::from_id_salt("language")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut choice, None, system.as_str())
+                    .changed();
+                for lang in Lang::ALL {
+                    changed |= ui
+                        .selectable_value(&mut choice, Some(lang), lang.native_name())
+                        .changed();
+                }
+            });
+        if changed {
+            self.persist(ui, move |target| {
+                target.language = choice.map(|lang| lang.tag().to_owned());
+            });
+        }
+
         // ── About ─────────────────────────────────────────────────────────────
         ui.add_space(16.0);
-        Self::section_header(ui, "About");
+        Self::section_header(ui, &fl!(l, "section-about"));
         ui.label(format!("rigbat {}", env!("CARGO_PKG_VERSION")));
-        ui.hyperlink_to("Project page", env!("CARGO_PKG_REPOSITORY"));
+        ui.hyperlink_to(fl!(l, "about-project-page"), env!("CARGO_PKG_REPOSITORY"));
     }
 
     /// Status line + Close button, shared by both tabs (not just General's
     /// scroll area): the Devices tab's override panel saves too, and Close
     /// must stay reachable regardless of which tab is open.
     fn render_status_bar(&mut self, ui: &mut egui::Ui) {
+        let l = loader(self.config.lang());
         ui.add_space(8.0);
         ui.separator();
 
@@ -980,15 +1014,15 @@ impl SettingsApp {
             // Show "Changes saved." for SAVED_VISIBLE_SECS after the last save.
             let status = match self.saved_at {
                 Some(t) if t.elapsed() < Duration::from_secs(SAVED_VISIBLE_SECS) => {
-                    "Changes saved."
+                    fl!(l, "status-saved")
                 }
-                _ => "",
+                _ => String::new(),
             };
             ui.weak(status);
 
             // Push the Close button to the right.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Close").clicked() {
+                if ui.button(fl!(l, "button-close")).clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
@@ -1043,11 +1077,11 @@ fn toggle_hidden(hidden_devices: &mut Vec<String>, name: &str, show: bool) {
 /// What the General tab says the single tray icon will show. Names the pinned
 /// device when there is one, so the user can see the setting's current value
 /// without opening the tab that owns the control.
-fn aggregate_icon_hint(primary_device: Option<&str>) -> String {
+fn aggregate_icon_hint(primary_device: Option<&str>, lang: Lang) -> String {
+    let l = loader(lang);
     match primary_device {
-        Some(name) => format!("The single icon shows {name}. Change it on the Devices tab."),
-        None => "The single icon shows the first connected device. Pin one on the Devices tab."
-            .to_string(),
+        Some(name) => fl!(l, "tray-primary-hint-pinned", name = name),
+        None => fl!(l, "tray-primary-hint-auto"),
     }
 }
 
@@ -1250,7 +1284,30 @@ mod tests {
     /// `painted_text` at a chosen window size. The root clip rectangle is the
     /// screen, so anything laid out past the window's edge is filtered out by
     /// the same rule that filters anything clipped inside it.
-    fn painted_text_at(size: [f32; 2], mut contents: impl FnMut(&mut egui::Ui)) -> Vec<String> {
+    fn painted_text_at(size: [f32; 2], contents: impl FnMut(&mut egui::Ui)) -> Vec<String> {
+        text_at(size, contents, |_drawn, visible| {
+            visible.width() >= MIN_READABLE_WIDTH && visible.height() > 0.0
+        })
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect()
+    }
+
+    /// Strings drawn in full, not cut by their clip rectangle, with where they landed.
+    fn fully_painted_text_at(
+        size: [f32; 2],
+        contents: impl FnMut(&mut egui::Ui),
+    ) -> Vec<(String, egui::Rect)> {
+        text_at(size, contents, |drawn, visible| {
+            visible.width() + 0.5 >= drawn.width() && visible.height() + 0.5 >= drawn.height()
+        })
+    }
+
+    fn text_at(
+        size: [f32; 2],
+        mut contents: impl FnMut(&mut egui::Ui),
+        keep: impl Fn(egui::Rect, egui::Rect) -> bool,
+    ) -> Vec<(String, egui::Rect)> {
         let ctx = egui::Context::default();
         let input = || egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -1264,24 +1321,28 @@ mod tests {
             let output = ctx.run_ui(input(), |ui| contents(ui));
             painted.clear();
             for clipped in output.shapes {
-                collect_text(&clipped.shape, clipped.clip_rect, &mut painted);
+                collect_text(&clipped.shape, clipped.clip_rect, &keep, &mut painted);
             }
         }
         painted
     }
 
-    fn collect_text(shape: &egui::Shape, clip: egui::Rect, out: &mut Vec<String>) {
+    fn collect_text(
+        shape: &egui::Shape,
+        clip: egui::Rect,
+        keep: &impl Fn(egui::Rect, egui::Rect) -> bool,
+        out: &mut Vec<(String, egui::Rect)>,
+    ) {
         match shape {
             egui::Shape::Text(text) => {
                 let drawn = egui::Rect::from_min_size(text.pos, text.galley.size());
-                let visible = drawn.intersect(clip);
-                if visible.width() >= MIN_READABLE_WIDTH && visible.height() > 0.0 {
-                    out.push(text.galley.text().to_owned());
+                if keep(drawn, drawn.intersect(clip)) {
+                    out.push((text.galley.text().to_owned(), drawn));
                 }
             }
             egui::Shape::Vec(shapes) => {
                 for shape in shapes {
-                    collect_text(shape, clip, out);
+                    collect_text(shape, clip, keep, out);
                 }
             }
             _ => {}
@@ -1336,6 +1397,125 @@ mod tests {
         }
     }
 
+    /// Russian runs 20–35% longer than English. Columns do not clip, so too long
+    /// a label wraps onto extra lines, runs into its neighbour, or pushes a column
+    /// off the window's right edge.
+    #[test]
+    fn device_table_text_is_not_clipped_in_any_language() {
+        let mut row = rows_for(&["MX Anywhere 3"]).remove(0);
+        row.store_id = Some(1);
+        row.presence = Presence::Disconnected;
+        row.charge = Some(BatteryReading::new(
+            90,
+            crate::domain::ChargeState::Discharging,
+        ));
+        row.first_seen = Some(1_700_000_000 - 3 * 86_400);
+        row.last_seen = Some(1_700_000_000 - 50 * 60);
+        let mut armed = row.clone();
+        armed.store_id = Some(2);
+        armed.device.name = "NuPhy Air75".to_string();
+        let rows = vec![row, armed];
+
+        for lang in Lang::ALL {
+            let mut app = settings_app_with(Config {
+                language: Some(lang.tag().to_owned()),
+                ..Config::default()
+            });
+            app.delete_state = DeleteState::Confirming(2);
+
+            let painted = fully_painted_text_at(WINDOW_MIN_SIZE, |ui| {
+                app.render_device_table(ui, &rows, 1_700_000_000)
+            });
+
+            let l = loader(lang);
+            let mut expected = vec![format!("{} \u{23f7}", l.get("col-name"))];
+            for id in [
+                "col-type",
+                "col-connection",
+                "col-charge",
+                "col-status",
+                "col-first-seen",
+                "col-last-seen",
+                "col-tray-icon",
+                "col-actions",
+                "presence-disconnected",
+                "button-delete",
+                "button-confirm",
+                "button-cancel",
+            ] {
+                expected.push(l.get(id));
+            }
+            expected.push(crate::domain::DeviceKind::Mouse.label(lang));
+            expected.push(devices::charge_cell_text(rows[0].charge, lang));
+            expected.push(devices::relative_label(
+                1_700_000_000,
+                1_700_000_000 - 3 * 86_400,
+                lang,
+            ));
+            expected.push(devices::relative_label(
+                1_700_000_000,
+                1_700_000_000 - 50 * 60,
+                lang,
+            ));
+            for text in expected {
+                assert!(
+                    painted.iter().any(|(t, _)| *t == text),
+                    "{lang:?}: {text:?} is cut off or missing; fully painted: {painted:?}"
+                );
+            }
+            let labels: Vec<_> = painted.iter().filter(|(t, _)| !t.is_empty()).collect();
+            for (text, rect) in &labels {
+                assert!(
+                    rect.height() <= TABLE_ROW_HEIGHT,
+                    "{lang:?}: {text:?} wraps onto a second line"
+                );
+            }
+            for (i, (a, a_rect)) in labels.iter().enumerate() {
+                for (b, b_rect) in &labels[i + 1..] {
+                    let overlap = a_rect.intersect(*b_rect);
+                    assert!(
+                        overlap.width() <= 0.5 || overlap.height() <= 0.5,
+                        "{lang:?}: {a:?} overlaps {b:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn device_table_renders_in_russian() {
+        let mut app = settings_app_with(Config {
+            language: Some("ru".to_owned()),
+            ..Config::default()
+        });
+        let rows = rows_for(&["MX Anywhere 3"]);
+
+        let painted = painted_text_at(WINDOW_MIN_SIZE, |ui| {
+            app.render_device_table(ui, &rows, 1_700_000_000)
+        });
+
+        for text in ["Название ⏷", "Заряд", "Замечено", "Действия", "мышь"]
+        {
+            assert!(painted.iter().any(|t| t == text), "{text:?}: {painted:?}");
+        }
+    }
+
+    #[test]
+    fn general_tab_offers_every_language() {
+        let mut app = settings_app_with(Config {
+            language: Some("ru".to_owned()),
+            ..Config::default()
+        });
+
+        let painted = painted_text(|ui| app.render_general_tab(ui));
+
+        assert!(
+            painted.iter().any(|t| t == "Язык / Language"),
+            "{painted:?}"
+        );
+        assert!(painted.iter().any(|t| t == "Русский"), "{painted:?}");
+    }
+
     /// The band under the table draws nothing at all until a row is selected
     /// — not a placeholder explaining that selecting a row would fill it.
     #[test]
@@ -1368,7 +1548,9 @@ mod tests {
         );
     }
 
-    fn settings_app_with(config: Config) -> SettingsApp {
+    fn settings_app_with(mut config: Config) -> SettingsApp {
+        // Tests assert English text unless they pick a language; LANG must not decide.
+        config.language.get_or_insert_with(|| "en".to_owned());
         SettingsApp {
             config,
             devices: Vec::new(),
@@ -1581,12 +1763,12 @@ mod tests {
 
     #[test]
     fn aggregate_icon_hint_names_the_pinned_device() {
-        assert!(aggregate_icon_hint(Some("MX Anywhere 3")).contains("MX Anywhere 3"));
+        assert!(aggregate_icon_hint(Some("MX Anywhere 3"), Lang::En).contains("MX Anywhere 3"));
     }
 
     #[test]
     fn aggregate_icon_hint_describes_the_automatic_choice() {
-        assert!(aggregate_icon_hint(None).contains("first connected"));
+        assert!(aggregate_icon_hint(None, Lang::En).contains("first connected"));
     }
 
     #[test]

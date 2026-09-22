@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::domain::estimate::Estimate;
+use crate::i18n::{Lang, fl, loader};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
@@ -85,7 +86,7 @@ pub fn guess_kind(name: &str) -> DeviceKind {
 
 impl DeviceKind {
     /// Canonical string spelling of the variant. Part of the `--json` CLI contract
-    /// (the "kind" field) — changing these values changes that output.
+    /// (the "kind" field) and of stored inventory rows — never translate; see `label`.
     pub fn as_str(self) -> &'static str {
         match self {
             DeviceKind::Mouse => "mouse",
@@ -93,6 +94,17 @@ impl DeviceKind {
             DeviceKind::Headset => "headset",
             DeviceKind::Controller => "controller",
             DeviceKind::Other => "other",
+        }
+    }
+
+    pub fn label(self, lang: Lang) -> String {
+        let l = loader(lang);
+        match self {
+            DeviceKind::Mouse => fl!(l, "kind-mouse"),
+            DeviceKind::Keyboard => fl!(l, "kind-keyboard"),
+            DeviceKind::Headset => fl!(l, "kind-headset"),
+            DeviceKind::Controller => fl!(l, "kind-controller"),
+            DeviceKind::Other => fl!(l, "kind-other"),
         }
     }
 }
@@ -127,6 +139,7 @@ pub enum Transport {
 }
 
 impl Transport {
+    /// Also shown untranslated in the UI: these are technology names.
     pub fn as_str(self) -> &'static str {
         match self {
             Transport::Sysfs => "sysfs",

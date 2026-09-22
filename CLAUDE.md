@@ -15,9 +15,10 @@ whose mouse is switched off is not a battery level. It keeps being polled and re
 answer. Tray: left-click menu listing device status, device-type
 glyph, light/dark theme, display modes, time-remaining estimate, low-battery notifications
 (confirmed by two distinct readings), separate settings window with a device inventory table,
-per-device poll intervals/thresholds and aggregate-icon pin, config persistence. A second `rigbat tray` exits instead of
-doubling every icon. Diagnostics via `tracing`. Packaging: udev rule, desktop entry, systemd user
-service.
+per-device poll intervals/thresholds and aggregate-icon pin, config persistence. UI in English and
+Russian (Fluent, `i18n/`), switchable live; the CLI stays English. A second `rigbat tray` exits
+instead of doubling every icon. Diagnostics via `tracing`. Packaging: udev rule, desktop entry,
+systemd user service.
 
 ## Compatibility
 
@@ -92,6 +93,7 @@ src/
 ├── session/       # logind PrepareForSleep → resume re-poll
 ├── settings/      # eframe/egui settings window (separate process) + device table state
 ├── autostart/     # ~/.config/autostart/rigbat.desktop
+├── i18n/          # Lang, per-language Fluent loaders, locale detection (catalogues in /i18n)
 ├── app/           # poll_once + Supervisor (owns discovery) + refresh signal + wiring
 ├── state/         # SQLite device inventory + reading history (XDG_STATE_HOME)
 └── config/        # XDG ~/.config/rigbat/config.json
@@ -104,6 +106,8 @@ imports another adapter — text or policy that `cli`, `tray` and `settings` all
 ## Conventions
 
 - English-only repo content (comments, docs). Domain types, not stringly-typed.
+- UI text comes from `i18n/<lang>/rigbat.ftl` via `fl!`, never a literal; a wire value
+  (`as_str`, `state_str`) is never translated.
 - No `unwrap`/`expect` in non-test code — return `anyhow::Result` with context.
 - HID via `/dev/hidraw` directly (no C `libhidapi`); BlueZ via `zbus` (no `bluer`/libdbus).
 - Diagnostics go through `tracing`; `println!` is reserved for CLI output on stdout.
@@ -125,7 +129,8 @@ imports another adapter — text or policy that `cli`, `tray` and `settings` all
 - Adding infrastructure (a new D-Bus/HID/GUI dependency): put it behind a port (a trait) plus
   an implementation; never import it into `domain` — dependency direction stays inward.
 - Where to change what: new device → `CONTRIBUTING.md`; CLI flag → `main.rs` dispatch + `cli/`;
-  icon rendering → behind the `IconRenderer` port in `tray/`; persisted settings → `config/`
+  icon rendering → behind the `IconRenderer` port in `tray/`; UI text or a new language →
+  `i18n/` (see `CONTRIBUTING.md`); persisted settings → `config/`
   (serde, `#[serde(default)]` so old config files keep loading).
 - Commits: Conventional Commits — `type(scope): description` (e.g. `feat(tray): …`).
 

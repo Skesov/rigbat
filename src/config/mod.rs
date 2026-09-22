@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{self, Lang, fl, loader};
+
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_LOW_THRESHOLD: u8 = 20;
 
@@ -67,6 +69,9 @@ pub struct Config {
     pub low_threshold: u8,
     /// Per-device overrides keyed by device name.
     pub device_overrides: HashMap<String, DeviceSettings>,
+    /// UI language tag (`"ru"`); `None` follows the session locale. A string, not
+    /// `Lang`, so a tag unknown to this build still loads.
+    pub language: Option<String>,
 }
 
 /// Moves every per-device setting from `from` to `to`, returning whether any
@@ -119,6 +124,7 @@ impl Default for Config {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             low_threshold: DEFAULT_LOW_THRESHOLD,
             device_overrides: HashMap::new(),
+            language: None,
         }
     }
 }
@@ -132,16 +138,21 @@ impl DisplayMode {
     ];
 
     /// Human-readable label used in the settings window radio group.
-    pub fn label(self) -> &'static str {
+    pub fn label(self, lang: Lang) -> String {
+        let l = loader(lang);
         match self {
-            DisplayMode::IconOnly => "Battery icon only",
-            DisplayMode::PercentOnly => "Percentage as text",
-            DisplayMode::PercentInIcon => "Percentage inside icon",
+            DisplayMode::IconOnly => fl!(l, "display-icon-only"),
+            DisplayMode::PercentOnly => fl!(l, "display-percent-only"),
+            DisplayMode::PercentInIcon => fl!(l, "display-percent-in-icon"),
         }
     }
 }
 
 impl Config {
+    pub fn lang(&self) -> Lang {
+        i18n::resolve(self.language.as_deref())
+    }
+
     /// Returns true if the device should be shown (absent from `hidden_devices`).
     pub fn is_shown(&self, name: &str) -> bool {
         !self.hidden_devices.iter().any(|n| n == name)
@@ -617,16 +628,40 @@ mod tests {
 
     #[test]
     fn display_mode_label_non_empty() {
-        for mode in DisplayMode::ALL {
-            assert!(!mode.label().is_empty(), "label for {mode:?} is empty");
+        for lang in Lang::ALL {
+            for mode in DisplayMode::ALL {
+                assert!(
+                    !mode.label(lang).is_empty(),
+                    "label for {mode:?} is empty in {lang:?}"
+                );
+            }
         }
     }
 
     #[test]
     fn display_mode_label_values() {
-        assert_eq!(DisplayMode::IconOnly.label(), "Battery icon only");
-        assert_eq!(DisplayMode::PercentOnly.label(), "Percentage as text");
-        assert_eq!(DisplayMode::PercentInIcon.label(), "Percentage inside icon");
+        assert_eq!(DisplayMode::IconOnly.label(Lang::En), "Battery icon only");
+        assert_eq!(
+            DisplayMode::PercentOnly.label(Lang::En),
+            "Percentage as text"
+        );
+        assert_eq!(
+            DisplayMode::PercentInIcon.label(Lang::En),
+            "Percentage inside icon"
+        );
+        assert_eq!(DisplayMode::IconOnly.label(Lang::Ru), "Только иконка");
+    }
+
+    #[test]
+    fn language_is_optional_and_tolerates_unknown_tags() {
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.language, None);
+
+        let ru: Config = serde_json::from_str(r#"{"language":"ru"}"#).unwrap();
+        assert_eq!(ru.lang(), Lang::Ru);
+
+        let newer: Config = serde_json::from_str(r#"{"language":"de"}"#).unwrap();
+        assert_eq!(newer.lang(), i18n::system());
     }
 
     #[test]

@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::domain::{BatteryReading, DeviceInfo, DeviceState, Presence, PrimaryStatus, classify};
 use crate::domain::{format_device_entry, select_featured, state_str};
+use crate::i18n::Lang;
 
 type Row = (DeviceInfo, Option<BatteryReading>);
 
@@ -78,7 +79,8 @@ pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: Instant) -> Value {
     } else {
         shown
             .iter()
-            .map(|d| format_device_entry(d, now))
+            // CLI surface: always English.
+            .map(|d| format_device_entry(d, now, Lang::En))
             .collect::<Vec<_>>()
             .join("\n")
     };

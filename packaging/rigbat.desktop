@@ -6,6 +6,7 @@ Type=Application
 Version=1.0
 Name=rigbat
 Comment=Battery monitor for gaming peripherals
+Comment[ru]=Заряд батарей игровой периферии
 Exec=rigbat settings
 Icon=rigbat
 Terminal=false

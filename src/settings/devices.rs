@@ -9,7 +9,8 @@ use std::cmp::Ordering;
 use std::time::Duration;
 
 use crate::domain::{BatteryReading, DeviceId, DeviceInfo, DeviceKind, Presence};
-use crate::domain::{format_age, state_str};
+use crate::domain::{format_age, state_label};
+use crate::i18n::Lang;
 use crate::state::DeviceRecord;
 
 /// One row of the Devices tab table: the union of a device's persisted
@@ -175,7 +176,7 @@ impl SortState {
 /// than a known one, so direction cannot move it. Ties (e.g. two devices
 /// sharing a name over different transports) break on the full device
 /// identity, so the order is deterministic run to run.
-pub fn sort_rows(rows: &mut [DeviceRow], sort: SortState) {
+pub fn sort_rows(rows: &mut [DeviceRow], sort: SortState, lang: Lang) {
     rows.sort_by(|a, b| {
         let primary = match sort.column {
             SortColumn::Name => sort.direction.apply(
@@ -184,7 +185,10 @@ pub fn sort_rows(rows: &mut [DeviceRow], sort: SortState) {
                     .to_lowercase()
                     .cmp(&b.device.name.to_lowercase()),
             ),
-            SortColumn::Type => sort.direction.apply(a.kind.as_str().cmp(b.kind.as_str())),
+            // By the label on screen, not by the English wire value.
+            SortColumn::Type => sort
+                .direction
+                .apply(a.kind.label(lang).cmp(&b.kind.label(lang))),
             SortColumn::Transport => sort
                 .direction
                 .apply(a.device.transport.as_str().cmp(b.device.transport.as_str())),
@@ -306,18 +310,18 @@ pub fn remove_row(rows: &mut Vec<DeviceRow>, store_id: i64) {
 /// table cell, relative to `now` (also unix seconds). Reuses
 /// `domain::format_age`, which already renders this exact vocabulary for
 /// retained readings, instead of a second implementation.
-pub fn relative_label(now: i64, at: i64) -> String {
+pub fn relative_label(now: i64, at: i64, lang: Lang) -> String {
     let age = Duration::from_secs(now.saturating_sub(at).max(0).unsigned_abs());
-    format_age(age)
+    format_age(age, lang)
 }
 
 /// Formats the `Charge` cell: percentage plus charge state (T36), e.g.
 /// `"90%  discharging"`. Reuses `domain::state_str` so a device never reads
 /// two ways in two places — the tray menu and this table spell the same
 /// state identically. A device with no reading keeps the existing dash.
-pub fn charge_cell_text(charge: Option<BatteryReading>) -> String {
+pub fn charge_cell_text(charge: Option<BatteryReading>, lang: Lang) -> String {
     match charge {
-        Some(r) => format!("{}%  {}", r.percent, state_str(r.state)),
+        Some(r) => format!("{}%  {}", r.percent, state_label(r.state, lang)),
         None => "—".to_string(),
     }
 }
@@ -548,6 +552,7 @@ mod tests {
                 column: SortColumn::Name,
                 direction: SortDirection::Ascending,
             },
+            Lang::En,
         );
         assert_eq!(names(&rows), vec!["alpha", "zebra"]);
         sort_rows(
@@ -556,6 +561,7 @@ mod tests {
                 column: SortColumn::Name,
                 direction: SortDirection::Descending,
             },
+            Lang::En,
         );
         assert_eq!(names(&rows), vec!["zebra", "alpha"]);
     }
@@ -573,6 +579,7 @@ mod tests {
                 column: SortColumn::Type,
                 direction: SortDirection::Ascending,
             },
+            Lang::En,
         );
         assert_eq!(rows[0].kind, DeviceKind::Keyboard);
         sort_rows(
@@ -581,6 +588,7 @@ mod tests {
                 column: SortColumn::Type,
                 direction: SortDirection::Descending,
             },
+            Lang::En,
         );
         assert_eq!(rows[0].kind, DeviceKind::Mouse);
     }
@@ -597,6 +605,7 @@ mod tests {
                 column: SortColumn::Transport,
                 direction: SortDirection::Ascending,
             },
+            Lang::En,
         );
         assert_eq!(rows[0].device.transport, Transport::Bluetooth);
         sort_rows(
@@ -605,6 +614,7 @@ mod tests {
                 column: SortColumn::Transport,
                 direction: SortDirection::Descending,
             },
+            Lang::En,
         );
         assert_eq!(rows[0].device.transport, Transport::Sysfs);
     }
@@ -622,6 +632,7 @@ mod tests {
                 column: SortColumn::Presence,
                 direction: SortDirection::Ascending,
             },
+            Lang::En,
         );
         assert_eq!(rows[0].presence, Presence::Online);
         sort_rows(
@@ -630,6 +641,7 @@ mod tests {
                 column: SortColumn::Presence,
                 direction: SortDirection::Descending,
             },
+            Lang::En,
         );
         assert_eq!(rows[0].presence, Presence::Disconnected);
     }
@@ -648,6 +660,7 @@ mod tests {
                 column: SortColumn::Charge,
                 direction: SortDirection::Ascending,
             },
+            Lang::En,
         );
         assert_eq!(rows[0].device.name, "a");
         assert_eq!(
@@ -661,6 +674,7 @@ mod tests {
                 column: SortColumn::Charge,
                 direction: SortDirection::Descending,
             },
+            Lang::En,
         );
         assert_eq!(rows[0].device.name, "a");
         assert_eq!(
@@ -682,6 +696,7 @@ mod tests {
                 column: SortColumn::FirstSeen,
                 direction: SortDirection::Ascending,
             },
+            Lang::En,
         );
         assert_eq!(names(&rows), vec!["old", "new"]);
         sort_rows(
@@ -690,6 +705,7 @@ mod tests {
                 column: SortColumn::FirstSeen,
                 direction: SortDirection::Descending,
             },
+            Lang::En,
         );
         assert_eq!(names(&rows), vec!["new", "old"]);
     }
@@ -707,6 +723,7 @@ mod tests {
                 column: SortColumn::LastSeen,
                 direction: SortDirection::Descending,
             },
+            Lang::En,
         );
         assert_eq!(names(&rows), vec!["new", "old"]);
         sort_rows(
@@ -715,6 +732,7 @@ mod tests {
                 column: SortColumn::LastSeen,
                 direction: SortDirection::Ascending,
             },
+            Lang::En,
         );
         assert_eq!(names(&rows), vec!["old", "new"]);
     }
@@ -734,6 +752,7 @@ mod tests {
                 column: SortColumn::Name,
                 direction: SortDirection::Ascending,
             },
+            Lang::En,
         );
         assert_eq!(
             rows[0].device.locator, None,
@@ -845,10 +864,13 @@ mod tests {
     #[test]
     fn charge_cell_text_discharging() {
         assert_eq!(
-            charge_cell_text(Some(BatteryReading::new(
-                90,
-                crate::domain::ChargeState::Discharging
-            ))),
+            charge_cell_text(
+                Some(BatteryReading::new(
+                    90,
+                    crate::domain::ChargeState::Discharging
+                )),
+                Lang::En
+            ),
             "90%  discharging"
         );
     }
@@ -856,10 +878,13 @@ mod tests {
     #[test]
     fn charge_cell_text_charging() {
         assert_eq!(
-            charge_cell_text(Some(BatteryReading::new(
-                42,
-                crate::domain::ChargeState::Charging
-            ))),
+            charge_cell_text(
+                Some(BatteryReading::new(
+                    42,
+                    crate::domain::ChargeState::Charging
+                )),
+                Lang::En
+            ),
             "42%  charging"
         );
     }
@@ -867,32 +892,60 @@ mod tests {
     #[test]
     fn charge_cell_text_full() {
         assert_eq!(
-            charge_cell_text(Some(BatteryReading::new(
-                100,
-                crate::domain::ChargeState::Full
-            ))),
+            charge_cell_text(
+                Some(BatteryReading::new(100, crate::domain::ChargeState::Full)),
+                Lang::En
+            ),
             "100%  full"
         );
     }
 
     #[test]
     fn charge_cell_text_missing_reading_is_dash() {
-        assert_eq!(charge_cell_text(None), "—");
+        assert_eq!(charge_cell_text(None, Lang::En), "—");
+    }
+
+    #[test]
+    fn charge_cell_text_in_russian() {
+        let reading = BatteryReading::new(90, crate::domain::ChargeState::Discharging);
+        assert_eq!(
+            charge_cell_text(Some(reading), Lang::Ru),
+            "90%  разряжается"
+        );
+    }
+
+    #[test]
+    fn type_column_sorts_by_the_translated_label() {
+        let mut headset = row("a", Transport::Sysfs, None);
+        headset.kind = DeviceKind::Headset;
+        let mut controller = row("b", Transport::Sysfs, None);
+        controller.kind = DeviceKind::Controller;
+        let ascending = SortState {
+            column: SortColumn::Type,
+            direction: SortDirection::Ascending,
+        };
+
+        let mut rows = vec![headset.clone(), controller.clone()];
+        sort_rows(&mut rows, ascending, Lang::En);
+        assert_eq!(names(&rows), vec!["b", "a"], "controller < headset");
+
+        sort_rows(&mut rows, ascending, Lang::Ru);
+        assert_eq!(names(&rows), vec!["a", "b"], "гарнитура < геймпад");
     }
 
     // --- relative_label / absolute_date_label -------------------------------
 
     #[test]
     fn relative_label_matches_format_age() {
-        assert_eq!(relative_label(1000, 1000), "just now");
-        assert_eq!(relative_label(1000 + 3600, 1000), "1h ago");
+        assert_eq!(relative_label(1000, 1000, Lang::En), "just now");
+        assert_eq!(relative_label(1000 + 3600, 1000, Lang::En), "1h ago");
     }
 
     #[test]
     fn relative_label_clock_step_backward_does_not_panic() {
         // at > now (a clock step, or a first-seen just recorded this second)
         // must not underflow; it renders as "just now" rather than erroring.
-        assert_eq!(relative_label(1000, 5000), "just now");
+        assert_eq!(relative_label(1000, 5000, Lang::En), "just now");
     }
 
     #[test]

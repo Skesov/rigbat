@@ -12,6 +12,7 @@ use crate::domain::{
     DeviceState, Presence, PrimaryStatus, classify, classify_stale, format_device_entry,
     freedesktop_icon_name, select_featured,
 };
+use crate::i18n::{fl, loader};
 use crate::tray::icon::{IconRenderer, Theme, TinySkiaRenderer};
 
 // ---------------------------------------------------------------------------
@@ -234,12 +235,14 @@ impl Tray for RigbatTray {
     }
 
     fn tool_tip(&self) -> ToolTip {
+        let lang = self.config.borrow().lang();
+        let l = loader(lang);
         let title = self
             .resolve()
-            .map(|r| format_device_entry(&r.state, Instant::now()))
+            .map(|r| format_device_entry(&r.state, Instant::now(), lang))
             .unwrap_or_else(|| match &self.key {
-                Some(name) => format!("{name}: offline"),
-                None => "No devices".into(),
+                Some(name) => fl!(l, "entry-offline", name = name.as_str()),
+                None => fl!(l, "tray-no-devices"),
             });
         ToolTip {
             title,
@@ -253,9 +256,10 @@ impl Tray for RigbatTray {
         // no await here, but keeping scopes tight documents intent).
         let now = Instant::now();
 
-        let rows = {
+        let (rows, lang) = {
             let state = self.rx.borrow();
             let cfg = self.config.borrow();
+            let lang = cfg.lang();
 
             // The bullet and the rows come from one pair of borrows. Resolving
             // the highlight separately re-borrowed the channels, so a state
@@ -275,22 +279,23 @@ impl Tray for RigbatTray {
                     } else {
                         "  "
                     };
-                    let entry = format_device_entry(d, now);
+                    let entry = format_device_entry(d, now, lang);
                     let label = format!("{prefix}{entry}");
                     let icon = freedesktop_icon_name(d.info.kind).to_owned();
                     (d.info.name.clone(), label, icon)
                 })
                 .collect();
 
-            rows
+            (rows, lang)
         };
         // All watch borrows are released here.
+        let l = loader(lang);
 
         let mut items: Vec<MenuItem<Self>> = Vec::new();
 
         if rows.is_empty() {
             items.push(MenuItem::Standard(ksni::menu::StandardItem {
-                label: "No devices".into(),
+                label: fl!(l, "tray-no-devices"),
                 enabled: false,
                 ..ksni::menu::StandardItem::default()
             }));
@@ -312,14 +317,14 @@ impl Tray for RigbatTray {
         items.push(MenuItem::Separator);
 
         items.push(MenuItem::Standard(ksni::menu::StandardItem {
-            label: "Refresh".into(),
+            label: fl!(l, "tray-refresh"),
             icon_name: "view-refresh".into(),
             activate: Box::new(|app: &mut Self| app.refresh.trigger()),
             ..ksni::menu::StandardItem::default()
         }));
 
         items.push(MenuItem::Standard(ksni::menu::StandardItem {
-            label: "Settings\u{2026}".into(),
+            label: fl!(l, "tray-settings"),
             activate: Box::new(|_: &mut Self| match std::env::current_exe() {
                 Ok(exe) => match std::process::Command::new(exe).arg("settings").spawn() {
                     // `Child` has no `Drop` that reaps, so dropping the handle
@@ -345,7 +350,7 @@ impl Tray for RigbatTray {
         items.push(MenuItem::Separator);
 
         items.push(MenuItem::Standard(ksni::menu::StandardItem {
-            label: "Quit".into(),
+            label: fl!(l, "tray-quit"),
             activate: Box::new(|_| std::process::exit(0)),
             ..ksni::menu::StandardItem::default()
         }));

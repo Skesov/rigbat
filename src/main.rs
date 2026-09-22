@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod discovery;
 mod domain;
+mod i18n;
 mod notifications;
 mod session;
 mod settings;

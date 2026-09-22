@@ -6,6 +6,7 @@ use tokio::sync::watch;
 use crate::app::supervisor::TrayState;
 use crate::config::Config;
 use crate::domain::{DeviceId, Presence, PrimaryStatus, classify};
+use crate::i18n::{fl, loader};
 
 /// Upper bound on a single `notify` call. The D-Bus default reply timeout is
 /// 25 s; a toast that hasn't been accepted well before that has already
@@ -209,20 +210,20 @@ pub fn spawn(mut rx: watch::Receiver<TrayState>, config_rx: watch::Receiver<Conf
         loop {
             // Collect pending notifications and read config while holding borrows,
             // then drop all refs before any .await so no watch::Ref crosses an await point.
-            let (pending, enabled): (Vec<(String, u8)>, bool) = {
+            let (pending, enabled, lang): (Vec<(String, u8)>, bool, _) = {
                 let state = rx.borrow_and_update();
                 let cfg = config_rx.borrow();
                 let pending = compute_pending(&state, &cfg, &mut tracker);
-                let enabled = cfg.notifications_enabled;
-                (pending, enabled)
+                (pending, cfg.notifications_enabled, cfg.lang())
             };
 
             // Only send if notifications are enabled. Crossings were already
             // consumed by LowTracker above regardless of this flag.
             if enabled {
                 for (name, pct) in pending {
-                    let summary = format!("{name} battery low");
-                    let body = format!("{pct}% remaining");
+                    let l = loader(lang);
+                    let summary = fl!(l, "notify-low-title", name = name.as_str());
+                    let body = fl!(l, "notify-low-body", percent = pct);
                     let mut hints = std::collections::HashMap::new();
                     // urgency == 2 (critical) keeps the notification visible until dismissed.
                     hints.insert("urgency", zbus::zvariant::Value::U8(2));

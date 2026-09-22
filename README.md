@@ -17,6 +17,8 @@ System tray battery monitor for gaming peripherals.
   switched on for a week stops occupying the tray. It comes back the moment it answers
 - Sends desktop notifications when battery is low
 - Works with wired, wireless, and Bluetooth devices
+- Speaks English and Russian: the tray, the settings window and the notifications follow your
+  session language, or the one picked in the settings window. The CLI output stays English
 
 ## Supported devices
 
@@ -157,8 +159,8 @@ controller on, undocked from its dongle.
 
 **General** — how the tray looks and behaves for every device: one icon per device or a single
 aggregate icon, the display mode, the default low-battery threshold (5–50%, default 20), the
-default poll interval (10–3600 s, default 60), low-battery notifications, and whether rigbat
-starts with the session.
+default poll interval (10–3600 s, default 60), low-battery notifications, whether rigbat
+starts with the session, and the language (`System` follows `LANG`).
 
 **Devices** — a table of every device rigbat has ever seen on this machine, present or not:
 name, type, connection, charge, status, first seen, last seen, a `Tray icon` checkbox, and a

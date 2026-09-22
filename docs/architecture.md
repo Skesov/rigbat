@@ -29,6 +29,7 @@ reverse.
         domain            pure types + logic (DeviceInfo, BatteryReading, PrimaryStatus,
           ▲               classify, guess_kind, freedesktop_icon_name, DeviceId, estimate,
           │               select_featured, device text)
+        i18n              Fluent catalogues + Lang; pure, so domain may use it
           │
         sources           BatterySource / BatteryBackend traits + sysfs/bluez/
           ▲               steelseries/eightbitdo impls
@@ -52,6 +53,13 @@ table and the Devices tab, and `domain::primary::select_featured`, because "whic
 single view show" is policy, answered identically by the aggregate icon, `--waybar` and the
 settings window's description of it. Both are pure, so both are tested without a bus or a
 display.
+
+Translated text takes the language as a parameter (`format_device_entry(state, now, lang)`),
+the same way it takes `now`: the language changes at runtime and tests run in parallel, so no
+global holds it. Machine-facing values stay English and separate from their labels —
+`DeviceKind::as_str` and `state_str` feed `--json` and the inventory, `DeviceKind::label` and
+`state_label` feed the UI. The CLI (`list`, `--json`, `--waybar`, `--help`) is never
+translated.
 
 ## Ports (contracts)
 
@@ -196,6 +204,9 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
 - `config` module, XDG `~/.config/rigbat/config.json`, `serde`. Every field is
   `#[serde(default)]` at the struct level, so older config files load and missing keys fall back
   to `Config::default()`.
+- `language` holds the UI language tag picked in the settings window; `None` follows
+  `LC_ALL`/`LC_MESSAGES`/`LANG` (and `LANGUAGE`), as gettext does. Like every other field it
+  reaches the tray through the file watch, so switching needs no restart.
 - Saves are atomic: write a temp file, then rename.
 - A `notify` file watcher pushes reloads into a `watch<Config>` channel. It reacts only to
   content-changing events (create / data write / rename), never to `Access` events — reacting to
