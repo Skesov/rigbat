@@ -12,8 +12,8 @@ across drops (`Presence`: Online/Unreachable/Disconnected) and render dimmed whi
 except a low reading, which never dims. A device that is not online loses its tray icon once its
 reading passes `RETAINED_ICON_MAX_AGE` (24 h) or if it never produced one — an enumerated dongle
 whose mouse is switched off is not a battery level. It keeps being polled and returns on its next
-answer. Tray: left-click menu listing device status, device-type
-glyph, light/dark theme, display modes, time-remaining estimate, low-battery notifications
+answer. Tray: left click opens the dashboard (a card per device), right click the menu listing
+device status; device-type glyph, light/dark theme, display modes, time-remaining estimate, low-battery notifications
 (confirmed by two distinct readings), separate settings window with a device inventory table,
 per-device poll intervals/thresholds and aggregate-icon pin, config persistence. UI in English and
 Russian (Fluent, `i18n/`), switchable live; the CLI stays English. A second `rigbat tray` exits
@@ -41,8 +41,12 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
   JSON line for the featured device on startup and on every state change (run with `interval`
   omitted, not `tray`'s icon/notifications).
 - `rigbat tray` — SNI daemon (`Supervisor` + `ksni`), the long-running mode. Claims
-  `org.rigbat.Tray` on the session bus before publishing anything (`tray::single_instance`); a
-  second instance sees the name taken and exits 0 instead of doubling every tray icon.
+  `org.rigbat.Tray` on the session bus before publishing anything (`ipc::single_instance`); a
+  second instance sees the name taken and exits 0 instead of doubling every tray icon. On the
+  same connection it serves `org.rigbat.Tray1` (state snapshot, `Refresh`, `StateChanged`).
+- `rigbat dashboard` — eframe window the tray's left click spawns: a card per shown device, read
+  from `org.rigbat.Tray1`, never polled. Holds `org.rigbat.Dashboard`; a second launch closes the
+  open one (the toggle) and exits.
 - `rigbat settings` — GTK-free eframe/egui settings window in a SEPARATE process (the tray spawns
   it). It edits `config.json`; the tray applies changes via the file watch. It holds a tokio
   runtime only to run device discovery off the UI thread — the winit event loop is never entered
@@ -87,7 +91,10 @@ src/
 ├── sources/       # BatterySource + BatteryBackend; sysfs/bluez/steelseries/eightbitdo
 ├── discovery/     # discover_all + registry::backends() + Context (shared system bus) + backoff
 ├── cli/           # output adapter: table / --json / --wide / --waybar
-├── tray/          # ksni + IconRenderer (tiny-skia) + device-type corner glyph
+├── tray/          # ksni items + state service for the dashboard
+├── icon/          # IconRenderer (tiny-skia) + device-type corner glyph, shared by tray/dashboard
+├── dashboard/     # eframe device overview (separate process, left click)
+├── ipc/           # session-bus names, Snapshot contract, proxies, single-instance claim
 ├── appearance/    # theme from xdg-portal (light/dark)
 ├── notifications/ # low-battery desktop notifications (zbus)
 ├── session/       # logind PrepareForSleep → resume re-poll
@@ -151,5 +158,9 @@ COSMIC-specific — the strictest SNI host; these workarounds are safe everywher
 
 - No hover tooltip for tray icons, so the icon image and the menu are the only identification
   channels (drives the device-type corner glyph and the full-roster menu).
-- `ksni` `RadioGroup`/nested submenus drop clicks — use plain `StandardItem` for actions;
-  left-click opens the menu via `const MENU_ON_ACTIVATE: bool = true`.
+- `ksni` `RadioGroup`/nested submenus drop clicks — use plain `StandardItem` for actions.
+- `cosmic-applets` 1.8: left press calls `Activate(0, 0)` unless `ItemIsMenu`, right press opens
+  the menu, so `MENU_ON_ACTIVATE = false` and `activate` spawns the dashboard. The coordinates
+  are always zero and a Wayland toplevel cannot place itself — the dashboard opens where the
+  compositor puts it. The applet's `ProvideXdgActivationToken` call fails (ksni lacks it), so
+  the window may open unfocused.

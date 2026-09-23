@@ -15,6 +15,7 @@ a shared headless core:
   in the tray.
 - **Tray** — `rigbat tray`: a long-running StatusNotifierItem daemon.
 - **Settings** — `rigbat settings`: a small GUI window, launched as a separate process.
+- **Dashboard** — `rigbat dashboard`: the tray icon's left click, a card per shown device.
 
 The core (`domain` + `sources` + `discovery` + `app`) has no knowledge of CLI tables, tray
 icons, or GUI widgets. The surfaces are adapters on top of it.
@@ -174,12 +175,25 @@ Settings:  tray menu "Settings…" → spawn `rigbat settings` (separate process
            egui window edits config.json (atomic temp+rename)
            state store (SQLite) ──▶ device table rows for devices not currently present
            tray's config file watch reloads ──watch<Config>──▶ live update
+
+Dashboard: tray left click (SNI Activate) → spawn `rigbat dashboard` (separate process)
+           org.rigbat.Tray1.State() ──JSON Snapshot──▶ cards
+           org.rigbat.Tray1.StateChanged ──▶ re-read, repaint
+           second launch → org.rigbat.Dashboard1.Close() on the open one → exit
 ```
+
+The dashboard is a view of the tray's state, not a second monitor: the tray serves
+`org.rigbat.Tray1` on the connection that holds its single-instance name, and the dashboard never
+polls a device. It opens instantly, wakes nothing, and cannot classify a device differently from
+its tray icon — the snapshot carries each device already classified by `domain::device_status`,
+and the card draws its glyph with the same `icon::TinySkiaRenderer` the tray uses. It also lists
+devices the tray has dropped after a day of silence, dimmed and last; hidden ones never appear.
+If the tray goes away the window says so, and it reloads when the tray comes back.
 
 The settings window is a separate process on purpose: it owns the winit event loop, and eframe is
 built with `default-features = false` (glow backend, no accesskit — an AT-SPI/zbus bridge assumes
 a runtime that eframe itself never enters). It communicates with the tray only through
-`config.json`; there is no IPC.
+`config.json`.
 
 It does hold a tokio runtime, but nothing on the UI thread ever enters it: device discovery is
 spawned onto it and the result arrives over an `mpsc` channel drained with `try_recv` at the top

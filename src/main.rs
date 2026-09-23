@@ -3,9 +3,15 @@ mod appearance;
 mod autostart;
 mod cli;
 mod config;
+mod dashboard;
 mod discovery;
 mod domain;
+#[cfg(test)]
+mod egui_test;
+mod gui;
 mod i18n;
+mod icon;
+mod ipc;
 mod notifications;
 mod session;
 mod settings;
@@ -25,6 +31,7 @@ Usage:
   rigbat --waybar          Stream waybar custom-module JSON lines (featured device)
   rigbat tray              Run the system tray daemon
   rigbat settings          Open the settings window
+  rigbat dashboard         Open the device overview (the tray icon's left click)
 
 Options:
   --wide        Add transport and locator columns to the table
@@ -41,6 +48,7 @@ enum Invocation {
     Waybar,
     Tray,
     Settings,
+    Dashboard,
     Help,
     Version,
     /// Unrecognised argument; carries the offending token for the error message.
@@ -99,6 +107,7 @@ fn parse_args(args: &[String]) -> Invocation {
         "list" => Invocation::List { wide },
         "tray" => Invocation::Tray,
         "settings" => Invocation::Settings,
+        "dashboard" => Invocation::Dashboard,
         other => Invocation::Unknown(other.to_string()),
     }
 }
@@ -142,6 +151,13 @@ fn main() {
     if invocation == Invocation::Settings {
         if let Err(e) = settings::run() {
             tracing::error!("settings window failed to start: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if invocation == Invocation::Dashboard {
+        if let Err(e) = dashboard::run() {
+            tracing::error!("dashboard window failed to start: {e:#}");
             std::process::exit(1);
         }
         return;
@@ -203,7 +219,10 @@ enum LogProfile {
 impl From<&Invocation> for LogProfile {
     fn from(invocation: &Invocation) -> Self {
         match invocation {
-            Invocation::Tray | Invocation::Settings | Invocation::Waybar => LogProfile::Daemon,
+            Invocation::Tray
+            | Invocation::Settings
+            | Invocation::Dashboard
+            | Invocation::Waybar => LogProfile::Daemon,
             Invocation::List { .. }
             | Invocation::Json
             | Invocation::Help
@@ -300,16 +319,16 @@ fn announce_already_running() {
 async fn run_tray() {
     // Keep the session-bus connection alive for the whole process: dropping
     // it releases the single-instance name and reopens the collision.
-    let _session_guard = match tray::single_instance::acquire().await {
-        tray::single_instance::SingleInstance::AlreadyRunning => {
+    let bus = match ipc::single_instance::acquire().await {
+        ipc::single_instance::SingleInstance::AlreadyRunning => {
             tracing::info!(
                 "another rigbat tray already owns the session-bus single-instance name; exiting"
             );
             announce_already_running();
             return;
         }
-        tray::single_instance::SingleInstance::Acquired(conn) => Some(conn),
-        tray::single_instance::SingleInstance::Unavailable => None,
+        ipc::single_instance::SingleInstance::Acquired(conn) => Some(conn),
+        ipc::single_instance::SingleInstance::Unavailable => None,
     };
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting rigbat tray");
@@ -337,6 +356,14 @@ async fn run_tray() {
         app::supervisor::ConfigRole::Owner,
     );
     spawn_bus_dependent_tasks(ctx.clone(), refresh.clone());
+    if let Some(conn) = &bus {
+        tokio::spawn(tray::state_service::serve(
+            conn.clone(),
+            rx.clone(),
+            config_tx.subscribe(),
+            refresh.clone(),
+        ));
+    }
     let theme_rx = appearance::spawn();
     // Spawn the notifier after config_tx is available so it can receive the
     // notifications_enabled flag and per-device thresholds via a config receiver.
@@ -603,6 +630,7 @@ mod tests {
     #[test]
     fn mode_settings() {
         assert_eq!(parse_args(&s(&["settings"])), Invocation::Settings);
+        assert_eq!(parse_args(&s(&["dashboard"])), Invocation::Dashboard);
     }
 
     #[test]
@@ -687,7 +715,15 @@ mod tests {
 
     #[test]
     fn usage_mentions_all_modes_and_flags() {
-        for token in ["list", "tray", "settings", "--json", "--waybar", "--wide"] {
+        for token in [
+            "list",
+            "tray",
+            "settings",
+            "dashboard",
+            "--json",
+            "--waybar",
+            "--wide",
+        ] {
             assert!(USAGE.contains(token), "USAGE missing '{token}'");
         }
     }

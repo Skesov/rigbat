@@ -4,6 +4,7 @@
 
 tray-no-devices = No devices
 tray-refresh = Refresh
+tray-dashboard = Device overview…
 tray-settings = Settings…
 tray-quit = Quit
 
@@ -109,3 +110,11 @@ detail-override-threshold = Override low battery threshold
 detail-default-threshold = Use default ({ $percent }%)
 detail-override-interval = Override poll interval
 detail-default-interval = Use default ({ $secs } s)
+
+## Dashboard (left click on the tray icon)
+
+dashboard-title = rigbat — devices
+dashboard-tray-not-running = The rigbat tray is not running.
+dashboard-remaining = { $estimate } left
+dashboard-last-reading = last reading { $age }
+dashboard-in-tray = in tray

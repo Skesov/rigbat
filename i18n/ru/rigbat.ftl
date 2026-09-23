@@ -4,6 +4,7 @@
 
 tray-no-devices = Нет устройств
 tray-refresh = Обновить
+tray-dashboard = Обзор устройств…
 tray-settings = Настройки…
 tray-quit = Выход
 
@@ -108,3 +109,11 @@ detail-override-threshold = Свой порог заряда
 detail-default-threshold = По умолчанию ({ $percent }%)
 detail-override-interval = Свой интервал опроса
 detail-default-interval = По умолчанию ({ $secs } с)
+
+## Dashboard (left click on the tray icon)
+
+dashboard-title = rigbat — устройства
+dashboard-tray-not-running = Трей rigbat не запущен.
+dashboard-remaining = осталось { $estimate }
+dashboard-last-reading = последние данные { $age }
+dashboard-in-tray = в трее

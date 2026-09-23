@@ -1,6 +1,9 @@
-use super::types::{BatteryReading, ChargeState};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use super::types::{BatteryReading, ChargeState, DeviceState, Presence};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PrimaryStatus {
     Offline,
     Ok { percent: u8 },
@@ -31,6 +34,18 @@ pub fn classify_stale(percent: u8, low_threshold: u8) -> PrimaryStatus {
         PrimaryStatus::Low { percent }
     } else {
         PrimaryStatus::Ok { percent }
+    }
+}
+
+/// What a device's icon shows, and whether that comes from a retained rather
+/// than a live reading.
+pub fn device_status(device: &DeviceState, low_threshold: u8) -> (PrimaryStatus, bool) {
+    if device.presence == Presence::Online {
+        (classify(device.last_reading, low_threshold), false)
+    } else if let Some(reading) = device.last_reading {
+        (classify_stale(reading.percent, low_threshold), true)
+    } else {
+        (PrimaryStatus::Offline, false)
     }
 }
 

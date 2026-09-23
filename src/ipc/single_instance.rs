@@ -1,4 +1,5 @@
-//! Single-instance guard for `rigbat tray`.
+//! Single-instance guard: `rigbat tray` and `rigbat dashboard` each claim a
+//! well-known session-bus name.
 //!
 //! `ksni` publishes each tray icon under `org.kde.StatusNotifierItem-<pid>-<n>`,
 //! which is keyed by PID and therefore never collides — so two `rigbat tray`
@@ -11,8 +12,7 @@
 use zbus::fdo::{DBusProxy, RequestNameFlags, RequestNameReply};
 use zbus::names::WellKnownName;
 
-/// Well-known session-bus name a running tray holds for its whole lifetime.
-const NAME: &str = "org.rigbat.Tray";
+use super::TRAY_NAME as NAME;
 
 /// Outcome of trying to become the one tray instance on this session bus.
 pub enum SingleInstance {
@@ -38,7 +38,7 @@ pub async fn acquire() -> SingleInstance {
 /// name of its own. Claiming `NAME` in a test would fail on any machine where
 /// the maintainer's own tray is running — the test would be asserting that
 /// nobody uses the program.
-async fn acquire_named(name: &str) -> SingleInstance {
+pub async fn acquire_named(name: &str) -> SingleInstance {
     let conn = match zbus::Connection::session().await {
         Ok(conn) => conn,
         Err(e) => {

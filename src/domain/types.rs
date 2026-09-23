@@ -1,9 +1,12 @@
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::domain::estimate::Estimate;
 use crate::i18n::{Lang, fl, loader};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeviceKind {
     Mouse,
     Keyboard,
@@ -122,7 +125,8 @@ pub fn freedesktop_icon_name(kind: DeviceKind) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ChargeState {
     Discharging,
     Charging,
@@ -131,7 +135,8 @@ pub enum ChargeState {
 
 /// How rigbat reaches a device. Distinguishes otherwise same-named duplicates
 /// (e.g. a mouse seen over both sysfs/HID++ and Bluetooth).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Transport {
     Sysfs,
     Bluetooth,
@@ -201,7 +206,8 @@ impl BatteryReading {
 /// How reachable a device currently is. `last_reading` is retained across all
 /// three states, so a device that is asleep or switched off still shows the
 /// charge it last reported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Presence {
     /// Polling succeeds.
     Online,

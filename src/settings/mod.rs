@@ -12,6 +12,7 @@ use egui_extras::{Column, Size, StripBuilder, TableBuilder};
 use crate::autostart;
 use crate::config::{self, Config, DeviceSettings, DisplayMode, TrayMode};
 use crate::domain::{BatteryReading, DeviceInfo, Presence};
+use crate::gui;
 use crate::i18n::{self, Lang, fl, loader};
 use crate::state;
 use devices::{DeleteState, DeviceRow, SortColumn, SortState};
@@ -1157,12 +1158,14 @@ pub fn run() -> anyhow::Result<()> {
             .context("building the tokio runtime for device discovery")?,
     );
     let discovery_ctx = Arc::new(crate::discovery::Context::new());
+    let appearance = rt.block_on(crate::appearance::window_appearance());
+    let text_scale = appearance.borrow().text_scale;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             // Sizes live next to the table they are derived from — see
             // `WINDOW_MIN_SIZE`.
-            .with_inner_size(WINDOW_DEFAULT_SIZE)
-            .with_min_inner_size(WINDOW_MIN_SIZE)
+            .with_inner_size(gui::scaled(WINDOW_DEFAULT_SIZE, text_scale))
+            .with_min_inner_size(gui::scaled(WINDOW_MIN_SIZE, text_scale))
             .with_title("rigbat")
             .with_app_id("rigbat"),
         ..Default::default()
@@ -1171,9 +1174,8 @@ pub fn run() -> anyhow::Result<()> {
         "rigbat",
         options,
         Box::new(move |cc| {
-            // Follow the system light/dark preference. Confirmed safe in the runtime-less settings
-            // process on COSMIC/Wayland — portal theme queries do not hit the zbus-no-runtime path.
-            cc.egui_ctx.set_theme(egui::ThemePreference::System);
+            gui::apply(&cc.egui_ctx, &appearance.borrow());
+            gui::follow(rt.handle(), cc.egui_ctx.clone(), appearance);
             let mut app = SettingsApp {
                 config,
                 devices: Vec::new(),
@@ -1260,93 +1262,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The narrowest a string may be drawn and still count as readable. A
-    /// couple of characters' worth: enough to fail a label clipped down to its
-    /// container's padding, not so much that a short cell value fails.
-    const MIN_READABLE_WIDTH: f32 = 24.0;
+    use crate::egui_test::{
+        assert_single_lines_without_overlap, fully_painted_text_at, painted_text_at,
+    };
 
-    /// Runs two frames of `contents` in a headless egui context and returns
-    /// every string it painted *visibly* — text whose galley survives its own
-    /// clip rectangle by at least `MIN_READABLE_WIDTH`.
-    ///
-    /// Two frames because `egui_extras`' table sizes itself from the previous
-    /// frame's state, so the first one can lay out degenerately.
-    ///
-    /// Clipping is the whole point. R45 painted the device name with its full
-    /// text, at a position inside a rectangle a few pixels wide, so a test
-    /// that only collected galley strings passed against the broken build —
-    /// verified by reintroducing the bug and watching it stay green. What the
-    /// user saw was the clip.
     fn painted_text(contents: impl FnMut(&mut egui::Ui)) -> Vec<String> {
         painted_text_at(WINDOW_DEFAULT_SIZE, contents)
-    }
-
-    /// `painted_text` at a chosen window size. The root clip rectangle is the
-    /// screen, so anything laid out past the window's edge is filtered out by
-    /// the same rule that filters anything clipped inside it.
-    fn painted_text_at(size: [f32; 2], contents: impl FnMut(&mut egui::Ui)) -> Vec<String> {
-        text_at(size, contents, |_drawn, visible| {
-            visible.width() >= MIN_READABLE_WIDTH && visible.height() > 0.0
-        })
-        .into_iter()
-        .map(|(text, _)| text)
-        .collect()
-    }
-
-    /// Strings drawn in full, not cut by their clip rectangle, with where they landed.
-    fn fully_painted_text_at(
-        size: [f32; 2],
-        contents: impl FnMut(&mut egui::Ui),
-    ) -> Vec<(String, egui::Rect)> {
-        text_at(size, contents, |drawn, visible| {
-            visible.width() + 0.5 >= drawn.width() && visible.height() + 0.5 >= drawn.height()
-        })
-    }
-
-    fn text_at(
-        size: [f32; 2],
-        mut contents: impl FnMut(&mut egui::Ui),
-        keep: impl Fn(egui::Rect, egui::Rect) -> bool,
-    ) -> Vec<(String, egui::Rect)> {
-        let ctx = egui::Context::default();
-        let input = || egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(size[0], size[1]),
-            )),
-            ..Default::default()
-        };
-        let mut painted = Vec::new();
-        for _ in 0..2 {
-            let output = ctx.run_ui(input(), |ui| contents(ui));
-            painted.clear();
-            for clipped in output.shapes {
-                collect_text(&clipped.shape, clipped.clip_rect, &keep, &mut painted);
-            }
-        }
-        painted
-    }
-
-    fn collect_text(
-        shape: &egui::Shape,
-        clip: egui::Rect,
-        keep: &impl Fn(egui::Rect, egui::Rect) -> bool,
-        out: &mut Vec<(String, egui::Rect)>,
-    ) {
-        match shape {
-            egui::Shape::Text(text) => {
-                let drawn = egui::Rect::from_min_size(text.pos, text.galley.size());
-                if keep(drawn, drawn.intersect(clip)) {
-                    out.push((text.galley.text().to_owned(), drawn));
-                }
-            }
-            egui::Shape::Vec(shapes) => {
-                for shape in shapes {
-                    collect_text(shape, clip, keep, out);
-                }
-            }
-            _ => {}
-        }
     }
 
     fn rows_for(names: &[&str]) -> Vec<devices::DeviceRow> {
@@ -1459,26 +1380,11 @@ mod tests {
             ));
             for text in expected {
                 assert!(
-                    painted.iter().any(|(t, _)| *t == text),
+                    painted.iter().any(|p| p.text == text),
                     "{lang:?}: {text:?} is cut off or missing; fully painted: {painted:?}"
                 );
             }
-            let labels: Vec<_> = painted.iter().filter(|(t, _)| !t.is_empty()).collect();
-            for (text, rect) in &labels {
-                assert!(
-                    rect.height() <= TABLE_ROW_HEIGHT,
-                    "{lang:?}: {text:?} wraps onto a second line"
-                );
-            }
-            for (i, (a, a_rect)) in labels.iter().enumerate() {
-                for (b, b_rect) in &labels[i + 1..] {
-                    let overlap = a_rect.intersect(*b_rect);
-                    assert!(
-                        overlap.width() <= 0.5 || overlap.height() <= 0.5,
-                        "{lang:?}: {a:?} overlaps {b:?}"
-                    );
-                }
-            }
+            assert_single_lines_without_overlap(&painted);
         }
     }
 

@@ -9,11 +9,11 @@ use crate::app::supervisor::TrayState;
 use crate::appearance::ColorScheme;
 use crate::config::{Config, TrayMode};
 use crate::domain::{
-    DeviceState, Presence, PrimaryStatus, classify, classify_stale, format_device_entry,
+    DeviceState, Presence, PrimaryStatus, device_status, format_device_entry,
     freedesktop_icon_name, select_featured,
 };
 use crate::i18n::{fl, loader};
-use crate::tray::icon::{IconRenderer, Theme, TinySkiaRenderer};
+use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
 
 // ---------------------------------------------------------------------------
 // sanitize: map non-ASCII-alphanumeric chars to '-' for stable SNI ids
@@ -62,7 +62,7 @@ const RETAINED_ICON_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// Every place that turns `TrayState` into tray output goes through this, so
 /// the icon list, the menu roster and the aggregate icon's pick can never
 /// disagree about which devices exist.
-fn tray_visible(device: &DeviceState, cfg: &Config, now: Instant) -> bool {
+pub(super) fn tray_visible(device: &DeviceState, cfg: &Config, now: Instant) -> bool {
     cfg.is_shown(&device.info.name) && device.is_currently_informative(now, RETAINED_ICON_MAX_AGE)
 }
 
@@ -91,7 +91,7 @@ pub fn desired_keys(mode: TrayMode, shown: &[String]) -> Vec<Option<String>> {
 ///
 /// Priority: explicit user choice (if still shown) → first connected shown
 /// device → first shown device → None.
-fn featured_name(
+pub(super) fn featured_name(
     state: &crate::app::supervisor::TrayState,
     cfg: &Config,
     now: Instant,
@@ -157,14 +157,7 @@ fn resolve_for(
         .iter()
         .find(|d| d.info.name == name)
         .filter(|d| tray_visible(d, cfg, now))?;
-    let low_threshold = cfg.effective_low_threshold(&device.info.name);
-    let (status, stale) = if device.presence == Presence::Online {
-        (classify(device.last_reading, low_threshold), false)
-    } else if let Some(reading) = device.last_reading {
-        (classify_stale(reading.percent, low_threshold), true)
-    } else {
-        (PrimaryStatus::Offline, false)
-    };
+    let (status, stale) = device_status(device, cfg.effective_low_threshold(&device.info.name));
     Some(Resolved {
         state: device.clone(),
         status,
@@ -198,7 +191,12 @@ impl RigbatTray {
 }
 
 impl Tray for RigbatTray {
-    const MENU_ON_ACTIVATE: bool = true;
+    // Left click opens the dashboard; the host shows the menu on right click.
+    const MENU_ON_ACTIVATE: bool = false;
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        launch("dashboard");
+    }
 
     fn id(&self) -> String {
         match &self.key {
@@ -317,6 +315,12 @@ impl Tray for RigbatTray {
         items.push(MenuItem::Separator);
 
         items.push(MenuItem::Standard(ksni::menu::StandardItem {
+            label: fl!(l, "tray-dashboard"),
+            activate: Box::new(|_: &mut Self| launch("dashboard")),
+            ..ksni::menu::StandardItem::default()
+        }));
+
+        items.push(MenuItem::Standard(ksni::menu::StandardItem {
             label: fl!(l, "tray-refresh"),
             icon_name: "view-refresh".into(),
             activate: Box::new(|app: &mut Self| app.refresh.trigger()),
@@ -325,25 +329,7 @@ impl Tray for RigbatTray {
 
         items.push(MenuItem::Standard(ksni::menu::StandardItem {
             label: fl!(l, "tray-settings"),
-            activate: Box::new(|_: &mut Self| match std::env::current_exe() {
-                Ok(exe) => match std::process::Command::new(exe).arg("settings").spawn() {
-                    // `Child` has no `Drop` that reaps, so dropping the handle
-                    // leaves the exited settings process as a zombie for the
-                    // tray's whole lifetime — one per click. Reap it on a
-                    // throwaway thread, which lives exactly as long as the
-                    // window does. A blocking wait must not run on the tray's
-                    // own thread, and this closure is not on the tokio runtime.
-                    Ok(mut child) => {
-                        std::thread::spawn(move || {
-                            if let Err(e) = child.wait() {
-                                tracing::warn!("settings process could not be reaped: {e}");
-                            }
-                        });
-                    }
-                    Err(e) => tracing::error!("failed to launch settings window: {e}"),
-                },
-                Err(e) => tracing::error!("cannot find own executable: {e}"),
-            }),
+            activate: Box::new(|_: &mut Self| launch("settings")),
             ..ksni::menu::StandardItem::default()
         }));
 
@@ -356,6 +342,30 @@ impl Tray for RigbatTray {
         }));
 
         items
+    }
+}
+
+/// Starts `rigbat <subcommand>` as a window process of its own.
+fn launch(subcommand: &'static str) {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            tracing::error!("cannot find own executable: {e}");
+            return;
+        }
+    };
+    match std::process::Command::new(exe).arg(subcommand).spawn() {
+        // `Child` does not reap on drop: without the wait, every closed window
+        // stays a zombie for the tray's lifetime. The wait blocks, so it gets a
+        // thread of its own rather than the tray's.
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                if let Err(e) = child.wait() {
+                    tracing::warn!("{subcommand} process could not be reaped: {e}");
+                }
+            });
+        }
+        Err(e) => tracing::error!("failed to launch rigbat {subcommand}: {e}"),
     }
 }
 

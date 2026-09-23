@@ -8,6 +8,8 @@ System tray battery monitor for gaming peripherals.
 - Displays one tray icon for every device, or a single aggregate icon (switch in the settings
   window); the aggregate icon shows the device pinned on the Devices tab, or the first connected
   visible device when none is pinned
+- Left-click the tray icon for an overview: one card per device with its tray glyph, charge bar,
+  status and time left, so you can tell which icon is which. Right-click opens the menu
 - Automatically discovers connected devices on startup — no manual configuration required
 - Supports multiple devices simultaneously; the settings window lists every device ever seen —
   hide the ones you do not care about, delete the ones you no longer own
