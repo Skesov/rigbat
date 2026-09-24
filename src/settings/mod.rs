@@ -1,7 +1,6 @@
 mod devices;
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::{Duration, Instant};
@@ -11,7 +10,7 @@ use egui_extras::{Column, Size, StripBuilder, TableBuilder};
 
 use crate::autostart;
 use crate::config::{self, Config, DeviceSettings, DisplayMode, TrayMode};
-use crate::domain::{BatteryReading, DeviceInfo, Presence};
+use crate::domain::{DeviceInfo, PollOutcome, Presence};
 use crate::gui;
 use crate::i18n::{self, Lang, fl, loader};
 use crate::state;
@@ -64,35 +63,6 @@ const LOW_THRESHOLD_RANGE: std::ops::RangeInclusive<u8> = 5..=50;
 /// a HID device every second, which drains the battery it is meant to monitor.
 const POLL_INTERVAL_RANGE: std::ops::RangeInclusive<u64> = 10..=3600;
 
-/// systemd targets `systemctl --user enable` links a unit into. Checked in
-/// this order but either one enabling `rigbat.service` counts: which target
-/// applies depends on the unit's own `WantedBy=`, not on anything this window
-/// controls.
-const SYSTEMD_WANTS_TARGETS: [&str; 2] = ["default.target.wants", "graphical-session.target.wants"];
-
-/// The unit name `make service` installs and `systemctl --user enable`
-/// operates on.
-const SYSTEMD_UNIT_NAME: &str = "rigbat.service";
-
-/// Returns `true` if `rigbat.service` is enabled for the systemd user manager
-/// rooted at `unit_dir` (`$XDG_CONFIG_HOME/systemd/user`, falling back to
-/// `~/.config/systemd/user`) — i.e. `systemctl --user enable` linked it into
-/// `default.target.wants/` or `graphical-session.target.wants/`. A pure
-/// filesystem check: no systemd dependency, no shelling out.
-fn systemd_service_enabled_at(unit_dir: &Path) -> bool {
-    SYSTEMD_WANTS_TARGETS
-        .iter()
-        .any(|target| unit_dir.join(target).join(SYSTEMD_UNIT_NAME).exists())
-}
-
-/// Returns `true` if `rigbat.service` is enabled, or `false` if the config
-/// directory cannot be determined (no home directory in the environment).
-fn systemd_service_enabled() -> bool {
-    directories::BaseDirs::new()
-        .map(|b| systemd_service_enabled_at(&b.config_dir().join("systemd").join("user")))
-        .unwrap_or(false)
-}
-
 /// The window's two top-level sections. Hand-rolled `SelectableLabel` tab
 /// bar, not `egui_dock` (a docking system for editor layouts, not a fixed
 /// two-or-three-section switcher) and not a sidebar (GNOME HIG reserves the
@@ -110,7 +80,7 @@ enum Tab {
 /// merges the two into the Devices tab's table rows; `General`'s device list
 /// only needs the discovered half.
 struct ScanResult {
-    discovered: Vec<(DeviceInfo, Option<BatteryReading>)>,
+    discovered: Vec<(DeviceInfo, PollOutcome)>,
     records: Vec<state::DeviceRecord>,
 }
 
@@ -605,6 +575,7 @@ impl SettingsApp {
             let (label, weak) = match row.presence {
                 Presence::Online => (fl!(l, "presence-online"), false),
                 Presence::Unreachable => (fl!(l, "presence-unreachable"), false),
+                Presence::NoAccess => (fl!(l, "presence-no-access"), false),
                 Presence::Disconnected => (fl!(l, "presence-disconnected"), true),
             };
             let text = egui::RichText::new(label);
@@ -1141,9 +1112,26 @@ where
 /// discover-once-and-drop approach) so devices that connect after the window
 /// opens still show up: a scan is spawned on it at startup and again on
 /// every "Refresh" click, never entered blockingly from `ui()`.
-pub fn run() -> anyhow::Result<()> {
+type Background = (
+    Arc<tokio::runtime::Runtime>,
+    tokio::sync::watch::Receiver<crate::appearance::Appearance>,
+);
+
+/// The runtime setup `run` does from its own thread, which is not a runtime thread.
+fn start() -> anyhow::Result<Background> {
     use anyhow::Context as _;
 
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .context("building the tokio runtime for device discovery")?,
+    );
+    let appearance = rt.block_on(crate::appearance::window_appearance());
+    Ok((rt, appearance))
+}
+
+pub fn run() -> anyhow::Result<()> {
     let config = config::load();
     // A second connection to the same database the tray writes through —
     // safe since the schema migration takes BEGIN IMMEDIATE plus
@@ -1151,14 +1139,8 @@ pub fn run() -> anyhow::Result<()> {
     // file) degrades to today's scan-only device list, same as the tray
     // treats a missing store as an optimisation, never a dependency.
     let store = state::open();
-    let rt = Arc::new(
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .context("building the tokio runtime for device discovery")?,
-    );
+    let (rt, appearance) = start()?;
     let discovery_ctx = Arc::new(crate::discovery::Context::new());
-    let appearance = rt.block_on(crate::appearance::window_appearance());
     let text_scale = appearance.borrow().text_scale;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1181,7 +1163,7 @@ pub fn run() -> anyhow::Result<()> {
                 devices: Vec::new(),
                 saved_at: None,
                 autostart_enabled: autostart::is_enabled(),
-                systemd_service_enabled: systemd_service_enabled(),
+                systemd_service_enabled: autostart::systemd_service_enabled(),
                 rt,
                 discovery_ctx,
                 scan_rx: None,
@@ -1218,50 +1200,6 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn systemd_service_enabled_at_false_when_dir_absent() {
-        let dir = scratch_dir("dir-absent");
-        assert!(!systemd_service_enabled_at(&dir));
-    }
-
-    #[test]
-    fn systemd_service_enabled_at_false_when_no_symlink() {
-        let dir = scratch_dir("no-symlink");
-        std::fs::create_dir_all(dir.join("default.target.wants")).unwrap();
-        assert!(!systemd_service_enabled_at(&dir));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn systemd_service_enabled_at_true_for_default_target_wants() {
-        let dir = scratch_dir("default-target");
-        let wants = dir.join("default.target.wants");
-        std::fs::create_dir_all(&wants).unwrap();
-        std::fs::write(wants.join("rigbat.service"), "").unwrap();
-        assert!(systemd_service_enabled_at(&dir));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn systemd_service_enabled_at_true_for_graphical_session_target_wants() {
-        let dir = scratch_dir("graphical-session-target");
-        let wants = dir.join("graphical-session.target.wants");
-        std::fs::create_dir_all(&wants).unwrap();
-        std::fs::write(wants.join("rigbat.service"), "").unwrap();
-        assert!(systemd_service_enabled_at(&dir));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn systemd_service_enabled_at_ignores_other_unit_names() {
-        let dir = scratch_dir("other-unit");
-        let wants = dir.join("default.target.wants");
-        std::fs::create_dir_all(&wants).unwrap();
-        std::fs::write(wants.join("other.service"), "").unwrap();
-        assert!(!systemd_service_enabled_at(&dir));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
     use crate::egui_test::{
         assert_single_lines_without_overlap, fully_painted_text_at, painted_text_at,
     };
@@ -1273,7 +1211,10 @@ mod tests {
     fn rows_for(names: &[&str]) -> Vec<devices::DeviceRow> {
         devices::merge_devices(
             Vec::new(),
-            names.iter().map(|n| (device(n), None)).collect(),
+            names
+                .iter()
+                .map(|n| (device(n), PollOutcome::Failed))
+                .collect(),
         )
     }
 
@@ -1326,7 +1267,7 @@ mod tests {
         let mut row = rows_for(&["MX Anywhere 3"]).remove(0);
         row.store_id = Some(1);
         row.presence = Presence::Disconnected;
-        row.charge = Some(BatteryReading::new(
+        row.charge = Some(crate::domain::BatteryReading::new(
             90,
             crate::domain::ChargeState::Discharging,
         ));
@@ -1335,7 +1276,11 @@ mod tests {
         let mut armed = row.clone();
         armed.store_id = Some(2);
         armed.device.name = "NuPhy Air75".to_string();
-        let rows = vec![row, armed];
+        let mut denied = row.clone();
+        denied.store_id = Some(3);
+        denied.device.name = "Aerox 5".to_string();
+        denied.presence = Presence::NoAccess;
+        let rows = vec![row, armed, denied];
 
         for lang in Lang::ALL {
             let mut app = settings_app_with(Config {
@@ -1360,6 +1305,7 @@ mod tests {
                 "col-tray-icon",
                 "col-actions",
                 "presence-disconnected",
+                "presence-no-access",
                 "button-delete",
                 "button-confirm",
                 "button-cancel",
@@ -1495,7 +1441,10 @@ mod tests {
     /// before it started merging in the store's half.
     fn scan_result(devices: Vec<DeviceInfo>) -> ScanResult {
         ScanResult {
-            discovered: devices.into_iter().map(|d| (d, None)).collect(),
+            discovered: devices
+                .into_iter()
+                .map(|d| (d, PollOutcome::Failed))
+                .collect(),
             records: Vec::new(),
         }
     }
@@ -1766,5 +1715,90 @@ mod tests {
         app.apply_scan_result(scan_result(vec![device("mouse")]));
         assert_eq!(app.config.device_overrides, overrides);
         assert!(!app.devices.iter().any(|d| d.name == "headset"));
+    }
+}
+
+#[cfg(test)]
+mod bus_tests {
+    use std::time::{Duration, Instant};
+
+    use eframe::egui;
+    use zbus::object_server::SignalEmitter;
+    use zbus::zvariant::{OwnedValue, Value};
+
+    use super::start;
+    use crate::appearance::ColorScheme;
+    use crate::bus_test::isolated;
+    use crate::gui;
+
+    const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+    const APPEARANCE: &str = "org.freedesktop.appearance";
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Answers only `color-scheme`, with "prefer light".
+    struct FakePortal;
+
+    #[zbus::interface(name = "org.freedesktop.portal.Settings")]
+    impl FakePortal {
+        fn read(&self, namespace: &str, key: &str) -> zbus::fdo::Result<OwnedValue> {
+            match (namespace, key) {
+                (APPEARANCE, "color-scheme") => Ok(OwnedValue::from(2u32)),
+                _ => Err(zbus::fdo::Error::Failed(format!("no {namespace} {key}"))),
+            }
+        }
+
+        #[zbus(property, name = "version")]
+        fn version(&self) -> u32 {
+            1
+        }
+
+        #[zbus(signal)]
+        async fn setting_changed(
+            emitter: &SignalEmitter<'_>,
+            namespace: &str,
+            key: &str,
+            value: Value<'_>,
+        ) -> zbus::Result<()>;
+    }
+
+    /// Called from the test thread, which no runtime has entered — as `run` calls it.
+    #[test]
+    fn start_follows_the_portal_from_a_plain_thread() {
+        if !isolated(
+            module_path!(),
+            "start_follows_the_portal_from_a_plain_thread",
+        ) {
+            return;
+        }
+        let portal_rt = tokio::runtime::Runtime::new().expect("portal runtime");
+        let portal = portal_rt
+            .block_on(async {
+                zbus::connection::Builder::session()?
+                    .name("org.freedesktop.portal.Desktop")?
+                    .serve_at(PORTAL_PATH, FakePortal)?
+                    .build()
+                    .await
+            })
+            .expect("fake portal");
+
+        let (rt, appearance) = start().expect("start");
+        assert_eq!(appearance.borrow().scheme, ColorScheme::Light);
+
+        let window = egui::Context::default();
+        gui::follow(rt.handle(), window.clone(), appearance);
+        let dark = || window.options(|o| o.theme_preference) == egui::ThemePreference::Dark;
+        let deadline = Instant::now() + TIMEOUT;
+        // The follower subscribes after `start` returns, so an early signal can go unheard.
+        while !dark() {
+            assert!(Instant::now() < deadline, "the window never turned dark");
+            portal_rt
+                .block_on(async {
+                    let emitter = SignalEmitter::new(&portal, PORTAL_PATH)?;
+                    FakePortal::setting_changed(&emitter, APPEARANCE, "color-scheme", Value::U32(1))
+                        .await
+                })
+                .expect("SettingChanged");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

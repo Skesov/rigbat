@@ -157,7 +157,7 @@ pub fn watch_events(refresh: RefreshSignal, ctx: Arc<Context>) {
             let attempt_start = Instant::now();
             let result: anyhow::Result<()> = async {
                 let conn = ctx.system_bus().await?;
-                watch_events_inner(refresh.clone(), conn).await
+                watch_events_inner(refresh.clone(), conn, SIGNAL_DEBOUNCE).await
             }
             .await;
 
@@ -252,7 +252,11 @@ async fn subscribe(conn: &zbus::Connection) -> anyhow::Result<Subscriptions> {
     })
 }
 
-async fn watch_events_inner(refresh: RefreshSignal, conn: zbus::Connection) -> anyhow::Result<()> {
+async fn watch_events_inner(
+    refresh: RefreshSignal,
+    conn: zbus::Connection,
+    debounce: Duration,
+) -> anyhow::Result<()> {
     let dbus = zbus::fdo::DBusProxy::new(&conn)
         .await
         .context("building DBusProxy")?;
@@ -263,7 +267,7 @@ async fn watch_events_inner(refresh: RefreshSignal, conn: zbus::Connection) -> a
 
     let mut subs = subscribe(&conn).await?;
 
-    let mut debouncer = Debouncer::new(SIGNAL_DEBOUNCE);
+    let mut debouncer = Debouncer::new(debounce);
     let mut deferred: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
     loop {
@@ -453,11 +457,18 @@ impl BatterySource for BluezSource {
             .await
             .context("reading Battery1.Percentage")?;
 
-        let percent = u8::try_from(pct_val).context("parsing Battery1.Percentage as u8")?;
+        let reading = percentage_reading(pct_val)?;
 
-        tracing::debug!(device = %self.info.name, percent, "bluez poll");
-        Ok(BatteryReading::new(percent, ChargeState::Discharging))
+        tracing::debug!(device = %self.info.name, percent = reading.percent, "bluez poll");
+        Ok(reading)
     }
+}
+
+/// `Battery1.Percentage` is a D-Bus byte (`y`); a value of any other type is
+/// rejected, not coerced.
+fn percentage_reading(value: zbus::zvariant::OwnedValue) -> anyhow::Result<BatteryReading> {
+    let percent = u8::try_from(value).context("parsing Battery1.Percentage as u8")?;
+    Ok(BatteryReading::new(percent, ChargeState::Discharging))
 }
 
 #[cfg(test)]
@@ -572,5 +583,152 @@ mod tests {
             device_name(Some(""), Some(""), "AA:BB:CC:DD:EE:FF"),
             "AA:BB:CC:DD:EE:FF"
         );
+    }
+
+    mod props {
+        use super::super::percentage_reading;
+        use crate::domain::ChargeState;
+        use proptest::prelude::*;
+        use zbus::zvariant::{OwnedValue, Str};
+
+        fn non_byte_value() -> impl Strategy<Value = OwnedValue> {
+            prop_oneof![
+                any::<bool>().prop_map(OwnedValue::from),
+                any::<u16>().prop_map(OwnedValue::from),
+                any::<i32>().prop_map(OwnedValue::from),
+                any::<u32>().prop_map(OwnedValue::from),
+                any::<f64>().prop_map(OwnedValue::from),
+                any::<String>().prop_map(|s| OwnedValue::from(Str::from(s))),
+            ]
+        }
+
+        proptest! {
+            #[test]
+            fn any_byte_reads_in_range(percent in any::<u8>()) {
+                let reading = percentage_reading(OwnedValue::from(percent)).unwrap();
+                prop_assert_eq!(reading.percent, percent.min(100));
+                prop_assert_eq!(reading.state, ChargeState::Discharging);
+            }
+
+            #[test]
+            fn a_value_of_another_type_is_rejected(value in non_byte_value()) {
+                prop_assert!(percentage_reading(value).is_err());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bus_tests {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+    use zbus::zvariant::Value;
+
+    use super::watch_events_inner;
+    use crate::app::refresh::{RefreshSignal, RefreshWaiter};
+    use crate::bus_test::isolated;
+    use crate::discovery::Context;
+
+    const DEBOUNCE: Duration = Duration::from_millis(300);
+    /// Room for a signal to cross the bus and the watcher to act on it.
+    const SLACK: Duration = Duration::from_millis(150);
+    const DEVICE: &str = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF";
+
+    async fn fake_bluez() -> zbus::Connection {
+        zbus::connection::Builder::system()
+            .expect("private bus address")
+            .name("org.bluez")
+            .expect("well-known name")
+            .build()
+            .await
+            .expect("fake BlueZ")
+    }
+
+    async fn properties_changed(bluez: &zbus::Connection, interface: &str, property: &str) {
+        let changed = HashMap::from([(property, Value::U8(42))]);
+        bluez
+            .emit_signal(
+                None::<()>,
+                DEVICE,
+                "org.freedesktop.DBus.Properties",
+                "PropertiesChanged",
+                &(interface, changed, Vec::<&str>::new()),
+            )
+            .await
+            .expect("emit PropertiesChanged");
+    }
+
+    async fn fired(refreshed: &mut RefreshWaiter, within: Duration) -> bool {
+        timeout(within, refreshed.wait()).await.is_ok()
+    }
+
+    #[tokio::test]
+    async fn bluez_signals_trigger_a_debounced_refresh() {
+        if !isolated(module_path!(), "bluez_signals_trigger_a_debounced_refresh") {
+            return;
+        }
+        let bluez = fake_bluez().await;
+        let refresh = RefreshSignal::new();
+        let mut refreshed = refresh.waiter();
+        let conn = Context::new()
+            .system_bus()
+            .await
+            .expect("private system bus");
+        let watcher = tokio::spawn(watch_events_inner(refresh, conn, DEBOUNCE));
+
+        // Signals sent before the watcher's match rules exist are lost; repeat until one lands.
+        let mut attempts = 0;
+        while !fired(&mut refreshed, Duration::from_millis(50)).await {
+            attempts += 1;
+            assert!(attempts < 100, "the watcher never reacted");
+            properties_changed(&bluez, "org.bluez.Battery1", "Percentage").await;
+        }
+        while fired(&mut refreshed, DEBOUNCE + SLACK).await {}
+
+        for _ in 0..5 {
+            properties_changed(&bluez, "org.bluez.Battery1", "Percentage").await;
+        }
+        assert!(
+            fired(&mut refreshed, SLACK).await,
+            "the first of a burst fires at once"
+        );
+        assert!(
+            !fired(&mut refreshed, DEBOUNCE / 2).await,
+            "the rest of the burst waits out the window"
+        );
+        assert!(
+            fired(&mut refreshed, DEBOUNCE).await,
+            "the burst's tail fires once the window closes"
+        );
+        assert!(
+            !fired(&mut refreshed, DEBOUNCE + SLACK).await,
+            "and only once"
+        );
+
+        properties_changed(&bluez, "org.bluez.Device1", "RSSI").await;
+        assert!(
+            !fired(&mut refreshed, DEBOUNCE + SLACK).await,
+            "RSSI is noise"
+        );
+
+        let dbus = zbus::fdo::DBusProxy::new(&bluez).await.expect("DBus proxy");
+        dbus.release_name("org.bluez".try_into().expect("name"))
+            .await
+            .expect("release org.bluez");
+        let restarted = fake_bluez().await;
+        assert!(
+            fired(&mut refreshed, DEBOUNCE).await,
+            "a restarted BlueZ re-polls"
+        );
+        properties_changed(&bluez, "org.bluez.Battery1", "Percentage").await;
+        assert!(
+            !fired(&mut refreshed, SLACK).await,
+            "the old owner is no longer BlueZ"
+        );
+        properties_changed(&restarted, "org.bluez.Battery1", "Percentage").await;
+        assert!(fired(&mut refreshed, SLACK).await, "the new owner is heard");
+        assert!(!watcher.is_finished());
     }
 }

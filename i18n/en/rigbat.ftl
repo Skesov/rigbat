@@ -26,6 +26,7 @@ entry-online = { $name }: { $percent }%  { $state }
 entry-online-estimate = { $name }: { $percent }%  { $state }  { $estimate } left
 entry-offline = { $name }: offline
 entry-offline-retained = { $name }: { $percent }%  offline ({ $age })
+entry-no-access = { $name }: no access (run rigbat doctor)
 
 kind-mouse = mouse
 kind-keyboard = keyboard
@@ -99,6 +100,7 @@ col-actions = Actions
 presence-online = Online
 presence-unreachable = Unreachable
 presence-disconnected = Disconnected
+presence-no-access = No access
 
 button-delete = Delete
 button-confirm = Yes
@@ -115,6 +117,6 @@ detail-default-interval = Use default ({ $secs } s)
 
 dashboard-title = rigbat — devices
 dashboard-tray-not-running = The rigbat tray is not running.
-dashboard-remaining = { $estimate } left
 dashboard-last-reading = last reading { $age }
+dashboard-no-access-hint = run rigbat doctor
 dashboard-in-tray = in tray

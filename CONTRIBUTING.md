@@ -47,7 +47,8 @@ Without it the device reads as `offline` because `/dev/hidraw*` is root-only by 
 ### 2. New vendor or transport
 
 Add a file `src/sources/<vendor>.rs`, implement `BatteryBackend` + `BatterySource`,
-then register one line in `src/discovery/registry.rs`.
+then register one line in `src/discovery/registry.rs` (a `/dev/hidraw` backend also adds its
+`match_node` to `hidraw_matchers()`, which `rigbat doctor` uses).
 
 Pick the granularity that fits the protocol:
 
@@ -94,6 +95,9 @@ all three; run them yourself on a desktop machine with:
 ```sh
 make test-live         # cargo test -- --ignored
 ```
+
+The D-Bus integration tests start a private `dbus-daemon` (package `dbus`) and skip themselves,
+with a message, when it is not installed.
 
 ## Adding a translation
 

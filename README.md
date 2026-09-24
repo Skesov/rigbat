@@ -28,8 +28,9 @@ Two backends read a battery from any device the kernel already knows about, so m
 work without rigbat knowing their model:
 
 - **sysfs** (`/sys/class/power_supply`) — anything the kernel exposes a battery for, which
-  includes Logitech devices over a Unifying or Bolt receiver via `hid-logitech-hidpp`, and many
-  Bluetooth peripherals through `hid-generic`.
+  includes Logitech devices over a Unifying or Bolt receiver via `hid-logitech-hidpp`, many
+  Bluetooth peripherals through `hid-generic`, and Xbox controllers through `xpadneo` (a level
+  band rather than a percentage, shown without a time-remaining estimate).
 - **BlueZ** — any Bluetooth device that implements `org.bluez.Battery1`.
 
 Two more speak a vendor protocol over `/dev/hidraw`, and those need the device to be in the table:
@@ -94,12 +95,30 @@ rigbat --json     # machine-readable
 rigbat --waybar   # long-lived waybar custom module (see Status bars below)
 rigbat tray       # tray daemon
 rigbat settings   # settings window
+rigbat doctor     # check the setup, print a fix for each problem
 rigbat --help     # show usage (-h)
 rigbat --version  # show the version (-V)
 ```
 
 `--help` and `--version` exit 0. An unknown argument, or `--json` and `--waybar` passed together,
 prints usage to stderr and exits 2.
+
+### Arch Linux (AUR)
+
+A `rigbat-git` package (builds `master`) is coming to the AUR. Until it is published, build it
+from the PKGBUILD in this repository:
+
+```sh
+cd packaging/aur/rigbat-git
+makepkg -si
+systemctl --user enable --now rigbat.service
+```
+
+The package installs system-wide what the `make` targets put in your home directory:
+`/usr/bin/rigbat`, the udev rule (`/usr/lib/udev/rules.d/70-rigbat.rules`), the systemd user
+unit (`/usr/lib/systemd/user/rigbat.service`), the desktop entry and the icon. Do not mix it
+with `make install`/`make service`: remove those first with `make uninstall`. If a USB device
+still shows offline after installing, replug its receiver.
 
 ## Run as a systemd user service
 
@@ -241,7 +260,33 @@ Polybar's `custom/script` consumes plain text, not JSON, so `--waybar` does not 
 rigbat --json | jq -r '.[0] | if .online then "\(.percent)% \(.name)" else "\(.name) offline" end'
 ```
 
+Each `--json` entry also carries `presence`: `online`, `unreachable` (the device did not answer),
+or `no_access` (rigbat may not open the device — run `rigbat doctor`). `online` stays `true` only
+for `online`.
+
+An entry whose device reports only a battery level band, not a percentage (the kernel's
+`capacity_level`, e.g. Xbox controllers under `xpadneo`), also carries `"coarse": true`: its
+`percent` is a stand-in for the band (Critical 5, Low 20, Normal 60, High 85, Full 100). The key is
+absent for an exact reading.
+
 ## Troubleshooting / logs
+
+Start with `rigbat doctor`. It checks what rigbat depends on and prints each problem with the
+command that fixes it:
+
+- the session bus, a tray host (`org.kde.StatusNotifierWatcher`), and a running `rigbat tray`;
+- the systemd unit and the autostart entry both enabled (two trays, the second exits);
+- BlueZ on the system bus and the xdg-desktop-portal Settings interface (warnings only);
+- read-write access to each connected USB HID device rigbat supports, and whether
+  `70-rigbat.rules` is installed;
+- the config file (`config.json`) and the state database, with their paths.
+
+```sh
+rigbat doctor
+```
+
+Each line starts with `ok`, `warn` or `fail`. The exit code is 1 if any check fails; warnings
+do not fail it.
 
 Diagnostics go to stderr via `tracing`; `journalctl` captures that stream for the
 systemd service. No journald transport is linked in, so levels show up in the

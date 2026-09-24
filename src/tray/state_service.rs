@@ -5,7 +5,7 @@ use std::time::Instant;
 use tokio::sync::watch;
 use zbus::object_server::SignalEmitter;
 
-use super::manager::{featured_name, tray_visible};
+use super::manager::{featured_id, tray_visible};
 use crate::app::refresh::RefreshSignal;
 use crate::app::supervisor::TrayState;
 use crate::config::{Config, TrayMode};
@@ -14,7 +14,7 @@ use crate::ipc::{DeviceCard, Snapshot, TRAY_PATH};
 
 /// Every shown device, classified exactly as its tray icon is.
 pub fn snapshot(state: &TrayState, cfg: &Config, now: Instant) -> Snapshot {
-    let featured = featured_name(state, cfg, now);
+    let featured = featured_id(state, cfg, now);
     let devices = state
         .devices
         .iter()
@@ -23,7 +23,7 @@ pub fn snapshot(state: &TrayState, cfg: &Config, now: Instant) -> Snapshot {
             let (status, stale) = device_status(d, cfg.effective_low_threshold(&d.info.name));
             let in_tray = match cfg.tray_mode {
                 TrayMode::PerDevice => tray_visible(d, cfg, now),
-                TrayMode::PrimaryOnly => featured.as_deref() == Some(d.info.name.as_str()),
+                TrayMode::PrimaryOnly => featured.as_ref() == Some(&d.info.id()),
             };
             DeviceCard {
                 name: d.info.name.clone(),
@@ -200,5 +200,120 @@ mod tests {
                 .iter()
                 .all(|c| c.in_tray)
         );
+    }
+
+    /// The aggregate icon shows one device, so one card says so even when
+    /// another device shares its name.
+    #[test]
+    fn in_tray_marks_one_of_two_same_named_devices() {
+        let now = Instant::now();
+        let mut bluetooth = device("mouse", Presence::Online, 40, now);
+        bluetooth.info.transport = Transport::Bluetooth;
+        let state = TrayState {
+            devices: vec![device("mouse", Presence::Unreachable, 80, now), bluetooth],
+        };
+        let in_tray: Vec<_> = snapshot(&state, &Config::default(), now)
+            .devices
+            .iter()
+            .map(|c| (c.transport, c.in_tray))
+            .collect();
+        assert_eq!(
+            in_tray,
+            [(Transport::Sysfs, false), (Transport::Bluetooth, true)]
+        );
+    }
+}
+
+#[cfg(test)]
+mod bus_tests {
+    use std::time::Duration;
+
+    use futures_util::StreamExt as _;
+    use tokio::time::timeout;
+
+    use super::*;
+    use crate::bus_test::{eventually, isolated};
+    use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind, DeviceState};
+    use crate::domain::{Presence, Transport};
+    use crate::ipc::{TRAY_NAME, Tray1Proxy};
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn device(name: &str, percent: u8) -> DeviceState {
+        DeviceState {
+            info: DeviceInfo {
+                name: name.to_owned(),
+                kind: DeviceKind::Mouse,
+                transport: Transport::Sysfs,
+                locator: None,
+            },
+            last_reading: Some(BatteryReading::new(percent, ChargeState::Discharging)),
+            last_seen: Some(Instant::now()),
+            presence: Presence::Online,
+            estimate: Estimate::Unknown,
+        }
+    }
+
+    fn cards(json: &str) -> Vec<(String, Option<u8>)> {
+        let snapshot: Snapshot = serde_json::from_str(json).expect("State returns a Snapshot");
+        snapshot
+            .devices
+            .into_iter()
+            .map(|c| (c.name, c.percent))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn serves_the_state_and_signals_every_change() {
+        if !isolated(module_path!(), "serves_the_state_and_signals_every_change") {
+            return;
+        }
+        let (state_tx, state_rx) = watch::channel(TrayState {
+            devices: vec![device("mouse", 80)],
+        });
+        let (config_tx, config_rx) = watch::channel(Config::default());
+        let refresh = RefreshSignal::new();
+        let mut refreshed = refresh.waiter();
+        let conn = zbus::connection::Builder::session()
+            .expect("private bus")
+            .name(TRAY_NAME)
+            .expect("name")
+            .build()
+            .await
+            .expect("claiming the tray name");
+        tokio::spawn(serve(conn, state_rx, config_rx, refresh));
+
+        let client = zbus::Connection::session().await.expect("private bus");
+        let tray = Tray1Proxy::new(&client).await.expect("Tray1 proxy");
+        let mut changes = tray.receive_state_changed().await.expect("subscribe");
+        let json = eventually(TIMEOUT, || async { tray.state().await.ok() }).await;
+        assert_eq!(cards(&json), [("mouse".to_owned(), Some(80))]);
+
+        state_tx.send_replace(TrayState {
+            devices: vec![device("mouse", 79), device("keyboard", 50)],
+        });
+        timeout(TIMEOUT, changes.next())
+            .await
+            .expect("StateChanged after a state change");
+        let json = tray.state().await.expect("State");
+        assert_eq!(
+            cards(&json),
+            [
+                ("mouse".to_owned(), Some(79)),
+                ("keyboard".to_owned(), Some(50))
+            ]
+        );
+
+        config_tx.send_modify(|c| c.hidden_devices.push("keyboard".to_owned()));
+        timeout(TIMEOUT, changes.next())
+            .await
+            .expect("StateChanged after a config change");
+        let json = tray.state().await.expect("State");
+        assert_eq!(cards(&json), [("mouse".to_owned(), Some(79))]);
+
+        tray.refresh().await.expect("Refresh");
+        timeout(TIMEOUT, refreshed.wait())
+            .await
+            .expect("Refresh re-polls the devices");
     }
 }

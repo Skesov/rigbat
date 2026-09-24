@@ -13,6 +13,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::domain::BatteryReading;
 use crate::i18n::{Lang, fl, loader};
 
 /// Below this span, two transitions cannot be told apart from a coincidence
@@ -50,7 +51,12 @@ pub enum Estimate {
 /// expected to include `current` in it. `now`/`current` are the latest poll,
 /// passed separately so a poll that has not yet changed the percent still
 /// updates the elapsed window.
-pub fn estimate(history: &[(Instant, u8)], now: Instant, current: u8) -> Estimate {
+pub fn estimate(history: &[(Instant, u8)], now: Instant, current: BatteryReading) -> Estimate {
+    if current.coarse {
+        // Steps between level bands are band edges, not a discharge rate.
+        return Estimate::Unknown;
+    }
+    let current = current.percent;
     let mut points: Vec<(Instant, u8)> = history.to_vec();
     if points.last().map(|&(_, p)| p) != Some(current) {
         points.push((now, current));
@@ -153,31 +159,35 @@ mod tests {
         base + Duration::from_secs(mins * 60)
     }
 
+    fn cur(percent: u8) -> BatteryReading {
+        BatteryReading::new(percent, crate::domain::ChargeState::Discharging)
+    }
+
     #[test]
     fn empty_history_is_unknown() {
         let now = Instant::now();
-        assert_eq!(estimate(&[], now, 50), Estimate::Unknown);
+        assert_eq!(estimate(&[], now, cur(50)), Estimate::Unknown);
     }
 
     #[test]
     fn single_transition_is_unknown() {
         let base = Instant::now();
         let history = [(at(base, 0), 80), (at(base, 10), 79)];
-        assert_eq!(estimate(&history, at(base, 10), 79), Estimate::Unknown);
+        assert_eq!(estimate(&history, at(base, 10), cur(79)), Estimate::Unknown);
     }
 
     #[test]
     fn bucketed_device_is_unknown_not_confidently_wrong() {
         let base = Instant::now();
         let history = [(at(base, 0), 100), (at(base, 20), 70), (at(base, 40), 40)];
-        assert_eq!(estimate(&history, at(base, 40), 40), Estimate::Unknown);
+        assert_eq!(estimate(&history, at(base, 40), cur(40)), Estimate::Unknown);
     }
 
     #[test]
     fn upward_step_yields_unknown_or_charging() {
         let base = Instant::now();
         let history = [(at(base, 0), 50), (at(base, 10), 60)];
-        let result = estimate(&history, at(base, 10), 60);
+        let result = estimate(&history, at(base, 10), cur(60));
         assert!(matches!(result, Estimate::Unknown | Estimate::Charging));
     }
 
@@ -185,14 +195,17 @@ mod tests {
     fn pure_upward_trend_is_charging() {
         let base = Instant::now();
         let history = [(at(base, 0), 50), (at(base, 10), 55), (at(base, 20), 60)];
-        assert_eq!(estimate(&history, at(base, 20), 60), Estimate::Charging);
+        assert_eq!(
+            estimate(&history, at(base, 20), cur(60)),
+            Estimate::Charging
+        );
     }
 
     #[test]
     fn mixed_direction_is_unknown() {
         let base = Instant::now();
         let history = [(at(base, 0), 50), (at(base, 40), 40), (at(base, 80), 45)];
-        assert_eq!(estimate(&history, at(base, 80), 45), Estimate::Unknown);
+        assert_eq!(estimate(&history, at(base, 80), cur(45)), Estimate::Unknown);
     }
 
     #[test]
@@ -211,7 +224,7 @@ mod tests {
             (at(base, 30), 55),
             (at(base, 36), 54),
         ];
-        let result = estimate(&history, at(base, 36), 54);
+        let result = estimate(&history, at(base, 36), cur(54));
         match result {
             Estimate::Remaining(d) => {
                 // 54% at 1%/6min is ~5.4h; assert a wide, honest range rather
@@ -224,11 +237,24 @@ mod tests {
     }
 
     #[test]
+    fn coarse_reading_is_unknown_even_on_a_steady_history() {
+        let base = Instant::now();
+        let history: Vec<(Instant, u8)> =
+            (0..=6).map(|i| (at(base, i * 6), 60 - i as u8)).collect();
+        assert!(matches!(
+            estimate(&history, at(base, 36), cur(54)),
+            Estimate::Remaining(_)
+        ));
+        let coarse = BatteryReading::new_coarse(54, crate::domain::ChargeState::Discharging);
+        assert_eq!(estimate(&history, at(base, 36), coarse), Estimate::Unknown);
+    }
+
+    #[test]
     fn short_window_is_unknown_even_with_two_transitions() {
         let base = Instant::now();
         // Two transitions, but only 10 minutes apart — below MIN_WINDOW.
         let history = [(at(base, 0), 60), (at(base, 5), 59), (at(base, 10), 58)];
-        assert_eq!(estimate(&history, at(base, 10), 58), Estimate::Unknown);
+        assert_eq!(estimate(&history, at(base, 10), cur(58)), Estimate::Unknown);
     }
 
     #[test]
@@ -242,14 +268,14 @@ mod tests {
             (at(base, 20), 58),
             (at(base, 40), 54),
         ];
-        assert_eq!(estimate(&history, at(base, 40), 54), Estimate::Unknown);
+        assert_eq!(estimate(&history, at(base, 40), cur(54)), Estimate::Unknown);
     }
 
     #[test]
     fn never_negative_when_current_exceeds_rate_projection() {
         let base = Instant::now();
         let history = [(at(base, 0), 10), (at(base, 30), 5), (at(base, 60), 0)];
-        let result = estimate(&history, at(base, 60), 0);
+        let result = estimate(&history, at(base, 60), cur(0));
         // current is 0: remaining must not be negative.
         if let Estimate::Remaining(d) = result {
             assert!(d.as_secs() < u64::MAX);

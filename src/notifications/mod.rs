@@ -503,6 +503,18 @@ mod tests {
     }
 
     #[test]
+    fn no_access_device_with_low_retained_reading_does_not_notify() {
+        let mut tracker = LowTracker::default();
+        let cfg = Config::default();
+        let state = TrayState {
+            devices: vec![device_state("mouse", Presence::NoAccess, Some(5))],
+        };
+
+        assert!(compute_pending(&state, &cfg, &mut tracker).is_empty());
+        assert!(compute_pending(&state, &cfg, &mut tracker).is_empty());
+    }
+
+    #[test]
     fn device_still_low_after_reconnecting_does_not_double_notify() {
         let mut tracker = LowTracker::default();
         let cfg = Config::default();

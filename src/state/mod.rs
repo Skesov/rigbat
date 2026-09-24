@@ -112,7 +112,7 @@ pub trait Store: Send + Sync {
 
 /// `$XDG_STATE_HOME/rigbat/rigbat.db` — `None` if there is no state
 /// directory (non-Linux, or no home directory in the environment).
-fn db_path() -> Option<PathBuf> {
+pub fn db_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "rigbat")
         .and_then(|dirs| dirs.state_dir().map(|dir| dir.join("rigbat.db")))
 }

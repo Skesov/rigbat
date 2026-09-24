@@ -12,7 +12,8 @@ use crate::config::Config;
 use crate::discovery::{BackendSweep, Context};
 use crate::domain::estimate::estimate as estimate_remaining;
 use crate::domain::{BatteryReading, DeviceId, DeviceInfo, DeviceState, Estimate, Presence};
-use crate::sources::BatterySource;
+use crate::sources::hidraw::NodeReassigned;
+use crate::sources::{AccessDenied, BatterySource};
 use crate::state;
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
@@ -181,7 +182,7 @@ impl DeviceEntry {
 
     fn estimate(&self, now: Instant) -> Estimate {
         match self.last_reading {
-            Some(r) => estimate_remaining(&self.battery_history, now, r.percent),
+            Some(r) => estimate_remaining(&self.battery_history, now, r),
             None => Estimate::Unknown,
         }
     }
@@ -259,7 +260,9 @@ fn seed_history(
 struct DeviceRegistry {
     order: Vec<DeviceId>,
     entries: HashMap<DeviceId, DeviceEntry>,
-    tasks: HashMap<DeviceId, AbortHandle>,
+    tasks: HashMap<DeviceId, SourceTask>,
+    /// Last generation handed to a spawned task; see `SourceMsg`.
+    last_generation: u64,
     /// Optional device inventory / reading history (T34). `reconcile`
     /// upserts a `devices` row and seeds a new entry's history from it;
     /// `record` writes each successful poll. `None` runs exactly as before
@@ -267,10 +270,29 @@ struct DeviceRegistry {
     store: Option<Arc<dyn state::Store>>,
 }
 
+struct SourceTask {
+    handle: AbortHandle,
+    generation: u64,
+}
+
+/// `generation` drops a message a retired task queued before its replacement was spawned.
+struct SourceMsg {
+    id: DeviceId,
+    generation: u64,
+    event: SourceEvent,
+}
+
+enum SourceEvent {
+    Polled(Option<BatteryReading>),
+    AccessDenied,
+    /// The node the source opens now belongs to another device; the task has ended.
+    NodeReassigned,
+}
+
 /// What spawning a source task needs, bundled so `reconcile` stays a
 /// small-signature method rather than an argument list.
 struct SourceCtx {
-    tx: mpsc::Sender<(DeviceId, Option<BatteryReading>)>,
+    tx: mpsc::Sender<SourceMsg>,
     config_rx: watch::Receiver<Config>,
     refresh: RefreshSignal,
 }
@@ -281,19 +303,36 @@ impl DeviceRegistry {
             order: Vec::new(),
             entries: HashMap::new(),
             tasks: HashMap::new(),
+            last_generation: 0,
             store,
         }
     }
 
+    fn is_live(&self, id: &DeviceId, generation: u64) -> bool {
+        self.tasks
+            .get(id)
+            .is_some_and(|task| task.generation == generation)
+    }
+
+    fn spawn(&mut self, src: Box<dyn BatterySource>, id: DeviceId, ctx: &SourceCtx) {
+        self.last_generation = self.last_generation.wrapping_add(1);
+        let generation = self.last_generation;
+        let handle = spawn_source_task(src, id.clone(), generation, ctx);
+        self.tasks.insert(id, SourceTask { handle, generation });
+    }
+
     /// Applies a poll outcome to a device that is still registered. A result
-    /// for an id no longer present is ignored — a poll can win a race against
-    /// the abort of its own task.
+    /// from any generation but the live one is ignored — a poll can win a race
+    /// against the abort of its own task.
     ///
     /// Success sets `Online` and resets the failure count immediately. A
     /// failure only flips presence to `Unreachable` once it reaches
     /// `OFFLINE_AFTER_FAILURES` — a single dropped poll leaves presence (and
     /// any retained reading) untouched.
-    fn record(&mut self, id: &DeviceId, reading: Option<BatteryReading>) {
+    fn record(&mut self, id: &DeviceId, generation: u64, reading: Option<BatteryReading>) {
+        if !self.is_live(id, generation) {
+            return;
+        }
         let Some(entry) = self.entries.get_mut(id) else {
             return;
         };
@@ -388,8 +427,8 @@ impl DeviceRegistry {
                     }
                 }
 
-                if let Some(handle) = self.tasks.get(&id) {
-                    if handle.is_finished() {
+                if let Some(task) = self.tasks.get(&id) {
+                    if task.handle.is_finished() {
                         // A handle only stays in `tasks` for an id that is also
                         // still in `fresh_ids` if it was never aborted: the
                         // vanished-device path below removes the handle from
@@ -412,8 +451,7 @@ impl DeviceRegistry {
                             entry.consecutive_failures = OFFLINE_AFTER_FAILURES;
                             entry.backend = name;
                         }
-                        let handle = spawn_source_task(src, id.clone(), ctx);
-                        self.tasks.insert(id, handle);
+                        self.spawn(src, id, ctx);
                     } else {
                         // Still healthy — drop the transient handle, task keeps running.
                         drop(src);
@@ -455,8 +493,7 @@ impl DeviceRegistry {
                     }
                 }
 
-                let handle = spawn_source_task(src, id.clone(), ctx);
-                self.tasks.insert(id, handle);
+                self.spawn(src, id, ctx);
             }
         }
 
@@ -471,7 +508,7 @@ impl DeviceRegistry {
         let crashed: Vec<DeviceId> = self
             .tasks
             .iter()
-            .filter(|(id, handle)| !fresh_ids.contains(id) && handle.is_finished())
+            .filter(|(id, task)| !fresh_ids.contains(id) && task.handle.is_finished())
             .filter(|(id, _)| {
                 self.entries
                     .get(*id)
@@ -508,22 +545,47 @@ impl DeviceRegistry {
             .cloned()
             .collect();
         for id in vanished {
-            if let Some(handle) = self.tasks.remove(&id) {
-                handle.abort();
-            }
-            if let Some(entry) = self.entries.get_mut(&id) {
-                entry.presence = Presence::Disconnected;
-                // Reset the debounce counter: the failures that preceded the
-                // disconnect belong to the connection that ended. Left as they
-                // were, one failed poll after it reconnects re-trips
-                // `Unreachable` instead of getting the usual grace.
-                entry.consecutive_failures = 0;
+            self.disconnect(&id);
+            if let Some(entry) = self.entries.get(&id) {
                 tracing::info!(device = %entry.info.name, "device vanished");
             }
         }
 
         self.prune_stale(Instant::now());
         renames
+    }
+
+    /// Immediate, unlike `Unreachable`: a denial is not a dropped packet.
+    fn deny(&mut self, id: &DeviceId, generation: u64) {
+        if !self.is_live(id, generation) {
+            return;
+        }
+        if let Some(entry) = self.entries.get_mut(id) {
+            entry.presence = Presence::NoAccess;
+            // Once access is granted, a silent device reads Unreachable at its first miss.
+            entry.consecutive_failures = OFFLINE_AFTER_FAILURES;
+        }
+    }
+
+    /// Treated as the device leaving, so the next sweep respawns it wherever it is now.
+    fn retire(&mut self, id: &DeviceId, generation: u64) {
+        if self.is_live(id, generation) {
+            self.disconnect(id);
+        }
+    }
+
+    fn disconnect(&mut self, id: &DeviceId) {
+        if let Some(task) = self.tasks.remove(id) {
+            task.handle.abort();
+        }
+        if let Some(entry) = self.entries.get_mut(id) {
+            entry.presence = Presence::Disconnected;
+            // Reset the debounce counter: the failures that preceded the
+            // disconnect belong to the connection that ended. Left as they
+            // were, one failed poll after it reconnects re-trips
+            // `Unreachable` instead of getting the usual grace.
+            entry.consecutive_failures = 0;
+        }
     }
 
     /// Drops `Disconnected` entries that have not been seen for longer than
@@ -550,8 +612,8 @@ impl DeviceRegistry {
     /// Drops every trace of one identity: its polling task (aborted), its
     /// entry, and its place in the display order.
     fn forget(&mut self, id: &DeviceId) {
-        if let Some(handle) = self.tasks.remove(id) {
-            handle.abort();
+        if let Some(task) = self.tasks.remove(id) {
+            task.handle.abort();
         }
         self.entries.remove(id);
         self.order.retain(|oid| oid != id);
@@ -589,7 +651,7 @@ async fn manager_task<F, Fut, L, S>(
     L: Fn() -> Config + Send + 'static,
     S: Fn(&Config) -> anyhow::Result<()> + Send + 'static,
 {
-    let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<(DeviceId, Option<BatteryReading>)>(64);
+    let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<SourceMsg>(64);
     let mut waiter = refresh.waiter();
     let ctx = SourceCtx {
         tx: mpsc_tx,
@@ -621,8 +683,12 @@ async fn manager_task<F, Fut, L, S>(
         tokio::select! {
             msg = mpsc_rx.recv() => {
                 match msg {
-                    Some((id, reading)) => {
-                        registry.record(&id, reading);
+                    Some(SourceMsg { id, generation, event }) => {
+                        match event {
+                            SourceEvent::Polled(reading) => registry.record(&id, generation, reading),
+                            SourceEvent::AccessDenied => registry.deny(&id, generation),
+                            SourceEvent::NodeReassigned => registry.retire(&id, generation),
+                        }
                         publish(&registry, &watch_tx);
                     }
                     // All source tasks dropped their senders — nothing left to do.
@@ -718,6 +784,7 @@ fn apply_renames<L, S>(
 fn spawn_source_task(
     mut src: Box<dyn BatterySource>,
     id: DeviceId,
+    generation: u64,
     ctx: &SourceCtx,
 ) -> AbortHandle {
     let name = src.device().name.clone();
@@ -733,10 +800,22 @@ fn spawn_source_task(
         let mut failures_in_a_row: u32 = 0;
 
         loop {
-            let reading = match src.poll().await {
+            let event = match src.poll().await {
                 Ok(r) => {
                     failures_in_a_row = 0;
-                    Some(r)
+                    SourceEvent::Polled(Some(r))
+                }
+                Err(e) if e.is::<NodeReassigned>() => {
+                    tracing::info!(device = %name, "{e:#}; retiring its source");
+                    let event = SourceEvent::NodeReassigned;
+                    let _ = tx
+                        .send(SourceMsg {
+                            id,
+                            generation,
+                            event,
+                        })
+                        .await;
+                    return;
                 }
                 Err(e) => {
                     if failures_in_a_row == 0 {
@@ -745,10 +824,19 @@ fn spawn_source_task(
                         tracing::debug!(device = %name, failures = failures_in_a_row, "poll failed: {e:#}");
                     }
                     failures_in_a_row = failures_in_a_row.saturating_add(1);
-                    None
+                    if e.is::<AccessDenied>() {
+                        SourceEvent::AccessDenied
+                    } else {
+                        SourceEvent::Polled(None)
+                    }
                 }
             };
-            if tx.send((id.clone(), reading)).await.is_err() {
+            let msg = SourceMsg {
+                id: id.clone(),
+                generation,
+                event,
+            };
+            if tx.send(msg).await.is_err() {
                 return;
             }
 
@@ -1309,16 +1397,268 @@ mod tests {
         }
     }
 
-    #[test]
-    fn registry_record_then_snapshot_preserves_discovery_order() {
+    /// Gives an `insert_entry` device a live task that never ends.
+    fn attach_task(registry: &mut DeviceRegistry, id: &DeviceId) {
+        registry.last_generation += 1;
+        let task = SourceTask {
+            handle: tokio::spawn(std::future::pending::<()>()).abort_handle(),
+            generation: registry.last_generation,
+        };
+        registry.tasks.insert(id.clone(), task);
+    }
+
+    fn live_generation(registry: &DeviceRegistry, id: &DeviceId) -> u64 {
+        registry.tasks.get(id).map_or(0, |task| task.generation)
+    }
+
+    fn record_live(registry: &mut DeviceRegistry, id: &DeviceId, reading: Option<BatteryReading>) {
+        let generation = live_generation(registry, id);
+        registry.record(id, generation, reading);
+    }
+
+    fn ok_source(info: &DeviceInfo, percent: u8) -> Box<dyn BatterySource> {
+        Box::new(OkSource {
+            info: info.clone(),
+            reading: reading_discharging(percent),
+        })
+    }
+
+    #[tokio::test]
+    async fn reading_from_a_retired_generation_is_dropped() {
+        let (_tx, config_rx) = config_channel(Config::default());
+        let ctx = source_ctx(config_rx);
+        let mut registry = DeviceRegistry::new(None);
+        let a = device("a");
+
+        registry.reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx);
+        let first = live_generation(&registry, &a.id());
+        registry.record(&a.id(), first, Some(reading_discharging(80)));
+
+        registry.reconcile(vec![ok_sweep("sysfs", vec![])], &ctx);
+        registry.reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 55)])], &ctx);
+        let second = live_generation(&registry, &a.id());
+        assert_ne!(first, second);
+
+        registry.record(&a.id(), first, Some(reading_discharging(10)));
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot[0].presence, Presence::Disconnected);
+        assert_eq!(snapshot[0].last_reading, Some(reading_discharging(80)));
+
+        registry.record(&a.id(), second, Some(reading_discharging(55)));
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot[0].presence, Presence::Online);
+        assert_eq!(snapshot[0].last_reading, Some(reading_discharging(55)));
+    }
+
+    #[tokio::test]
+    async fn reading_from_an_aborted_task_does_not_revive_a_vanished_device() {
+        let (_tx, config_rx) = config_channel(Config::default());
+        let ctx = source_ctx(config_rx);
+        let mut registry = DeviceRegistry::new(None);
+        let a = device("a");
+
+        registry.reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx);
+        let generation = live_generation(&registry, &a.id());
+        registry.record(&a.id(), generation, Some(reading_discharging(80)));
+        registry.reconcile(vec![ok_sweep("sysfs", vec![])], &ctx);
+
+        registry.record(&a.id(), generation, Some(reading_discharging(79)));
+
+        assert_eq!(registry.snapshot()[0].presence, Presence::Disconnected);
+    }
+
+    struct ReassignedSource {
+        info: DeviceInfo,
+    }
+
+    #[async_trait::async_trait]
+    impl BatterySource for ReassignedSource {
+        fn device(&self) -> &DeviceInfo {
+            &self.info
+        }
+
+        async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
+            Err(anyhow::Error::new(NodeReassigned {
+                node: "hidraw7".to_owned(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn reassigned_node_ends_the_task_and_disconnects_the_device() {
+        let (_tx, config_rx) = config_channel(Config::default());
+        let (mpsc_tx, mut mpsc_rx) = mpsc::channel(64);
+        let ctx = SourceCtx {
+            tx: mpsc_tx,
+            config_rx,
+            refresh: RefreshSignal::new(),
+        };
+        let mut registry = DeviceRegistry::new(None);
+        let a = device("a");
+        insert_entry(
+            &mut registry,
+            &a,
+            Presence::Online,
+            Some(reading_discharging(80)),
+            Some(Instant::now()),
+            0,
+        );
+        registry.spawn(Box::new(ReassignedSource { info: a.clone() }), a.id(), &ctx);
+
+        let msg = timeout(std::time::Duration::from_secs(5), mpsc_rx.recv())
+            .await
+            .expect("timed out waiting for the task's report")
+            .expect("mpsc channel closed");
+        assert!(matches!(msg.event, SourceEvent::NodeReassigned));
+        assert_eq!(msg.generation, live_generation(&registry, &a.id()));
+        registry.retire(&msg.id, msg.generation);
+
+        assert!(!registry.tasks.contains_key(&a.id()));
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot[0].presence, Presence::Disconnected);
+        assert_eq!(snapshot[0].last_reading, Some(reading_discharging(80)));
+    }
+
+    struct DeniedSource {
+        info: DeviceInfo,
+    }
+
+    #[async_trait::async_trait]
+    impl BatterySource for DeniedSource {
+        fn device(&self) -> &DeviceInfo {
+            &self.info
+        }
+
+        async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
+            Err(anyhow::Error::new(AccessDenied {
+                path: "/dev/hidraw7".into(),
+            }))
+        }
+    }
+
+    /// The task keeps polling: access can be granted without the device leaving.
+    #[tokio::test]
+    async fn access_denied_is_reported_as_its_own_event_and_the_task_keeps_running() {
+        let (_tx, config_rx) = config_channel(Config::default());
+        let (mpsc_tx, mut mpsc_rx) = mpsc::channel(64);
+        let ctx = SourceCtx {
+            tx: mpsc_tx,
+            config_rx,
+            refresh: RefreshSignal::new(),
+        };
+        let mut registry = DeviceRegistry::new(None);
+        let a = device("a");
+        insert_entry(&mut registry, &a, Presence::Unreachable, None, None, 0);
+        registry.spawn(Box::new(DeniedSource { info: a.clone() }), a.id(), &ctx);
+
+        let msg = timeout(std::time::Duration::from_secs(5), mpsc_rx.recv())
+            .await
+            .expect("timed out waiting for the task's report")
+            .expect("mpsc channel closed");
+        assert!(matches!(msg.event, SourceEvent::AccessDenied));
+        registry.deny(&msg.id, msg.generation);
+
+        assert_eq!(registry.snapshot()[0].presence, Presence::NoAccess);
+        tokio::task::yield_now().await;
+        assert!(!registry.tasks[&a.id()].handle.is_finished());
+    }
+
+    #[tokio::test]
+    async fn access_denial_shows_at_once_and_a_reading_clears_it() {
+        let mut registry = DeviceRegistry::new(None);
+        let a = device("a");
+        insert_entry(
+            &mut registry,
+            &a,
+            Presence::Online,
+            Some(reading_discharging(80)),
+            Some(Instant::now()),
+            0,
+        );
+        attach_task(&mut registry, &a.id());
+
+        registry.deny(&a.id(), live_generation(&registry, &a.id()));
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot[0].presence, Presence::NoAccess);
+        assert_eq!(snapshot[0].last_reading, Some(reading_discharging(80)));
+
+        record_live(&mut registry, &a.id(), Some(reading_discharging(79)));
+        assert_eq!(registry.snapshot()[0].presence, Presence::Online);
+    }
+
+    #[tokio::test]
+    async fn a_silent_poll_after_access_is_granted_reads_unreachable_not_no_access() {
+        let mut registry = DeviceRegistry::new(None);
+        let a = device("a");
+        insert_entry(&mut registry, &a, Presence::Unreachable, None, None, 0);
+        attach_task(&mut registry, &a.id());
+
+        registry.deny(&a.id(), live_generation(&registry, &a.id()));
+        record_live(&mut registry, &a.id(), None);
+
+        assert_eq!(registry.snapshot()[0].presence, Presence::Unreachable);
+    }
+
+    #[tokio::test]
+    async fn access_denial_from_a_stale_generation_is_ignored() {
+        let mut registry = DeviceRegistry::new(None);
+        let a = device("a");
+        insert_entry(
+            &mut registry,
+            &a,
+            Presence::Online,
+            Some(reading_discharging(80)),
+            Some(Instant::now()),
+            0,
+        );
+        attach_task(&mut registry, &a.id());
+        let stale = live_generation(&registry, &a.id());
+        attach_task(&mut registry, &a.id());
+
+        registry.deny(&a.id(), stale);
+
+        assert_eq!(registry.snapshot()[0].presence, Presence::Online);
+    }
+
+    #[tokio::test]
+    async fn retire_from_a_stale_generation_keeps_the_live_task() {
+        let (_tx, config_rx) = config_channel(Config::default());
+        let ctx = source_ctx(config_rx);
+        let mut registry = DeviceRegistry::new(None);
+        let a = device("a");
+
+        registry.reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx);
+        let first = live_generation(&registry, &a.id());
+        registry.reconcile(vec![ok_sweep("sysfs", vec![])], &ctx);
+        registry.reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx);
+        let second = live_generation(&registry, &a.id());
+        registry.record(&a.id(), second, Some(reading_discharging(80)));
+
+        registry.retire(&a.id(), first);
+        assert_eq!(live_generation(&registry, &a.id()), second);
+        assert_eq!(registry.snapshot()[0].presence, Presence::Online);
+
+        registry.retire(&a.id(), second);
+        assert!(!registry.tasks.contains_key(&a.id()));
+
+        // The next sweep that finds the device spawns afresh, not via the crash path.
+        registry.reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx);
+        assert!(live_generation(&registry, &a.id()) > second);
+        assert_eq!(registry.snapshot()[0].presence, Presence::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn registry_record_then_snapshot_preserves_discovery_order() {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
         let b = device("b");
         insert_entry(&mut registry, &a, Presence::Unreachable, None, None, 0);
         insert_entry(&mut registry, &b, Presence::Unreachable, None, None, 0);
+        attach_task(&mut registry, &a.id());
+        attach_task(&mut registry, &b.id());
 
-        registry.record(&a.id(), Some(reading_discharging(10)));
-        registry.record(&b.id(), Some(reading_discharging(20)));
+        record_live(&mut registry, &a.id(), Some(reading_discharging(10)));
+        record_live(&mut registry, &b.id(), Some(reading_discharging(20)));
 
         let snapshot = registry.snapshot();
         assert_eq!(snapshot.len(), 2);
@@ -1334,13 +1674,13 @@ mod tests {
         let mut registry = DeviceRegistry::new(None);
         let ghost = device("ghost");
 
-        registry.record(&ghost.id(), Some(reading_discharging(99)));
+        record_live(&mut registry, &ghost.id(), Some(reading_discharging(99)));
 
         assert!(registry.snapshot().is_empty());
     }
 
-    #[test]
-    fn one_failed_poll_keeps_online_and_reading() {
+    #[tokio::test]
+    async fn one_failed_poll_keeps_online_and_reading() {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
         insert_entry(
@@ -1352,15 +1692,16 @@ mod tests {
             0,
         );
 
-        registry.record(&a.id(), None);
+        attach_task(&mut registry, &a.id());
+        record_live(&mut registry, &a.id(), None);
 
         let snapshot = registry.snapshot();
         assert_eq!(snapshot[0].presence, Presence::Online);
         assert_eq!(snapshot[0].last_reading, Some(reading_discharging(80)));
     }
 
-    #[test]
-    fn offline_after_failures_flips_to_unreachable() {
+    #[tokio::test]
+    async fn offline_after_failures_flips_to_unreachable() {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
         insert_entry(
@@ -1372,8 +1713,9 @@ mod tests {
             0,
         );
 
+        attach_task(&mut registry, &a.id());
         for _ in 0..OFFLINE_AFTER_FAILURES {
-            registry.record(&a.id(), None);
+            record_live(&mut registry, &a.id(), None);
         }
 
         let snapshot = registry.snapshot();
@@ -1382,8 +1724,8 @@ mod tests {
         assert_eq!(snapshot[0].last_reading, Some(reading_discharging(80)));
     }
 
-    #[test]
-    fn success_after_failures_resets_counter_and_online() {
+    #[tokio::test]
+    async fn success_after_failures_resets_counter_and_online() {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
         insert_entry(
@@ -1395,13 +1737,14 @@ mod tests {
             OFFLINE_AFTER_FAILURES - 1,
         );
 
-        registry.record(&a.id(), Some(reading_discharging(75)));
+        attach_task(&mut registry, &a.id());
+        record_live(&mut registry, &a.id(), Some(reading_discharging(75)));
         assert_eq!(registry.entries[&a.id()].consecutive_failures, 0);
         assert_eq!(registry.snapshot()[0].presence, Presence::Online);
 
         // Counter was reset — a single further failure must not re-trip
         // Unreachable immediately.
-        registry.record(&a.id(), None);
+        record_live(&mut registry, &a.id(), None);
         assert_eq!(registry.snapshot()[0].presence, Presence::Online);
     }
 
@@ -1422,7 +1765,7 @@ mod tests {
             )],
             &ctx,
         );
-        registry.record(&a.id(), Some(reading_discharging(80)));
+        record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
         assert!(registry.tasks.contains_key(&a.id()));
 
         // Next discovery sweep succeeds but no longer sees the device.
@@ -1480,11 +1823,11 @@ mod tests {
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }
-        assert!(registry.tasks[&a.id()].is_finished());
+        assert!(registry.tasks[&a.id()].handle.is_finished());
 
         // Simulate the device having been Online with a stale reading right
         // before its task crashed.
-        registry.record(&a.id(), Some(reading_discharging(80)));
+        record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
         assert_eq!(registry.snapshot()[0].presence, Presence::Online);
 
         // Next sweep still sees the device, with a fresh replacement source.
@@ -1504,12 +1847,15 @@ mod tests {
         assert_eq!(snapshot[0].last_reading, Some(reading_discharging(80)));
 
         // The replacement task is running — its first poll proves the respawn.
-        let (id, reading) = timeout(std::time::Duration::from_secs(5), mpsc_rx.recv())
+        let msg = timeout(std::time::Duration::from_secs(5), mpsc_rx.recv())
             .await
             .expect("timed out waiting for replacement task's poll")
             .expect("mpsc channel closed");
-        assert_eq!(id, a.id());
-        registry.record(&id, reading);
+        assert_eq!(msg.id, a.id());
+        let SourceEvent::Polled(reading) = msg.event else {
+            unreachable!("replacement task reported a reassigned node");
+        };
+        registry.record(&msg.id, msg.generation, reading);
 
         let snapshot = registry.snapshot();
         assert_eq!(snapshot[0].presence, Presence::Online);
@@ -1537,7 +1883,7 @@ mod tests {
             )],
             &ctx,
         );
-        registry.record(&a.id(), Some(reading_discharging(80)));
+        record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
 
         registry.reconcile(vec![ok_sweep("sysfs", vec![])], &ctx);
 
@@ -1582,7 +1928,7 @@ mod tests {
             )],
             &ctx,
         );
-        registry.record(&a.id(), Some(reading_discharging(80)));
+        record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
 
         // Vanishes, then reappears.
         registry.reconcile(vec![ok_sweep("sysfs", vec![])], &ctx);
@@ -1604,7 +1950,7 @@ mod tests {
         // Retained reading still visible until the fresh task proves online.
         assert_eq!(registry.snapshot()[0].presence, Presence::Disconnected);
 
-        registry.record(&a.id(), Some(reading_discharging(80)));
+        record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
         assert_eq!(registry.snapshot().len(), 1);
         assert_eq!(registry.snapshot()[0].presence, Presence::Online);
     }
@@ -1633,7 +1979,7 @@ mod tests {
             )],
             &ctx,
         );
-        registry.record(&a.id(), Some(reading_discharging(80)));
+        record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
         assert!(registry.tasks.contains_key(&a.id()));
 
         // Next sweep: the owning backend fails transiently (a bus hiccup),
@@ -1674,7 +2020,7 @@ mod tests {
             )],
             &ctx,
         );
-        registry.record(&a.id(), Some(reading_discharging(80)));
+        record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
 
         registry.reconcile(vec![ok_sweep("bluez", vec![])], &ctx);
 
@@ -1718,8 +2064,12 @@ mod tests {
             ],
             &ctx,
         );
-        registry.record(&mouse.id(), Some(reading_discharging(80)));
-        registry.record(&controller.id(), Some(reading_discharging(50)));
+        record_live(&mut registry, &mouse.id(), Some(reading_discharging(80)));
+        record_live(
+            &mut registry,
+            &controller.id(),
+            Some(reading_discharging(50)),
+        );
 
         // steelseries fails; eightbitdo succeeds and no longer sees its controller.
         registry.reconcile(
@@ -2106,7 +2456,7 @@ mod tests {
             )],
             &ctx,
         );
-        registry.record(&a.id(), Some(reading_discharging(80)));
+        record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
 
         let history = store.recent_readings(&a.id(), 10).expect("reading history");
         assert_eq!(history.len(), 1);

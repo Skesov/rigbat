@@ -15,7 +15,7 @@ a shared headless core:
   in the tray.
 - **Tray** — `rigbat tray`: a long-running StatusNotifierItem daemon.
 - **Settings** — `rigbat settings`: a small GUI window, launched as a separate process.
-- **Dashboard** — `rigbat dashboard`: the tray icon's left click, a card per shown device.
+- **Dashboard** — `rigbat dashboard`: the tray icon's left click, a row per shown device.
 
 The core (`domain` + `sources` + `discovery` + `app`) has no knowledge of CLI tables, tray
 icons, or GUI widgets. The surfaces are adapters on top of it.
@@ -117,11 +117,15 @@ flows out through channels.
   just-opened transient discovery handle is dropped). This is how hotplugged devices appear
   without a restart, and why the tray menu's **Refresh** re-discovers.
 - **Presence and retention**: each device carries a `Presence`
-  (`Online`/`Unreachable`/`Disconnected`) alongside its last reading. A source that starts
+  (`Online`/`Unreachable`/`Disconnected`/`NoAccess`) alongside its last reading. A source that starts
   erroring flips to `Unreachable` without discarding that reading, so consumers can render
   "88% offline (2h ago)" instead of losing the value; `Disconnected` is reserved for a device
   reconcile no longer sees at all; such an entry is pruned from the roster once it has been gone
-  for `DISCONNECTED_RETENTION` (24 h), or immediately if it never produced a reading. The same
+  for `DISCONNECTED_RETENTION` (24 h), or immediately if it never produced a reading. A source
+  whose open fails with a permission error returns the typed `sources::AccessDenied`; the device
+  reads `NoAccess` from the first such poll (no debounce — a denial is not a dropped packet), its
+  task keeps polling so a newly installed udev rule takes effect, and every surface says "no
+  access" and names `rigbat doctor` instead of "offline". The same
   sweep also inspects each task's
   `JoinHandle::is_finished()` — a task that panicked (as opposed to one reconcile aborted
   itself for a vanished device) is demoted to `Unreachable` and respawned rather than left
@@ -191,9 +195,10 @@ devices the tray has dropped after a day of silence, dimmed and last; hidden one
 If the tray goes away the window says so, and it reloads when the tray comes back.
 
 The settings window is a separate process on purpose: it owns the winit event loop, and eframe is
-built with `default-features = false` (glow backend, no accesskit — an AT-SPI/zbus bridge assumes
-a runtime that eframe itself never enters). It communicates with the tray only through
-`config.json`.
+built with `default-features = false` (glow backend). The `accesskit` feature is on: its AT-SPI
+bridge runs zbus on a thread of its own with the `async-io` backend, which zbus >= 5.19 selects
+per thread when no tokio runtime is current there, so it needs no runtime from us. The
+window communicates with the tray only through `config.json`.
 
 It does hold a tokio runtime, but nothing on the UI thread ever enters it: device discovery is
 spawned onto it and the result arrives over an `mpsc` channel drained with `try_recv` at the top

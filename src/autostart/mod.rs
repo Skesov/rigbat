@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
@@ -101,9 +101,52 @@ pub fn set_enabled(on: bool) -> anyhow::Result<()> {
     if on { enable() } else { disable() }
 }
 
+/// systemd targets `systemctl --user enable` links a unit into. Checked in
+/// this order but either one enabling `rigbat.service` counts: which target
+/// applies depends on the unit's own `WantedBy=`, not on anything rigbat
+/// controls.
+const SYSTEMD_WANTS_TARGETS: [&str; 2] = ["default.target.wants", "graphical-session.target.wants"];
+
+/// The unit name `make service` installs and `systemctl --user enable`
+/// operates on.
+pub const SYSTEMD_UNIT_NAME: &str = "rigbat.service";
+
+/// `$XDG_CONFIG_HOME/systemd/user`, falling back to `~/.config/systemd/user`.
+fn systemd_user_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|b| b.config_dir().join("systemd").join("user"))
+}
+
+/// Returns `true` if `rigbat.service` is enabled for the systemd user manager
+/// rooted at `unit_dir` — i.e. `systemctl --user enable` linked it into
+/// `default.target.wants/` or `graphical-session.target.wants/`. A pure
+/// filesystem check: no systemd dependency, no shelling out.
+fn systemd_service_enabled_at(unit_dir: &Path) -> bool {
+    SYSTEMD_WANTS_TARGETS
+        .iter()
+        .any(|target| unit_dir.join(target).join(SYSTEMD_UNIT_NAME).exists())
+}
+
+/// Returns `true` if `rigbat.service` is enabled, or `false` if the config
+/// directory cannot be determined (no home directory in the environment).
+pub fn systemd_service_enabled() -> bool {
+    systemd_user_dir()
+        .map(|dir| systemd_service_enabled_at(&dir))
+        .unwrap_or(false)
+}
+
+/// Returns `true` if `make service` installed the unit file, enabled or not.
+pub fn systemd_unit_installed() -> bool {
+    systemd_user_dir()
+        .map(|dir| dir.join(SYSTEMD_UNIT_NAME).exists())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{desktop_entry, disable_at, enable_at, escape_exec_arg, is_enabled_at};
+    use super::{
+        desktop_entry, disable_at, enable_at, escape_exec_arg, is_enabled_at,
+        systemd_service_enabled_at,
+    };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -233,6 +276,50 @@ mod tests {
         let expected = desktop_entry(exec.to_str().unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn systemd_service_enabled_at_false_when_dir_absent() {
+        let dir = scratch_dir("dir-absent");
+        assert!(!systemd_service_enabled_at(&dir));
+    }
+
+    #[test]
+    fn systemd_service_enabled_at_false_when_no_symlink() {
+        let dir = scratch_dir("no-symlink");
+        std::fs::create_dir_all(dir.join("default.target.wants")).unwrap();
+        assert!(!systemd_service_enabled_at(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn systemd_service_enabled_at_true_for_default_target_wants() {
+        let dir = scratch_dir("default-target");
+        let wants = dir.join("default.target.wants");
+        std::fs::create_dir_all(&wants).unwrap();
+        std::fs::write(wants.join("rigbat.service"), "").unwrap();
+        assert!(systemd_service_enabled_at(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn systemd_service_enabled_at_true_for_graphical_session_target_wants() {
+        let dir = scratch_dir("graphical-session-target");
+        let wants = dir.join("graphical-session.target.wants");
+        std::fs::create_dir_all(&wants).unwrap();
+        std::fs::write(wants.join("rigbat.service"), "").unwrap();
+        assert!(systemd_service_enabled_at(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn systemd_service_enabled_at_ignores_other_unit_names() {
+        let dir = scratch_dir("other-unit");
+        let wants = dir.join("default.target.wants");
+        std::fs::create_dir_all(&wants).unwrap();
+        std::fs::write(wants.join("other.service"), "").unwrap();
+        assert!(!systemd_service_enabled_at(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

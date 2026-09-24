@@ -210,18 +210,27 @@ pub fn load() -> Config {
 /// `config_path()`. `pub(crate)` so `settings::save_edit`'s own tests can use
 /// the same seam.
 pub(crate) fn load_from(path: &Path) -> Config {
-    let data = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return Config::default(),
-    };
-
-    match serde_json::from_str::<Config>(&data) {
-        Ok(cfg) => cfg,
+    match read(path) {
+        Ok(cfg) => cfg.unwrap_or_default(),
         Err(e) => {
-            tracing::warn!("config parse error ({path:?}): {e}; using defaults");
+            tracing::warn!("{e:#}; using defaults");
             Config::default()
         }
     }
+}
+
+/// Reads and parses the config at `path`: `Ok(None)` if there is no file,
+/// `Err` if it cannot be read or does not parse.
+pub fn read(path: &Path) -> anyhow::Result<Option<Config>> {
+    use anyhow::Context as _;
+    let data = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    serde_json::from_str::<Config>(&data)
+        .map(Some)
+        .with_context(|| format!("config parse error ({})", path.display()))
 }
 
 /// Saves atomically: create directory, write to temp file, rename.
@@ -553,6 +562,19 @@ mod tests {
     fn load_from_missing_file_returns_default() {
         let path = scratch_config_path("missing");
         assert_eq!(load_from(&path), Config::default());
+    }
+
+    #[test]
+    fn read_tells_missing_from_broken() {
+        let path = scratch_config_path("read");
+        assert!(read(&path).unwrap().is_none());
+        std::fs::write(&path, "{ not json").unwrap();
+        let err = format!("{:#}", read(&path).unwrap_err());
+        assert!(err.contains("config parse error"), "{err}");
+        assert_eq!(load_from(&path), Config::default());
+        save_to(&path, &Config::default()).unwrap();
+        assert_eq!(read(&path).unwrap(), Some(Config::default()));
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

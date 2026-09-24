@@ -68,7 +68,8 @@ fn collect_text(
 ) {
     match shape {
         egui::Shape::Text(text) => {
-            let drawn = egui::Rect::from_min_size(text.pos, text.galley.size());
+            // A right-aligned galley's rect starts left of `pos`.
+            let drawn = text.galley.rect.translate(text.pos.to_vec2());
             if keep(drawn, drawn.intersect(clip)) {
                 out.push(Painted {
                     text: text.galley.text().to_owned(),

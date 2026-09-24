@@ -8,7 +8,7 @@
 use std::cmp::Ordering;
 use std::time::Duration;
 
-use crate::domain::{BatteryReading, DeviceId, DeviceInfo, DeviceKind, Presence};
+use crate::domain::{BatteryReading, DeviceId, DeviceInfo, DeviceKind, PollOutcome, Presence};
 use crate::domain::{format_age, state_label};
 use crate::i18n::Lang;
 use crate::state::DeviceRecord;
@@ -36,13 +36,13 @@ pub struct DeviceRow {
 
 /// Merges every inventory record with the current discovery scan into one
 /// row per `DeviceId`. The discovered half supplies `presence` and
-/// `charge`: a device the scan found is `Online` (poll succeeded) or
-/// `Unreachable` (poll failed) regardless of what the inventory last
+/// `charge`: a device the scan found is `Online` (poll succeeded),
+/// `Unreachable` (poll failed) or `NoAccess` regardless of what the inventory last
 /// recorded; a device the scan did not find stays `Disconnected`, keeping
 /// whatever the inventory last knew about it.
 pub fn merge_devices(
     records: Vec<DeviceRecord>,
-    discovered: Vec<(DeviceInfo, Option<BatteryReading>)>,
+    discovered: Vec<(DeviceInfo, PollOutcome)>,
 ) -> Vec<DeviceRow> {
     let mut rows: Vec<DeviceRow> = records
         .into_iter()
@@ -57,12 +57,8 @@ pub fn merge_devices(
         })
         .collect();
 
-    for (info, reading) in discovered {
-        let presence = if reading.is_some() {
-            Presence::Online
-        } else {
-            Presence::Unreachable
-        };
+    for (info, outcome) in discovered {
+        let (reading, presence) = (outcome.reading(), outcome.presence());
         let id = info.id();
         match rows.iter_mut().find(|r| r.device == id) {
             Some(row) => {
@@ -210,8 +206,9 @@ pub fn sort_rows(rows: &mut [DeviceRow], sort: SortState, lang: Lang) {
 fn presence_rank(p: Presence) -> u8 {
     match p {
         Presence::Online => 0,
-        Presence::Unreachable => 1,
-        Presence::Disconnected => 2,
+        Presence::NoAccess => 1,
+        Presence::Unreachable => 2,
+        Presence::Disconnected => 3,
     }
 }
 
@@ -452,7 +449,7 @@ mod tests {
             vec![],
             vec![(
                 info("mouse", DeviceKind::Mouse, Transport::Sysfs, None),
-                Some(reading(80)),
+                PollOutcome::Reading(reading(80)),
             )],
         );
         assert_eq!(rows.len(), 1);
@@ -468,10 +465,24 @@ mod tests {
             vec![],
             vec![(
                 info("mouse", DeviceKind::Mouse, Transport::Sysfs, None),
-                None,
+                PollOutcome::Failed,
             )],
         );
         assert_eq!(rows[0].presence, Presence::Unreachable);
+        assert_eq!(rows[0].charge, None);
+    }
+
+    #[test]
+    fn merge_devices_discovered_access_denial_is_no_access() {
+        let rows = merge_devices(
+            vec![record(1, "mouse", Transport::Hidraw, 100, 200)],
+            vec![(
+                info("mouse", DeviceKind::Mouse, Transport::Hidraw, None),
+                PollOutcome::NoAccess,
+            )],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].presence, Presence::NoAccess);
         assert_eq!(rows[0].charge, None);
     }
 
@@ -481,7 +492,7 @@ mod tests {
             vec![record(1, "mouse", Transport::Sysfs, 100, 200)],
             vec![(
                 info("mouse", DeviceKind::Mouse, Transport::Sysfs, None),
-                Some(reading(55)),
+                PollOutcome::Reading(reading(55)),
             )],
         );
         assert_eq!(rows.len(), 1, "one row per DeviceId, not two");
@@ -499,7 +510,7 @@ mod tests {
             vec![record(1, "mouse", Transport::Sysfs, 100, 200)],
             vec![(
                 info("mouse", DeviceKind::Mouse, Transport::Bluetooth, None),
-                Some(reading(10)),
+                PollOutcome::Reading(reading(10)),
             )],
         );
         assert_eq!(rows.len(), 2);

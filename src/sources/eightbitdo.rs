@@ -73,6 +73,7 @@ pub struct EightBitDoBackend;
 pub struct EightBitDoSource {
     info: DeviceInfo,
     dev_path: PathBuf, // /dev/hidrawN
+    identity: hidraw::NodeIdentity,
 }
 
 #[async_trait::async_trait]
@@ -115,25 +116,29 @@ fn discover_inner() -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
             }
         };
 
-        // try_node returns Err for non-matching nodes — this is normal, silently skip.
-        let _ = try_node(&entry.file_name().to_string_lossy(), &mut sources);
+        // match_node returns Err for non-matching nodes — this is normal, silently skip.
+        if let Ok(node) = match_node(&entry.file_name().to_string_lossy()) {
+            sources.push(Box::new(EightBitDoSource {
+                info: node.info,
+                dev_path: node.dev_path,
+                identity: node.identity,
+            }));
+        }
     }
 
     Ok(sources)
 }
 
-/// Attempts to add a hidrawN node to the list of sources.
-/// Returns Err if the node does not match or an error occurs — the caller skips it.
-fn try_node(node_name: &str, sources: &mut Vec<Box<dyn BatterySource>>) -> anyhow::Result<()> {
+/// The device behind `/sys/class/hidraw/<node_name>`, if it is a supported
+/// model. Err if the node does not match or cannot be read.
+pub fn match_node(node_name: &str) -> anyhow::Result<hidraw::HidrawDevice> {
     let uevent_path = format!("/sys/class/hidraw/{node_name}/device/uevent");
     let uevent =
         std::fs::read_to_string(&uevent_path).with_context(|| format!("reading {uevent_path}"))?;
 
-    let hid_id_value = hidraw::uevent_value(&uevent, "HID_ID")
-        .with_context(|| format!("HID_ID not found in {uevent_path}"))?;
-
-    let (vendor, product) = hidraw::parse_hid_id(hid_id_value)
-        .with_context(|| format!("parsing HID_ID={hid_id_value}"))?;
+    let identity = hidraw::NodeIdentity::from_uevent(&uevent, node_name)
+        .with_context(|| format!("no parsable HID_ID in {uevent_path}"))?;
+    let (vendor, product) = (identity.vendor, identity.product);
 
     if vendor != VENDOR_ID {
         anyhow::bail!("vendor 0x{vendor:04X} != 0x{VENDOR_ID:04X}");
@@ -144,19 +149,16 @@ fn try_node(node_name: &str, sources: &mut Vec<Box<dyn BatterySource>>) -> anyho
         .find(|d| d.product_id == product)
         .with_context(|| format!("product 0x{product:04X} not in device table"))?;
 
-    let dev_path = PathBuf::from(format!("/dev/{node_name}"));
-
-    sources.push(Box::new(EightBitDoSource {
+    Ok(hidraw::HidrawDevice {
         info: DeviceInfo {
             name: device_desc.name.to_owned(),
             kind: device_desc.kind,
             transport: Transport::Hidraw,
-            locator: Some(hidraw::stable_locator(&uevent, node_name)),
+            locator: Some(identity.locator.clone()),
         },
-        dev_path,
-    }));
-
-    Ok(())
+        dev_path: PathBuf::from(format!("/dev/{node_name}")),
+        identity,
+    })
 }
 
 // ── Source ───────────────────────────────────────────────────────────────────
@@ -169,12 +171,13 @@ impl BatterySource for EightBitDoSource {
 
     async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
         let path = self.dev_path.clone();
+        let identity = self.identity.clone();
 
         // Blocking I/O: nix::poll() parks the thread, so run it off the async
         // runtime. Nothing is written to the device, so an aborted task leaves
         // no handle behind that needs to survive to the next poll (unlike
         // steelseries.rs, which passes an open handle in and back out).
-        let reading = tokio::task::spawn_blocking(move || poll_device(&path))
+        let reading = tokio::task::spawn_blocking(move || poll_device(&path, &identity))
             .await
             .context("spawn_blocking")??;
 
@@ -186,14 +189,20 @@ impl BatterySource for EightBitDoSource {
 /// Opens the node, waits for one streaming report, parses it, and closes the
 /// handle again — see the module doc comment for why this does not hold the
 /// handle open across polls.
-fn poll_device(dev_path: &std::path::Path) -> anyhow::Result<BatteryReading> {
+fn poll_device(
+    dev_path: &std::path::Path,
+    identity: &hidraw::NodeIdentity,
+) -> anyhow::Result<BatteryReading> {
     use std::os::fd::AsFd as _;
 
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(dev_path)
-        .with_context(|| format!("opening {}", dev_path.display()))?;
+    let mut file = hidraw::open_verified(
+        std::path::Path::new(hidraw::SYSFS_HIDRAW),
+        dev_path,
+        identity,
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK),
+    )?;
 
     let mut poll_fds = [PollFd::new(file.as_fd(), PollFlags::POLLIN)];
     let ready = poll(&mut poll_fds, PollTimeout::from(POLL_TIMEOUT_MS)).context("poll()")?;
@@ -316,5 +325,38 @@ mod tests {
     #[test]
     fn empty_report_returns_none() {
         assert_eq!(parse_battery_report(&[]), None);
+    }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn accepts_only_a_full_report_and_stays_in_range(
+                buf in prop::collection::vec(any::<u8>(), 0..70),
+            ) {
+                let parsed = parse_battery_report(&buf);
+                prop_assert_eq!(
+                    parsed.is_some(),
+                    buf.len() >= MIN_REPORT_LEN && buf[0] == REPORT_ID
+                );
+                if let Some(r) = parsed {
+                    prop_assert!(r.percent <= 100);
+                    let charging = buf[BATTERY_BYTE_OFFSET] & 0x80 != 0;
+                    prop_assert_eq!(r.state == ChargeState::Charging, charging);
+                }
+            }
+
+            #[test]
+            fn round_trips_every_percentage(percent in 0u8..=100, charging in any::<bool>()) {
+                let buf = captured_report(percent | if charging { 0x80 } else { 0 });
+                let state = if charging { ChargeState::Charging } else { ChargeState::Discharging };
+                prop_assert_eq!(
+                    parse_battery_report(&buf),
+                    Some(BatteryReading::new(percent, state))
+                );
+            }
+        }
     }
 }

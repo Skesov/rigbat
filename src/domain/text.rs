@@ -61,6 +61,10 @@ pub fn format_device_entry(state: &DeviceState, now: Instant, lang: Lang) -> Str
     let l = loader(lang);
     let name = state.info.name.as_str();
 
+    if state.presence == Presence::NoAccess {
+        return fl!(l, "entry-no-access", name = name);
+    }
+
     if state.presence == Presence::Online {
         return match state.last_reading {
             Some(r) => {
@@ -315,6 +319,21 @@ mod tests {
                 Lang::En
             ),
             "gamepad: offline"
+        );
+    }
+
+    #[test]
+    fn format_device_entry_no_access_points_at_doctor_even_with_a_retained_reading() {
+        let seen = Instant::now();
+        let r = BatteryReading::new(88, ChargeState::Discharging);
+        let denied = state("mouse", Presence::NoAccess, Some(r), Some(seen));
+        assert_eq!(
+            format_device_entry(&denied, seen, Lang::En),
+            "mouse: no access (run rigbat doctor)"
+        );
+        assert_eq!(
+            format_device_entry(&denied, seen, Lang::Ru),
+            "mouse: нет доступа (запустите rigbat doctor)"
         );
     }
 

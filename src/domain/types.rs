@@ -15,7 +15,8 @@ pub enum DeviceKind {
     Other,
 }
 
-/// Guesses the device type from its display name using case-insensitive keyword substring match.
+/// Guesses the device type from its display name using case-insensitive keyword
+/// substring match, plus whole-word match for earbud names.
 ///
 /// Match order: Mouse → Keyboard → Headset → Controller → Other.
 /// The first matching category wins.
@@ -77,6 +78,22 @@ pub fn guess_kind(name: &str) -> DeviceKind {
         if lower.contains(kw) {
             return *kind;
         }
+    }
+    // Whole words only: "ear" sits inside "Nearby", "Gear", "Clear".
+    const HEADSET_WORDS: &[&str] = &[
+        "ear",
+        "buds",
+        "earbuds",
+        "airpods",
+        "headphone",
+        "headphones",
+        "earphone",
+    ];
+    if lower
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| HEADSET_WORDS.contains(&word))
+    {
+        return DeviceKind::Headset;
     }
     for (kw, kind) in MODELS {
         if lower.contains(kw) {
@@ -191,6 +208,8 @@ impl DeviceInfo {
 pub struct BatteryReading {
     pub percent: u8, // invariant: 0..=100
     pub state: ChargeState,
+    /// `percent` stands in for a level band, so no remaining-time estimate uses it.
+    pub coarse: bool,
 }
 
 impl BatteryReading {
@@ -199,12 +218,20 @@ impl BatteryReading {
         Self {
             percent: percent.min(100),
             state,
+            coarse: false,
+        }
+    }
+
+    pub fn new_coarse(percent: u8, state: ChargeState) -> Self {
+        Self {
+            coarse: true,
+            ..Self::new(percent, state)
         }
     }
 }
 
 /// How reachable a device currently is. `last_reading` is retained across all
-/// three states, so a device that is asleep or switched off still shows the
+/// states, so a device that is asleep or switched off still shows the
 /// charge it last reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -217,6 +244,35 @@ pub enum Presence {
     Unreachable,
     /// Gone from discovery entirely: powered off, or switched to another host.
     Disconnected,
+    /// Discovered, but this user may not open it (udev rule missing).
+    NoAccess,
+}
+
+/// One poll's result, for the one-shot surfaces that keep no running presence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollOutcome {
+    Reading(BatteryReading),
+    /// The device did not answer.
+    Failed,
+    /// The device cannot be opened by this user.
+    NoAccess,
+}
+
+impl PollOutcome {
+    pub fn reading(self) -> Option<BatteryReading> {
+        match self {
+            Self::Reading(r) => Some(r),
+            Self::Failed | Self::NoAccess => None,
+        }
+    }
+
+    pub fn presence(self) -> Presence {
+        match self {
+            Self::Reading(_) => Presence::Online,
+            Self::Failed => Presence::Unreachable,
+            Self::NoAccess => Presence::NoAccess,
+        }
+    }
 }
 
 /// A device's presence and last-known reading, retained across polling gaps
@@ -253,8 +309,10 @@ impl DeviceState {
     ///
     /// The device stays in the roster and keeps being polled either way, so it
     /// returns the moment it answers again. This governs display only.
+    ///
+    /// A `NoAccess` device always is: the user has a setup problem to fix.
     pub fn is_currently_informative(&self, now: Instant, max_age: Duration) -> bool {
-        if self.presence == Presence::Online {
+        if matches!(self.presence, Presence::Online | Presence::NoAccess) {
             return true;
         }
         match (self.last_reading, self.last_seen) {
@@ -303,6 +361,31 @@ mod tests {
             let state = state_at(presence, None, None);
             assert!(!state.is_currently_informative(now, DAY));
         }
+    }
+
+    #[test]
+    fn no_access_device_is_informative_without_a_reading() {
+        let state = state_at(Presence::NoAccess, None, None);
+        assert!(state.is_currently_informative(Instant::now(), DAY));
+    }
+
+    #[test]
+    fn poll_outcome_maps_to_presence_and_reading() {
+        let r = BatteryReading::new(40, ChargeState::Discharging);
+        assert_eq!(PollOutcome::Reading(r).presence(), Presence::Online);
+        assert_eq!(PollOutcome::Reading(r).reading(), Some(r));
+        assert_eq!(PollOutcome::Failed.presence(), Presence::Unreachable);
+        assert_eq!(PollOutcome::NoAccess.presence(), Presence::NoAccess);
+        assert_eq!(PollOutcome::NoAccess.reading(), None);
+    }
+
+    /// `--json` and the dashboard IPC print this spelling.
+    #[test]
+    fn no_access_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_value(Presence::NoAccess).expect("serialize"),
+            "no_access"
+        );
     }
 
     #[test]
@@ -379,6 +462,26 @@ mod tests {
     #[test]
     fn guess_kind_headset() {
         assert_eq!(guess_kind("UGREEN HiTune Max5"), DeviceKind::Headset);
+    }
+
+    #[test]
+    fn guess_kind_earbuds_are_headsets() {
+        for name in [
+            "Nothing Ear (2)",
+            "Nothing Ear",
+            "AirPods Pro",
+            "Galaxy Buds+",
+            "Sony Headphones",
+        ] {
+            assert_eq!(guess_kind(name), DeviceKind::Headset, "{name}");
+        }
+    }
+
+    #[test]
+    fn guess_kind_ear_inside_a_word_is_not_a_headset() {
+        assert_eq!(guess_kind("Nearby Keyboard"), DeviceKind::Keyboard);
+        assert_eq!(guess_kind("Nearby Tracker"), DeviceKind::Other);
+        assert_eq!(guess_kind("Gear Tag"), DeviceKind::Other);
     }
 
     #[test]

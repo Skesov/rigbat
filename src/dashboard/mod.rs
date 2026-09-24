@@ -1,4 +1,4 @@
-//! `rigbat dashboard`: the tray icon's left click (R61). A card per shown
+//! `rigbat dashboard`: the tray icon's left click (R61). A row per shown
 //! device, read from the running tray over the session bus — it never polls a
 //! device itself, so it opens instantly and classifies each device exactly as
 //! its tray icon does.
@@ -13,73 +13,108 @@ use eframe::egui;
 use futures_util::{Stream, StreamExt as _};
 use zbus::fdo::{DBusProxy, NameOwnerChangedStream};
 
-use crate::config::{self, DisplayMode};
-use crate::domain::{DeviceKind, Presence, PrimaryStatus, format_age, format_coarse, state_label};
+use crate::config;
+use crate::domain::{
+    ChargeState, DeviceKind, Presence, PrimaryStatus, format_age, format_coarse, state_label,
+};
 use crate::gui;
 use crate::i18n::{Lang, fl, loader};
-use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
+use crate::icon::Theme;
 use crate::ipc::single_instance::{SingleInstance, acquire_named};
 use crate::ipc::{DASHBOARD_NAME, DASHBOARD_PATH, DeviceCard, Snapshot, TRAY_NAME};
 use crate::ipc::{Dashboard1Proxy, Tray1Proxy};
 
-const CARD_WIDTH: f32 = 264.0;
-const CARD_HEIGHT: f32 = 124.0;
-const CARD_PADDING: f32 = 12.0;
-/// COSMIC's `radius_m`.
-const CARD_RADIUS: f32 = 8.0;
-/// Opacity of the icon and bar of a card whose reading is not live.
+const WINDOW_WIDTH: f32 = 380.0;
+const MARGIN: f32 = 12.0;
+const ROW_HEIGHT: f32 = 48.0;
+const ROW_PADDING: f32 = 5.0;
+const GLYPH_COLUMN: f32 = 30.0;
+const GLYPH_SIZE: f32 = 20.0;
+const GAP: f32 = 8.0;
+const NOTE_SIZE: f32 = 12.0;
+const BAR_HEIGHT: f32 = 4.0;
+/// How far the bar's track leans from `extreme_bg_color` toward the fill.
+const TRACK_TINT: f32 = 0.25;
+/// Opacity of the bar of a row whose reading is not live.
 const DIMMED: f32 = 0.6;
-const GAP: f32 = 10.0;
-const MARGIN: f32 = 14.0;
-const FOOTER_HEIGHT: f32 = 44.0;
-const MAX_WINDOW_HEIGHT: f32 = 700.0;
-const ICON_PIXELS: u32 = 64;
-const ICON_SIZE: f32 = 32.0;
+const FOOTER_HEIGHT: f32 = 32.0;
+const MAX_VISIBLE_ROWS: usize = 10;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a restarted tray gets to register its state before we give up.
 const RESTART_RETRIES: u32 = 10;
 const RESTART_RETRY_DELAY: Duration = Duration::from_millis(500);
 const REFRESH_SPINNER_LIMIT: Duration = Duration::from_secs(5);
 
-/// Two cards per row; tall enough for every row up to `MAX_WINDOW_HEIGHT`.
+/// Exactly the rows, footer and margins; past `MAX_VISIBLE_ROWS` the list scrolls.
 fn window_size(devices: usize) -> [f32; 2] {
-    let rows = devices.div_ceil(2).max(1) as f32;
-    let width = 2.0 * MARGIN + 2.0 * CARD_WIDTH + GAP;
-    let height = 2.0 * MARGIN + rows * CARD_HEIGHT + (rows - 1.0) * GAP + FOOTER_HEIGHT;
-    [width, height.min(MAX_WINDOW_HEIGHT)]
+    let rows = devices.clamp(1, MAX_VISIBLE_ROWS) as f32;
+    [
+        WINDOW_WIDTH,
+        2.0 * MARGIN + rows * ROW_HEIGHT + FOOTER_HEIGHT,
+    ]
 }
 
-pub fn run() -> anyhow::Result<()> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
+fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .build()
-        .context("building the tokio runtime for the session bus")?;
+        .context("building the tokio runtime for the session bus")
+}
 
-    let bus = match rt.block_on(acquire_named(DASHBOARD_NAME)) {
-        // A second launch is the second click: close the open window instead.
-        SingleInstance::AlreadyRunning => {
+// Built once per launch and taken apart at once: boxing would buy nothing.
+#[expect(clippy::large_enum_variant)]
+enum Startup {
+    /// Another dashboard holds the name: this launch is the second click.
+    SecondClick,
+    Started {
+        /// Holds the name and serves `Closer` for as long as it lives.
+        bus: Option<zbus::Connection>,
+        live: Option<Subscription>,
+    },
+}
+
+/// The bus setup `run` does from its own thread, which is not a runtime thread.
+fn start(rt: &tokio::runtime::Runtime, closer: Closer) -> Startup {
+    let conn = match rt.block_on(acquire_named(DASHBOARD_NAME)) {
+        SingleInstance::AlreadyRunning => return Startup::SecondClick,
+        SingleInstance::Acquired(conn) => conn,
+        SingleInstance::Unavailable => {
+            return Startup::Started {
+                bus: None,
+                live: None,
+            };
+        }
+    };
+    // `object_server()` spawns zbus's dispatch task, so it must run inside the runtime.
+    if let Err(e) = rt.block_on(async { conn.object_server().at(DASHBOARD_PATH, closer).await }) {
+        tracing::warn!("a second click will not close this window: {e}");
+    }
+    // Subscribed before the first read, so a change in between is not lost.
+    let live = rt.block_on(subscribe(&conn));
+    Startup::Started {
+        bus: Some(conn),
+        live,
+    }
+}
+
+pub fn run() -> anyhow::Result<()> {
+    let rt = runtime()?;
+    let window: Arc<OnceLock<egui::Context>> = Arc::default();
+    let close_pending = Arc::new(AtomicBool::new(false));
+    let closer = Closer {
+        window: window.clone(),
+        pending: close_pending.clone(),
+    };
+    let (_bus, live) = match start(&rt, closer) {
+        Startup::SecondClick => {
             rt.block_on(close_running());
             return Ok(());
         }
-        SingleInstance::Acquired(conn) => Some(conn),
-        SingleInstance::Unavailable => None,
+        Startup::Started { bus, live } => (bus, live),
     };
-
-    let window: Arc<OnceLock<egui::Context>> = Arc::default();
-    let close_pending = Arc::new(AtomicBool::new(false));
-    let mut live = None;
-    if let Some(conn) = &bus {
-        let closer = Closer {
-            window: window.clone(),
-            pending: close_pending.clone(),
-        };
-        if let Err(e) = rt.block_on(conn.object_server().at(DASHBOARD_PATH, closer)) {
-            tracing::warn!("a second click will not close this window: {e}");
-        }
-        // Subscribed before the first read, so a change in between is not lost.
-        live = rt.block_on(subscribe(conn));
-    }
+    // Dropping a zbus proxy or stream spawns a task, and some drop on this thread.
+    let _entered = rt.enter();
     let (first, appearance) = rt.block_on(async {
         let first = async {
             match &live {
@@ -247,8 +282,9 @@ impl Closer {
     }
 }
 
-/// What an icon is drawn from; the textures are rebuilt only when it changes.
-type IconKey = (Vec<(PrimaryStatus, DeviceKind, bool)>, DisplayMode, bool);
+const CHARGING: char = '\u{26A1}';
+const WARNING: char = '\u{26A0}';
+const REFRESH: &str = "\u{21BB}";
 
 struct Dashboard {
     snapshot: Option<Snapshot>,
@@ -256,8 +292,8 @@ struct Dashboard {
     lang: Lang,
     updates: mpsc::Receiver<Option<Snapshot>>,
     tray: Option<(Tray1Proxy<'static>, tokio::runtime::Handle)>,
-    icons: Vec<Option<egui::TextureHandle>>,
-    icons_for: Option<IconKey>,
+    /// The window size last asked for, in points.
+    size: [f32; 2],
     was_focused: bool,
     refreshing: Option<Refreshing>,
 }
@@ -281,12 +317,12 @@ impl Dashboard {
             lang,
             updates,
             tray,
-            icons: Vec::new(),
-            icons_for: None,
+            size: window_size(0),
             was_focused: false,
             refreshing: None,
         };
         dashboard.accept(snapshot);
+        dashboard.size = dashboard.wanted_size();
         dashboard
     }
 
@@ -302,6 +338,19 @@ impl Dashboard {
     fn drain_updates(&mut self) {
         while let Ok(snapshot) = self.updates.try_recv() {
             self.accept(snapshot);
+        }
+    }
+
+    fn wanted_size(&self) -> [f32; 2] {
+        window_size(self.snapshot.as_ref().map_or(0, |s| s.devices.len()))
+    }
+
+    /// A device coming or going changes the row count; the window follows it.
+    fn fit_window(&mut self, ctx: &egui::Context) {
+        let size = self.wanted_size();
+        if size != self.size {
+            self.size = size;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.into()));
         }
     }
 
@@ -323,6 +372,13 @@ impl Dashboard {
         }
     }
 
+    /// The whole window: the panel fills it, so no band of bare window shows.
+    fn show(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::central_panel(ui.style()).inner_margin(MARGIN))
+            .show_inside(ui, |ui| self.render(ui));
+    }
+
     fn render(&mut self, ui: &mut egui::Ui) {
         let l = loader(self.lang);
         let Some(snapshot) = &self.snapshot else {
@@ -333,30 +389,25 @@ impl Dashboard {
             ui.centered_and_justified(|ui| ui.label(fl!(l, "tray-no-devices")));
             return;
         }
-        self.refresh_icons(ui.ctx());
-
-        let body_height = ui.available_height() - FOOTER_HEIGHT;
-        egui::ScrollArea::vertical()
-            .max_height(body_height)
-            .auto_shrink([false, true])
-            .show(ui, |ui| self.render_cards(ui));
-        self.render_footer(ui);
-    }
-
-    fn render_cards(&self, ui: &mut egui::Ui) {
-        let Some(snapshot) = &self.snapshot else {
-            return;
+        let (lang, elapsed) = (self.lang, self.received_at.elapsed().as_secs());
+        let (list, footer) = ui
+            .max_rect()
+            .split_top_bottom_at_y(ui.max_rect().bottom() - FOOTER_HEIGHT);
+        let mut list_ui = ui.new_child(egui::UiBuilder::new().max_rect(list));
+        list_ui.spacing_mut().item_spacing.y = 0.0;
+        let rows = |ui: &mut egui::Ui| {
+            for card in &snapshot.devices {
+                render_row(ui, card, lang, elapsed);
+            }
         };
-        let elapsed = self.received_at.elapsed().as_secs();
-        ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
-        for (row, pair) in snapshot.devices.chunks(2).enumerate() {
-            ui.horizontal_top(|ui| {
-                for (col, card) in pair.iter().enumerate() {
-                    let icon = self.icons.get(row * 2 + col).and_then(Option::as_ref);
-                    render_card(ui, card, icon, self.lang, elapsed);
-                }
-            });
+        if snapshot.devices.len() > MAX_VISIBLE_ROWS {
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .show(&mut list_ui, rows);
+        } else {
+            rows(&mut list_ui);
         }
+        self.render_footer(ui, footer);
     }
 
     fn refresh_in_flight(&mut self) -> bool {
@@ -369,71 +420,41 @@ impl Dashboard {
         self.refreshing.is_some()
     }
 
-    fn render_footer(&mut self, ui: &mut egui::Ui) {
+    fn render_footer(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         let l = loader(self.lang);
         let in_flight = self.refresh_in_flight();
-        ui.separator();
-        ui.horizontal(|ui| {
-            if let Some((tray, rt)) = &self.tray {
-                let button = egui::Button::new(fl!(l, "button-refresh"));
-                if ui.add_enabled(!in_flight, button).clicked() {
-                    let (failed_tx, failed) = tokio::sync::oneshot::channel();
-                    self.refreshing = Some(Refreshing {
-                        since: Instant::now(),
-                        failed,
-                    });
-                    let tray = tray.clone();
-                    rt.spawn(async move {
-                        if let Err(e) = tray.refresh().await {
-                            tracing::warn!("refresh request failed: {e}");
-                            let _ = failed_tx.send(());
-                        }
-                    });
-                }
-                if in_flight {
-                    ui.add(egui::Spinner::new());
-                }
+        let layout = egui::Layout::left_to_right(egui::Align::Center);
+        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
+        if let Some((tray, rt)) = &self.tray {
+            let button = egui::Button::new(REFRESH);
+            let clicked = ui
+                .add_enabled(!in_flight, button)
+                .on_hover_text(fl!(l, "button-refresh"))
+                .clicked();
+            if clicked {
+                let (failed_tx, failed) = tokio::sync::oneshot::channel();
+                self.refreshing = Some(Refreshing {
+                    since: Instant::now(),
+                    failed,
+                });
+                let tray = tray.clone();
+                rt.spawn(async move {
+                    if let Err(e) = tray.refresh().await {
+                        tracing::warn!("refresh request failed: {e}");
+                        let _ = failed_tx.send(());
+                    }
+                });
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(fl!(l, "tray-settings")).clicked() {
-                    open_settings();
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
-        });
-    }
-
-    fn refresh_icons(&mut self, ctx: &egui::Context) {
-        let dark = ctx.global_style().visuals.dark_mode;
-        let Some(snapshot) = &self.snapshot else {
-            return;
-        };
-        let key: IconKey = (
-            snapshot
-                .devices
-                .iter()
-                .map(|c| (c.status, c.kind, c.stale))
-                .collect(),
-            snapshot.display_mode,
-            dark,
-        );
-        if self.icons_for.as_ref() == Some(&key) {
-            return;
+            if in_flight {
+                ui.add(egui::Spinner::new());
+            }
         }
-        self.icons = snapshot
-            .devices
-            .iter()
-            .enumerate()
-            .map(|(i, card)| {
-                let image = icon_image(card, snapshot.display_mode, dark)?;
-                Some(ctx.load_texture(
-                    format!("device-icon-{i}"),
-                    image,
-                    egui::TextureOptions::LINEAR,
-                ))
-            })
-            .collect();
-        self.icons_for = Some(key);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button(fl!(l, "tray-settings")).clicked() {
+                open_settings();
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
     }
 }
 
@@ -441,16 +462,8 @@ impl eframe::App for Dashboard {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_updates();
         self.close_like_a_popup(ui.ctx());
-        egui::Frame::central_panel(ui.style())
-            .inner_margin(MARGIN)
-            .show(ui, |ui| self.render(ui));
-        // Undecorated, so the edge has to be drawn to stand off a light desktop.
-        ui.painter().rect_stroke(
-            ui.max_rect(),
-            0.0,
-            ui.visuals().window_stroke,
-            egui::StrokeKind::Inside,
-        );
+        self.fit_window(ui.ctx());
+        self.show(ui);
         // Ages ("2 h ago") move without any state change.
         ui.ctx().request_repaint_after(Duration::from_secs(30));
     }
@@ -465,14 +478,10 @@ fn sort_cards(cards: &mut [DeviceCard]) {
     });
 }
 
-fn render_card(
-    ui: &mut egui::Ui,
-    card: &DeviceCard,
-    icon: Option<&egui::TextureHandle>,
-    lang: Lang,
-    elapsed: u64,
-) {
-    let l = loader(lang);
+fn render_row(ui: &mut egui::Ui, card: &DeviceCard, lang: Lang, elapsed: u64) {
+    let size = egui::vec2(ui.available_width(), ROW_HEIGHT);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    response.on_hover_text(details(card, lang));
     let visuals = ui.visuals().clone();
     let theme = if visuals.dark_mode {
         Theme::dark()
@@ -481,108 +490,150 @@ fn render_card(
     };
     let low = matches!(card.status, PrimaryStatus::Low { .. });
     let online = card.presence == Presence::Online;
-    // Like the tray icon: dimmed when not live, except a low reading. Text never dims.
-    let dimmed = !online && !low;
-    let secondary = secondary_text(&visuals);
 
-    egui::Frame::new()
-        .fill(visuals.faint_bg_color)
-        .stroke(visuals.widgets.noninteractive.bg_stroke)
-        .corner_radius(CARD_RADIUS)
-        .inner_margin(CARD_PADDING)
-        .show(ui, |ui| {
-            ui.vertical(|ui| {
-                let inner =
-                    egui::vec2(CARD_WIDTH, CARD_HEIGHT) - egui::vec2(2.0, 2.0) * CARD_PADDING;
-                ui.set_width(inner.x);
-                ui.set_min_height(inner.y);
-                ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
+    ui.painter().text(
+        egui::pos2(rect.left() + GLYPH_COLUMN / 2.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        kind_glyph(card.kind),
+        egui::FontId::proportional(GLYPH_SIZE),
+        visuals.text_color(),
+    );
 
-                ui.horizontal(|ui| {
-                    if let Some(icon) = icon {
-                        let tint = egui::Color32::WHITE.gamma_multiply(opacity(dimmed));
-                        ui.add(
-                            egui::Image::new((icon.id(), egui::vec2(ICON_SIZE, ICON_SIZE)))
-                                .tint(tint),
-                        );
-                    }
-                    ui.vertical(|ui| {
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(&card.name).strong()).truncate(),
-                        );
-                        let mut subtitle =
-                            format!("{} · {}", card.kind.label(lang), card.transport.as_str());
-                        if card.in_tray {
-                            subtitle = format!("{subtitle} · {}", fl!(l, "dashboard-in-tray"));
-                        }
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(subtitle).small().color(secondary),
-                            )
-                            .truncate(),
-                        );
-                    });
-                });
+    let body = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + GLYPH_COLUMN + GAP, rect.top() + ROW_PADDING),
+        egui::pos2(rect.right(), rect.bottom() - ROW_PADDING),
+    );
+    let (top, bottom) = body.split_top_bottom_at_fraction(0.5);
 
-                ui.horizontal(|ui| {
-                    let percent = card
-                        .percent
-                        .map_or_else(|| "—".to_owned(), |p| format!("{p}%"));
-                    let mut big = egui::RichText::new(percent).size(24.0).strong();
-                    if low {
-                        big = big.color(color(theme.low));
-                    }
-                    ui.label(big);
-                    let status = match (online, card.charge) {
-                        (true, Some(charge)) => state_label(charge, lang),
-                        _ => presence_label(card.presence, lang),
-                    };
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(status).color(secondary)).truncate(),
-                    );
-                });
+    let value = egui::RichText::new(value_text(card, lang));
+    let value = match (low, online) {
+        (true, _) => value.strong().color(color(theme.low)),
+        (false, true) => value.strong(),
+        (false, false) => value.color(secondary_text(&visuals)),
+    };
+    let value_rect = place(ui, top, egui::Align::Max, egui::Label::new(value));
+    let name = egui::Label::new(egui::RichText::new(&card.name).strong()).truncate();
+    place(
+        ui,
+        top.with_max_x(value_rect.left() - GAP),
+        egui::Align::Min,
+        name,
+    );
 
-                let fill = match card.status {
-                    PrimaryStatus::Low { .. } => color(theme.low),
-                    PrimaryStatus::Charging { .. } => color(theme.charging),
-                    PrimaryStatus::Ok { .. } => visuals.selection.bg_fill,
-                    PrimaryStatus::Offline => color(theme.offline),
-                };
-                let fraction = f32::from(card.percent.unwrap_or(0)) / 100.0;
-                ui.scope(|ui| {
-                    ui.multiply_opacity(opacity(dimmed));
-                    ui.add(
-                        egui::ProgressBar::new(fraction)
-                            .fill(fill)
-                            .desired_height(6.0),
-                    );
-                });
-
-                let footer = if online {
-                    card.remaining_secs.map(|secs| {
-                        let estimate = format_coarse(Duration::from_secs(secs), lang);
-                        fl!(l, "dashboard-remaining", estimate = estimate.as_str())
-                    })
-                } else {
-                    card.seen_secs_ago.map(|secs| {
-                        let age = format_age(Duration::from_secs(secs + elapsed), lang);
-                        fl!(l, "dashboard-last-reading", age = age.as_str())
-                    })
-                };
-                ui.label(
-                    egui::RichText::new(footer.unwrap_or_default())
-                        .small()
-                        .color(secondary),
-                );
-            })
-        });
+    let note = row_note(card, lang, elapsed).map(|note| {
+        egui::Label::new(
+            egui::RichText::new(note)
+                .size(NOTE_SIZE)
+                .color(secondary_text(&visuals)),
+        )
+    });
+    let Some(percent) = card.percent else {
+        if let Some(note) = note {
+            place(ui, bottom, egui::Align::Min, note);
+        }
+        return;
+    };
+    let bar_right = match note {
+        Some(note) => place(ui, bottom, egui::Align::Max, note).left() - GAP,
+        None => bottom.right(),
+    };
+    let fill = match card.status {
+        PrimaryStatus::Low { .. } => color(theme.low),
+        PrimaryStatus::Charging { .. } => color(theme.charging),
+        PrimaryStatus::Ok { .. } => visuals.selection.bg_fill,
+        PrimaryStatus::Offline => color(theme.offline),
+    };
+    // Like the tray icon: dimmed when not live, except a low reading.
+    let opacity = if online || low { 1.0 } else { DIMMED };
+    let track = egui::Rect::from_center_size(
+        egui::pos2((bottom.left() + bar_right) / 2.0, bottom.center().y),
+        egui::vec2(bar_right - bottom.left(), BAR_HEIGHT),
+    );
+    let filled = track.with_max_x(track.left() + track.width() * f32::from(percent) / 100.0);
+    let painter = ui.painter();
+    painter.rect_filled(
+        track,
+        BAR_HEIGHT / 2.0,
+        track_color(&visuals, fill).gamma_multiply(opacity),
+    );
+    painter.rect_filled(filled, BAR_HEIGHT / 2.0, fill.gamma_multiply(opacity));
 }
 
-fn opacity(dimmed: bool) -> f32 {
-    if dimmed { DIMMED } else { 1.0 }
+/// Leaves the parent's cursor alone: the row already allocated its rect.
+fn place(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    from: egui::Align,
+    widget: egui::Label,
+) -> egui::Rect {
+    let layout = match from {
+        egui::Align::Max => egui::Layout::right_to_left(egui::Align::Center),
+        _ => egui::Layout::left_to_right(egui::Align::Center),
+    };
+    ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout))
+        .add(widget.selectable(false))
+        .rect
 }
 
-/// `weak_text_color` misses WCAG 4.5:1 on a dark card.
+/// A track that belongs to its fill, not a black groove.
+fn track_color(visuals: &egui::Visuals, fill: egui::Color32) -> egui::Color32 {
+    visuals.extreme_bg_color.lerp_to_gamma(fill, TRACK_TINT)
+}
+
+fn kind_glyph(kind: DeviceKind) -> &'static str {
+    match kind {
+        DeviceKind::Mouse => "\u{1F5B1}",
+        DeviceKind::Keyboard => "\u{2328}",
+        DeviceKind::Headset => "\u{1F3A7}",
+        DeviceKind::Controller => "\u{1F3AE}",
+        DeviceKind::Other => "\u{1F50B}",
+    }
+}
+
+/// A low level carries a sign as well as a color.
+fn value_text(card: &DeviceCard, lang: Lang) -> String {
+    let text = match (card.presence, card.percent) {
+        (Presence::Online, None) => "—".to_owned(),
+        (Presence::Online, Some(p)) => match (card.status, card.charge) {
+            (PrimaryStatus::Charging { .. }, _) => format!("{CHARGING} {p}%"),
+            (_, Some(ChargeState::Full)) => {
+                format!("{p}% · {}", state_label(ChargeState::Full, lang))
+            }
+            _ => format!("{p}%"),
+        },
+        (presence, _) => presence_label(presence, lang),
+    };
+    if matches!(card.status, PrimaryStatus::Low { .. }) {
+        format!("{WARNING} {text}")
+    } else {
+        text
+    }
+}
+
+/// Only what the bar does not already say.
+fn row_note(card: &DeviceCard, lang: Lang, elapsed: u64) -> Option<String> {
+    let l = loader(lang);
+    match card.presence {
+        Presence::NoAccess => Some(fl!(l, "dashboard-no-access-hint")),
+        Presence::Online => card
+            .remaining_secs
+            .map(|secs| format_coarse(Duration::from_secs(secs), lang)),
+        Presence::Unreachable | Presence::Disconnected => card.seen_secs_ago.map(|secs| {
+            let age = format_age(Duration::from_secs(secs + elapsed), lang);
+            fl!(l, "dashboard-last-reading", age = age.as_str())
+        }),
+    }
+}
+
+fn details(card: &DeviceCard, lang: Lang) -> String {
+    let mut parts = vec![card.kind.label(lang), card.transport.as_str().to_owned()];
+    if card.in_tray {
+        parts.push(fl!(loader(lang), "dashboard-in-tray"));
+    }
+    parts.join(" · ")
+}
+
+/// `weak_text_color` misses WCAG 4.5:1 on a dark panel.
 fn secondary_text(visuals: &egui::Visuals) -> egui::Color32 {
     visuals.text_color()
 }
@@ -593,36 +644,12 @@ fn presence_label(presence: Presence, lang: Lang) -> String {
         Presence::Online => fl!(l, "presence-online"),
         Presence::Unreachable => fl!(l, "presence-unreachable"),
         Presence::Disconnected => fl!(l, "presence-disconnected"),
+        Presence::NoAccess => fl!(l, "presence-no-access"),
     }
 }
 
 fn color([r, g, b, a]: [u8; 4]) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(r, g, b, a)
-}
-
-/// The same picture the device's tray icon shows.
-fn icon_image(card: &DeviceCard, mode: DisplayMode, dark: bool) -> Option<egui::ColorImage> {
-    let theme = if dark { Theme::dark() } else { Theme::light() };
-    let renderer = TinySkiaRenderer {
-        sizes: vec![ICON_PIXELS],
-    };
-    let icon = renderer
-        .render(card.status, Some(card.kind), &theme, mode, card.stale)
-        .into_iter()
-        .next()?;
-    // ksni pixels are ARGB in network byte order.
-    let rgba: Vec<u8> = icon
-        .data
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .flat_map(|&[a, r, g, b]| [r, g, b, a])
-        .collect();
-    let size = [
-        usize::try_from(icon.width).ok()?,
-        usize::try_from(icon.height).ok()?,
-    ];
-    Some(egui::ColorImage::from_rgba_unmultiplied(size, &rgba))
 }
 
 fn open_settings() {
@@ -639,6 +666,7 @@ fn open_settings() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DisplayMode;
     use crate::domain::{ChargeState, DeviceKind, Transport};
     use crate::egui_test::{assert_single_lines_without_overlap, fully_painted_text_at};
 
@@ -663,6 +691,25 @@ mod tests {
         }
     }
 
+    fn charging(name: &str, percent: u8) -> DeviceCard {
+        DeviceCard {
+            charge: Some(ChargeState::Charging),
+            status: PrimaryStatus::Charging { percent },
+            remaining_secs: None,
+            kind: DeviceKind::Headset,
+            ..card(name, Presence::Online, Some(percent))
+        }
+    }
+
+    fn full(name: &str) -> DeviceCard {
+        DeviceCard {
+            charge: Some(ChargeState::Full),
+            remaining_secs: None,
+            kind: DeviceKind::Controller,
+            ..card(name, Presence::Online, Some(100))
+        }
+    }
+
     fn dashboard(devices: Vec<DeviceCard>, lang: Lang) -> Dashboard {
         let snapshot = Snapshot {
             display_mode: DisplayMode::IconOnly,
@@ -677,6 +724,20 @@ mod tests {
             card("SteelSeries Aerox 5 Wireless", Presence::Online, Some(15)),
             card("MX Anywhere 3", Presence::Online, Some(62)),
         ]
+    }
+
+    /// One row per state the dashboard distinguishes.
+    fn every_state() -> Vec<DeviceCard> {
+        let mut devices = roster();
+        devices.push(charging("Nothing Ear (2)", 40));
+        devices.push(full("8BitDo Ultimate 2C Wireless"));
+        devices.push(card("Aerox 5 Wireless", Presence::NoAccess, None));
+        devices
+    }
+
+    fn painted(d: &mut Dashboard) -> Vec<crate::egui_test::Painted> {
+        let size = d.wanted_size();
+        fully_painted_text_at(size, |ui| d.show(ui))
     }
 
     #[test]
@@ -699,21 +760,26 @@ mod tests {
     }
 
     #[test]
-    fn cards_render_whole_in_every_language() {
+    fn every_row_state_renders_whole_on_one_line_in_every_language() {
         for lang in Lang::ALL {
-            let mut d = dashboard(roster(), lang);
-            let painted = fully_painted_text_at(window_size(3), |ui| d.render(ui));
+            let mut d = dashboard(every_state(), lang);
+            let painted = painted(&mut d);
             let l = loader(lang);
-            let estimate = format_coarse(Duration::from_secs(7 * 3600), lang);
             let age = format_age(Duration::from_secs(2 * 3600), lang);
             let expected = [
                 "MX Anywhere 3".to_owned(),
+                "Nothing Ear (2)".to_owned(),
+                "\u{1F5B1}".to_owned(),
+                "\u{1F3A7}".to_owned(),
                 "62%".to_owned(),
-                "15%".to_owned(),
-                state_label(ChargeState::Discharging, lang),
+                format!("{WARNING} 15%"),
+                format!("{CHARGING} 40%"),
+                format!("100% · {}", state_label(ChargeState::Full, lang)),
                 fl!(l, "presence-disconnected"),
-                fl!(l, "dashboard-remaining", estimate = estimate.as_str()),
+                fl!(l, "presence-no-access"),
+                format_coarse(Duration::from_secs(7 * 3600), lang),
                 fl!(l, "dashboard-last-reading", age = age.as_str()),
+                fl!(l, "dashboard-no-access-hint"),
                 fl!(l, "tray-settings"),
             ];
             for text in expected {
@@ -726,6 +792,64 @@ mod tests {
         }
     }
 
+    /// Kind, transport and tray membership live in the tooltip, not the row.
+    #[test]
+    fn a_row_carries_no_kind_transport_or_state_noise() {
+        for lang in Lang::ALL {
+            let mut d = dashboard(roster(), lang);
+            let painted = painted(&mut d);
+            let l = loader(lang);
+            let noise = [
+                DeviceKind::Mouse.label(lang),
+                Transport::Hidraw.as_str().to_owned(),
+                fl!(l, "dashboard-in-tray"),
+                state_label(ChargeState::Discharging, lang),
+            ];
+            for p in &painted {
+                for word in &noise {
+                    assert!(!p.text.contains(word.as_str()), "{lang:?}: {p:?}");
+                }
+            }
+            assert_eq!(
+                details(&roster()[0], lang),
+                format!(
+                    "{} · hidraw · {}",
+                    DeviceKind::Mouse.label(lang),
+                    fl!(l, "dashboard-in-tray")
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_without_access_sorts_after_online_ones() {
+        let mut devices = roster();
+        devices.insert(0, card("Aerox 5 Wireless", Presence::NoAccess, None));
+        let d = dashboard(devices, Lang::En);
+        let presences: Vec<Presence> = d
+            .snapshot
+            .iter()
+            .flat_map(|s| &s.devices)
+            .map(|c| c.presence)
+            .collect();
+        assert_eq!(&presences[..2], [Presence::Online, Presence::Online]);
+    }
+
+    #[test]
+    fn a_retained_reading_that_is_not_low_names_the_presence_not_a_percent() {
+        let unreachable = card("m", Presence::Unreachable, Some(88));
+        assert_eq!(value_text(&unreachable, Lang::En), "Unreachable");
+        let low = card("m", Presence::Unreachable, Some(12));
+        assert_eq!(value_text(&low, Lang::En), format!("{WARNING} Unreachable"));
+    }
+
+    #[test]
+    fn a_full_reading_at_100_while_discharging_shows_no_state_word() {
+        let c = card("m", Presence::Online, Some(100));
+        assert_eq!(value_text(&c, Lang::En), "100%");
+        assert_eq!(value_text(&full("m"), Lang::En), "100% · full");
+    }
+
     #[test]
     fn a_long_name_is_truncated_not_wrapped() {
         let mut d = dashboard(
@@ -736,49 +860,51 @@ mod tests {
             )],
             Lang::En,
         );
-        let painted = fully_painted_text_at(window_size(1), |ui| d.render(ui));
+        let painted = painted(&mut d);
+        assert!(painted.iter().any(|p| p.text == "50%"), "{painted:?}");
         assert_single_lines_without_overlap(&painted);
     }
 
     #[test]
-    fn without_a_tray_it_says_so() {
-        let mut d = Dashboard::new(None, Lang::Ru, mpsc::channel().1, None);
-        let painted = fully_painted_text_at(window_size(0), |ui| d.render(ui));
-        assert!(
-            painted.iter().any(|p| p.text == "Трей rigbat не запущен."),
-            "{painted:?}"
-        );
+    fn without_a_tray_or_devices_it_says_so_in_every_language() {
+        for lang in Lang::ALL {
+            let l = loader(lang);
+            let mut none = Dashboard::new(None, lang, mpsc::channel().1, None);
+            let mut empty = dashboard(Vec::new(), lang);
+            for (d, text) in [
+                (&mut none, fl!(l, "dashboard-tray-not-running")),
+                (&mut empty, fl!(l, "tray-no-devices")),
+            ] {
+                let painted = painted(d);
+                assert!(
+                    painted.iter().any(|p| p.text == text),
+                    "{lang:?}: {text:?} missing; painted: {painted:?}"
+                );
+                assert_single_lines_without_overlap(&painted);
+            }
+        }
     }
 
-    /// The tray signals on every poll; textures follow what the icon is drawn
-    /// from, not every new snapshot.
     #[test]
-    fn icons_are_rebuilt_only_when_their_picture_changes() {
+    fn every_glyph_is_in_the_bundled_fonts() {
         let ctx = egui::Context::default();
-        let mut d = dashboard(roster(), Lang::En);
-        d.refresh_icons(&ctx);
-        let ids = |d: &Dashboard| -> Vec<_> { d.icons.iter().flatten().map(|t| t.id()).collect() };
-        let before = ids(&d);
-
-        let mut aged = roster();
-        for card in &mut aged {
-            card.seen_secs_ago = Some(9_999);
-        }
-        d.accept(Some(Snapshot {
-            display_mode: DisplayMode::IconOnly,
-            devices: aged,
-        }));
-        d.refresh_icons(&ctx);
-        assert_eq!(ids(&d), before);
-
-        let mut charging = roster();
-        charging[0].status = PrimaryStatus::Charging { percent: 88 };
-        d.accept(Some(Snapshot {
-            display_mode: DisplayMode::IconOnly,
-            devices: charging,
-        }));
-        d.refresh_icons(&ctx);
-        assert_ne!(ids(&d), before);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let kinds = [
+            DeviceKind::Mouse,
+            DeviceKind::Keyboard,
+            DeviceKind::Headset,
+            DeviceKind::Controller,
+            DeviceKind::Other,
+        ];
+        let font = egui::FontId::proportional(GLYPH_SIZE);
+        ctx.fonts_mut(|fonts| {
+            for glyph in kinds.map(kind_glyph).into_iter().chain([REFRESH]) {
+                assert!(fonts.has_glyphs(&font, glyph), "{glyph:?}");
+            }
+            for sign in [CHARGING, WARNING] {
+                assert!(fonts.has_glyph(&font, sign), "{sign:?}");
+            }
+        });
     }
 
     #[test]
@@ -792,30 +918,45 @@ mod tests {
     }
 
     #[test]
-    fn window_grows_by_rows_and_stops_at_the_cap() {
-        assert_eq!(window_size(1), window_size(2));
-        assert!(window_size(3)[1] > window_size(2)[1]);
-        assert!(window_size(40)[1] <= MAX_WINDOW_HEIGHT);
-    }
-
-    /// `faint_bg_color` is premultiplied (additive), so composite it over the panel.
-    fn card_background(visuals: &egui::Visuals) -> egui::Color32 {
-        let (src, dst) = (visuals.faint_bg_color, visuals.panel_fill);
-        let keep = 1.0 - f32::from(src.a()) / 255.0;
-        let over = |s: u8, d: u8| (f32::from(s) + f32::from(d) * keep).round().min(255.0) as u8;
-        egui::Color32::from_rgb(
-            over(src.r(), dst.r()),
-            over(src.g(), dst.g()),
-            over(src.b(), dst.b()),
-        )
+    fn window_fits_the_rows_exactly_and_scrolls_past_the_cap() {
+        let footer_and_margins = 2.0 * MARGIN + FOOTER_HEIGHT;
+        assert_eq!(window_size(0), window_size(1));
+        assert_eq!(window_size(3)[1], 3.0 * ROW_HEIGHT + footer_and_margins);
+        assert_eq!(window_size(40), window_size(MAX_VISIBLE_ROWS));
     }
 
     #[test]
-    fn secondary_text_is_readable_on_the_card_in_both_themes() {
+    fn the_window_follows_a_device_appearing() {
+        let ctx = egui::Context::default();
+        let mut d = dashboard(roster(), Lang::En);
+        d.fit_window(&ctx);
+        assert_eq!(d.size, window_size(3));
+        d.accept(Some(Snapshot {
+            display_mode: DisplayMode::IconOnly,
+            devices: every_state(),
+        }));
+        d.fit_window(&ctx);
+        assert_eq!(d.size, window_size(6));
+    }
+
+    #[test]
+    fn a_track_is_tinted_toward_its_fill_not_black() {
+        let visuals = egui::Visuals::dark();
+        let fill = visuals.selection.bg_fill;
+        let track = track_color(&visuals, fill);
+        assert_ne!(track, visuals.extreme_bg_color);
+        assert!(
+            gui::contrast_ratio(track, fill) > 1.5,
+            "the fill must stand off its track"
+        );
+    }
+
+    #[test]
+    fn secondary_text_is_readable_on_the_panel_in_both_themes() {
         for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
             let text = secondary_text(&visuals);
             assert_eq!(text.a(), 255, "secondary text must be opaque");
-            let ratio = gui::contrast_ratio(text, card_background(&visuals));
+            let ratio = gui::contrast_ratio(text, visuals.panel_fill);
             assert!(
                 ratio >= 4.5,
                 "dark_mode={}: secondary text contrast {ratio:.2}:1 is below 4.5:1",
@@ -851,16 +992,133 @@ mod tests {
         let _pending = start_refresh(&mut d, Instant::now() - REFRESH_SPINNER_LIMIT);
         assert!(!d.refresh_in_flight(), "the limit ends it");
     }
+}
+
+#[cfg(test)]
+mod bus_tests {
+    use std::time::Duration;
+
+    use tokio::sync::watch;
+
+    use super::*;
+    use crate::app::refresh::RefreshSignal;
+    use crate::app::supervisor::TrayState;
+    use crate::bus_test::isolated;
+    use crate::config::Config;
+    use crate::domain::{
+        BatteryReading, ChargeState, DeviceInfo, DeviceState, Estimate, Transport,
+    };
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn closer(pending: &Arc<AtomicBool>) -> Closer {
+        Closer {
+            window: Arc::default(),
+            pending: pending.clone(),
+        }
+    }
+
+    /// Called from the test thread, which no runtime has entered — as `run` calls it.
+    #[test]
+    fn start_serves_close_from_a_plain_thread() {
+        if !isolated(module_path!(), "start_serves_close_from_a_plain_thread") {
+            return;
+        }
+        let rt = runtime().expect("runtime");
+        let pending = Arc::new(AtomicBool::new(false));
+        let started = start(&rt, closer(&pending));
+        assert!(
+            matches!(
+                started,
+                Startup::Started {
+                    bus: Some(_),
+                    live: Some(_)
+                }
+            ),
+            "the first launch owns the name and subscribes"
+        );
+
+        let second = start(&rt, closer(&Arc::default()));
+        assert!(matches!(second, Startup::SecondClick));
+        rt.block_on(close_running());
+        assert!(
+            pending.load(Ordering::SeqCst),
+            "Close reached the first window"
+        );
+
+        let _entered = rt.enter();
+        drop(started);
+    }
+
+    fn tray_state(percent: u8) -> TrayState {
+        TrayState {
+            devices: vec![DeviceState {
+                info: DeviceInfo {
+                    name: "mouse".to_owned(),
+                    kind: DeviceKind::Mouse,
+                    transport: Transport::Sysfs,
+                    locator: None,
+                },
+                last_reading: Some(BatteryReading::new(percent, ChargeState::Discharging)),
+                last_seen: Some(Instant::now()),
+                presence: Presence::Online,
+                estimate: Estimate::Unknown,
+            }],
+        }
+    }
+
+    fn percent(update: Option<Snapshot>) -> Option<u8> {
+        update.expect("a snapshot").devices[0].percent
+    }
 
     #[test]
-    fn icon_is_the_tray_picture_at_full_size() {
-        let image = icon_image(
-            &card("m", Presence::Online, Some(80)),
-            DisplayMode::IconOnly,
-            true,
-        )
-        .expect("renders");
-        assert_eq!(image.size, [ICON_PIXELS as usize; 2]);
-        assert!(image.pixels.iter().any(|p| p.a() > 0), "not blank");
+    fn follow_tracks_the_tray_leaving_and_coming_back() {
+        if !isolated(
+            module_path!(),
+            "follow_tracks_the_tray_leaving_and_coming_back",
+        ) {
+            return;
+        }
+        let rt = runtime().expect("runtime");
+        let (state_tx, state_rx) = watch::channel(tray_state(80));
+        let (_config_tx, config_rx) = watch::channel(Config::default());
+        let tray_bus = rt
+            .block_on(
+                zbus::connection::Builder::session()
+                    .expect("bus")
+                    .name(TRAY_NAME)
+                    .expect("name")
+                    .build(),
+            )
+            .expect("claiming the tray name");
+        rt.spawn(crate::tray::state_service::serve(
+            tray_bus.clone(),
+            state_rx,
+            config_rx,
+            RefreshSignal::new(),
+        ));
+
+        let dashboard_bus = rt.block_on(zbus::Connection::session()).expect("bus");
+        let (tray, changes, owners) = rt.block_on(subscribe(&dashboard_bus)).expect("subscribe");
+        let (tx, updates) = mpsc::channel();
+        rt.spawn(follow(tray, changes, owners, tx, egui::Context::default()));
+
+        state_tx.send_replace(tray_state(79));
+        assert_eq!(
+            percent(updates.recv_timeout(TIMEOUT).expect("update")),
+            Some(79)
+        );
+
+        let dbus = rt.block_on(DBusProxy::new(&tray_bus)).expect("DBus proxy");
+        rt.block_on(dbus.release_name(TRAY_NAME.try_into().expect("name")))
+            .expect("release");
+        assert_eq!(updates.recv_timeout(TIMEOUT).expect("update"), None);
+
+        rt.block_on(dbus.request_name(TRAY_NAME.try_into().expect("name"), Default::default()))
+            .expect("request");
+        assert_eq!(
+            percent(updates.recv_timeout(TIMEOUT).expect("update")),
+            Some(79)
+        );
     }
 }

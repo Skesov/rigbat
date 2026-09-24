@@ -73,6 +73,7 @@ pub struct SteelSeriesBackend;
 pub struct SteelSeriesSource {
     info: DeviceInfo,
     dev_path: PathBuf, // /dev/hidrawN
+    identity: hidraw::NodeIdentity,
     /// Open `/dev/hidrawN`, kept for the source's lifetime. `None` before the first
     /// successful poll and after an I/O error invalidated it (the node is recreated
     /// with a new minor when the device re-enumerates, so a stale fd must be dropped).
@@ -119,25 +120,30 @@ fn discover_inner() -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
             }
         };
 
-        // try_node returns Err for non-matching nodes — this is normal, silently skip.
-        let _ = try_node(&entry.file_name().to_string_lossy(), &mut sources);
+        // match_node returns Err for non-matching nodes — this is normal, silently skip.
+        if let Ok(node) = match_node(&entry.file_name().to_string_lossy()) {
+            sources.push(Box::new(SteelSeriesSource {
+                info: node.info,
+                dev_path: node.dev_path,
+                identity: node.identity,
+                handle: None,
+            }));
+        }
     }
 
     Ok(sources)
 }
 
-/// Attempts to add a hidrawN node to the list of sources.
-/// Returns Err if the node does not match or an error occurs — the caller skips it.
-fn try_node(node_name: &str, sources: &mut Vec<Box<dyn BatterySource>>) -> anyhow::Result<()> {
+/// The device behind `/sys/class/hidraw/<node_name>`, if it is a supported
+/// model's battery interface. Err if the node does not match or cannot be read.
+pub fn match_node(node_name: &str) -> anyhow::Result<hidraw::HidrawDevice> {
     let uevent_path = format!("/sys/class/hidraw/{node_name}/device/uevent");
     let uevent =
         std::fs::read_to_string(&uevent_path).with_context(|| format!("reading {uevent_path}"))?;
 
-    let hid_id_value = hidraw::uevent_value(&uevent, "HID_ID")
-        .with_context(|| format!("HID_ID not found in {uevent_path}"))?;
-
-    let (vendor, product) = hidraw::parse_hid_id(hid_id_value)
-        .with_context(|| format!("parsing HID_ID={hid_id_value}"))?;
+    let identity = hidraw::NodeIdentity::from_uevent(&uevent, node_name)
+        .with_context(|| format!("no parsable HID_ID in {uevent_path}"))?;
+    let (vendor, product) = (identity.vendor, identity.product);
 
     if vendor != VENDOR_ID {
         anyhow::bail!("vendor 0x{vendor:04X} != 0x{VENDOR_ID:04X}");
@@ -160,20 +166,16 @@ fn try_node(node_name: &str, sources: &mut Vec<Box<dyn BatterySource>>) -> anyho
         anyhow::bail!("interface {iface} != {BATTERY_INTERFACE} (battery interface)");
     }
 
-    let dev_path = PathBuf::from(format!("/dev/{node_name}"));
-
-    sources.push(Box::new(SteelSeriesSource {
+    Ok(hidraw::HidrawDevice {
         info: DeviceInfo {
             name: device_desc.name.to_owned(),
             kind: device_desc.kind,
             transport: Transport::Hidraw,
-            locator: Some(hidraw::stable_locator(&uevent, node_name)),
+            locator: Some(identity.locator.clone()),
         },
-        dev_path,
-        handle: None,
-    }));
-
-    Ok(())
+        dev_path: PathBuf::from(format!("/dev/{node_name}")),
+        identity,
+    })
 }
 
 // ── Source ───────────────────────────────────────────────────────────────────
@@ -186,6 +188,7 @@ impl BatterySource for SteelSeriesSource {
 
     async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
         let path = self.dev_path.clone();
+        let identity = self.identity.clone();
         let handle = self.handle.take();
 
         // Blocking I/O: nix::poll() parks the thread. Move the handle in and back out
@@ -198,7 +201,7 @@ impl BatterySource for SteelSeriesSource {
         // before the descriptor is dropped.
         let (result, handle) = tokio::task::spawn_blocking(move || {
             let mut handle = handle;
-            let result = poll_device(&path, &mut handle);
+            let result = poll_device(&path, &identity, &mut handle);
             (result, handle)
         })
         .await
@@ -213,8 +216,12 @@ impl BatterySource for SteelSeriesSource {
 }
 
 /// Synchronous polling of the device via /dev/hidrawN, reusing `handle` when present.
-fn poll_device(dev_path: &Path, handle: &mut Option<File>) -> anyhow::Result<BatteryReading> {
-    let result = poll_device_inner(dev_path, handle);
+fn poll_device(
+    dev_path: &Path,
+    identity: &hidraw::NodeIdentity,
+    handle: &mut Option<File>,
+) -> anyhow::Result<BatteryReading> {
+    let result = poll_device_inner(dev_path, identity, handle);
     // hidraw minor numbers are not stable across re-enumeration, so a cached fd for a
     // device that came back is pointing at a dead character device — clear it and let
     // the next poll reopen by node name instead of retrying a stale descriptor forever.
@@ -222,16 +229,23 @@ fn poll_device(dev_path: &Path, handle: &mut Option<File>) -> anyhow::Result<Bat
     result
 }
 
-fn poll_device_inner(dev_path: &Path, handle: &mut Option<File>) -> anyhow::Result<BatteryReading> {
+fn poll_device_inner(
+    dev_path: &Path,
+    identity: &hidraw::NodeIdentity,
+    handle: &mut Option<File>,
+) -> anyhow::Result<BatteryReading> {
     use std::os::fd::AsFd as _;
 
     if handle.is_none() {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(dev_path)
-            .with_context(|| format!("opening {}", dev_path.display()))?;
+        let file = hidraw::open_verified(
+            Path::new(hidraw::SYSFS_HIDRAW),
+            dev_path,
+            identity,
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK),
+        )?;
         *handle = Some(file);
     }
 
@@ -305,7 +319,8 @@ fn clear_handle_on_error<T, U>(handle: &mut Option<T>, result: &anyhow::Result<U
 pub fn parse_usb_interface(real_path: &str) -> Option<u8> {
     real_path.split('/').rev().find_map(|seg| {
         // Segment like "7-1.1:1.3" — look for the part after the last ':'
-        let after_colon = seg.rsplit(':').next()?;
+        // A segment with no ':' is not an interface, even if it reads "1.N".
+        let (_, after_colon) = seg.rsplit_once(':')?;
         // after_colon should be "1.N"
         let n_str = after_colon.strip_prefix("1.")?;
         n_str.parse::<u8>().ok()
@@ -387,6 +402,11 @@ mod tests {
                 locator: Some("hidraw0".to_owned()),
             },
             dev_path: PathBuf::from("/dev/hidraw0"),
+            identity: hidraw::NodeIdentity {
+                vendor: VENDOR_ID,
+                product: 0x1852,
+                locator: "hidraw0".to_owned(),
+            },
             handle: None,
         };
         assert!(source.handle.is_none());
@@ -433,6 +453,11 @@ mod tests {
     #[test]
     fn parse_usb_interface_no_segment_returns_none() {
         assert_eq!(parse_usb_interface("/sys/devices/platform/hidraw2"), None);
+    }
+
+    #[test]
+    fn parse_usb_interface_ignores_a_bare_segment_without_the_colon() {
+        assert_eq!(parse_usb_interface("/sys/devices/1.0/hidraw/hidraw2"), None);
     }
 
     // parse_battery_response
@@ -527,5 +552,80 @@ mod tests {
         let buf = [0xD2, 0xFF, 0x00];
         let r = parse_battery_response(&buf).unwrap();
         assert_eq!(r.percent, 100);
+    }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn parse_battery_response_accepts_only_the_echo_and_stays_in_range(
+                buf in prop::collection::vec(any::<u8>(), 0..70),
+            ) {
+                let parsed = parse_battery_response(&buf);
+                prop_assert_eq!(parsed.is_some(), buf.len() >= 2 && buf[0] == BATTERY_QUERY);
+                if let Some(r) = parsed {
+                    prop_assert!(r.percent <= 100);
+                    let charging = buf[1] & 0x80 != 0;
+                    prop_assert_eq!(r.state == ChargeState::Charging, charging);
+                }
+            }
+
+            #[test]
+            fn parse_battery_response_round_trips_every_step(
+                step in 1u8..=21,
+                charging in any::<bool>(),
+                tail in prop::collection::vec(any::<u8>(), 0..62),
+            ) {
+                let mut buf = vec![BATTERY_QUERY, step | if charging { 0x80 } else { 0 }];
+                buf.extend(tail);
+                let state = if charging { ChargeState::Charging } else { ChargeState::Discharging };
+                prop_assert_eq!(
+                    parse_battery_response(&buf),
+                    Some(BatteryReading::new((step - 1) * 5, state))
+                );
+            }
+
+            #[test]
+            fn classify_response_agrees_with_the_parser(
+                buf in prop::collection::vec(any::<u8>(), 0..70),
+            ) {
+                let expected = if buf.starts_with(&[WIRELESS_FLAG, LEVEL_UNAVAILABLE]) {
+                    Response::DeviceUnreachable
+                } else {
+                    parse_battery_response(&buf).map_or(Response::Unrelated, Response::Reading)
+                };
+                prop_assert_eq!(classify_response(&buf), expected);
+            }
+
+            #[test]
+            fn parse_usb_interface_never_panics(path in any::<String>()) {
+                let _ = parse_usb_interface(&path);
+            }
+
+            #[test]
+            fn parse_usb_interface_needs_a_config_colon(path in "(/[0-9.-]{1,5}){0,6}") {
+                prop_assert_eq!(parse_usb_interface(&path), None);
+            }
+
+            #[test]
+            fn parse_usb_interface_round_trips_a_sysfs_path(
+                bus in 1u8..=16,
+                port in "[1-9](\\.[1-9]){0,3}",
+                iface in any::<u8>(),
+                vendor in any::<u16>(),
+                product in any::<u16>(),
+                seq in any::<u16>(),
+                node in any::<u16>(),
+            ) {
+                let path = format!(
+                    "/sys/devices/pci0000:00/0000:00:14.0/usb{bus}/{bus}-{port}/\
+                     {bus}-{port}:1.{iface}/0003:{vendor:04X}:{product:04X}.{seq:04X}/\
+                     hidraw/hidraw{node}"
+                );
+                prop_assert_eq!(parse_usb_interface(&path), Some(iface));
+            }
+        }
     }
 }

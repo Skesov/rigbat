@@ -3,15 +3,13 @@ pub mod supervisor;
 
 use tokio::task::JoinSet;
 
-use crate::domain::{BatteryReading, DeviceInfo};
-use crate::sources::BatterySource;
+use crate::domain::{DeviceInfo, PollOutcome};
+use crate::sources::{AccessDenied, BatterySource};
 
-/// Polls all sources in parallel. Error from a source becomes None (offline).
-/// Result is sorted by device name for stable output.
-pub async fn poll_once(
-    sources: Vec<Box<dyn BatterySource>>,
-) -> Vec<(DeviceInfo, Option<BatteryReading>)> {
-    let mut set: JoinSet<(DeviceInfo, Option<BatteryReading>)> = JoinSet::new();
+/// Polls all sources in parallel. An error from a source becomes `Failed`, or
+/// `NoAccess` when it was a permission denial. Sorted by device name.
+pub async fn poll_once(sources: Vec<Box<dyn BatterySource>>) -> Vec<(DeviceInfo, PollOutcome)> {
+    let mut set: JoinSet<(DeviceInfo, PollOutcome)> = JoinSet::new();
     // A panicking source loses the reading it was producing; without this map
     // it would also lose the device, which would then be missing from the
     // table entirely instead of reading `offline` like every other failure.
@@ -21,17 +19,21 @@ pub async fn poll_once(
     for mut s in sources {
         let info = s.device().clone();
         let handle = set.spawn(async move {
-            let reading = match s.poll().await {
-                Ok(r) => Some(r),
+            let outcome = match s.poll().await {
+                Ok(r) => PollOutcome::Reading(r),
                 Err(e) => {
                     // `{e:#}` prints the whole anyhow context chain. Without this the
                     // reason a device reads as offline — no permission, a STALLed
                     // write, a D-Bus error, a timeout — is indistinguishable to a user.
                     tracing::warn!(device = %s.device().name, "poll failed: {e:#}");
-                    None
+                    if e.is::<AccessDenied>() {
+                        PollOutcome::NoAccess
+                    } else {
+                        PollOutcome::Failed
+                    }
                 }
             };
-            (s.device().clone(), reading)
+            (s.device().clone(), outcome)
         });
         spawned.insert(handle.id(), info);
     }
@@ -43,7 +45,7 @@ pub async fn poll_once(
             Err(e) => match spawned.get(&e.id()) {
                 Some(info) => {
                     tracing::error!(device = %info.name, "polling task ended unexpectedly: {e}");
-                    rows.push((info.clone(), None));
+                    rows.push((info.clone(), PollOutcome::Failed));
                 }
                 None => tracing::error!("a polling task ended unexpectedly: {e}"),
             },
@@ -125,7 +127,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn err_source_maps_to_none() {
+    async fn err_source_maps_to_failed() {
         let sources: Vec<Box<dyn BatterySource>> = vec![Box::new(ErrSource {
             info: device("mouse"),
         })];
@@ -134,7 +136,35 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0.name, "mouse");
-        assert!(rows[0].1.is_none());
+        assert_eq!(rows[0].1, PollOutcome::Failed);
+    }
+
+    struct DeniedSource {
+        info: DeviceInfo,
+    }
+
+    #[async_trait::async_trait]
+    impl BatterySource for DeniedSource {
+        fn device(&self) -> &DeviceInfo {
+            &self.info
+        }
+
+        async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
+            Err(anyhow::Error::new(AccessDenied {
+                path: "/dev/hidraw7".into(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn access_denied_maps_to_no_access() {
+        let sources: Vec<Box<dyn BatterySource>> = vec![Box::new(DeniedSource {
+            info: device("mouse"),
+        })];
+
+        let rows = poll_once(sources).await;
+
+        assert_eq!(rows[0].1, PollOutcome::NoAccess);
     }
 
     /// A panicking source used to vanish from the output: `join_next` yields
@@ -157,7 +187,11 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].0.name, "keyboard");
         assert_eq!(rows[1].0.name, "mouse");
-        assert!(rows[1].1.is_none(), "a panicking source reads as offline");
+        assert_eq!(
+            rows[1].1,
+            PollOutcome::Failed,
+            "a panicking source reads as offline"
+        );
     }
 
     #[tokio::test]

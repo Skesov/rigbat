@@ -8,11 +8,13 @@ Working: `rigbat list` / `--json` / `--wide` / `--waybar` / `tray` / `settings`.
 bluez, steelseries, eightbitdo (via `discovery::discover_all`, re-discovered live so hotplugged
 devices appear; BlueZ signals debounced, and a backend whose sweep _fails_ does not retire its
 devices — an empty result and an error are different things). Devices retain their last reading
-across drops (`Presence`: Online/Unreachable/Disconnected) and render dimmed while unreachable,
+across drops (`Presence`: Online/Unreachable/Disconnected/NoAccess) and render dimmed while unreachable,
 except a low reading, which never dims. A device that is not online loses its tray icon once its
 reading passes `RETAINED_ICON_MAX_AGE` (24 h) or if it never produced one — an enumerated dongle
 whose mouse is switched off is not a battery level. It keeps being polled and returns on its next
-answer. Tray: left click opens the dashboard (a card per device), right click the menu listing
+answer. A device whose node the user may not open (`sources::AccessDenied`, typically a missing
+udev rule) reads `NoAccess` ("no access", pointing at `rigbat doctor`) instead of offline: it
+keeps its tray entry, never notifies, and is never featured over an online device. Tray: left click opens the dashboard (a row per device), right click the menu listing
 device status; device-type glyph, light/dark theme, display modes, time-remaining estimate, low-battery notifications
 (confirmed by two distinct readings), separate settings window with a device inventory table,
 per-device poll intervals/thresholds and aggregate-icon pin, config persistence. UI in English and
@@ -44,13 +46,17 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
   `org.rigbat.Tray` on the session bus before publishing anything (`ipc::single_instance`); a
   second instance sees the name taken and exits 0 instead of doubling every tray icon. On the
   same connection it serves `org.rigbat.Tray1` (state snapshot, `Refresh`, `StateChanged`).
-- `rigbat dashboard` — eframe window the tray's left click spawns: a card per shown device, read
+- `rigbat dashboard` — eframe window the tray's left click spawns: a row per shown device, read
   from `org.rigbat.Tray1`, never polled. Holds `org.rigbat.Dashboard`; a second launch closes the
   open one (the toggle) and exits.
+- `rigbat doctor` — one-shot setup check (`doctor::run`): session bus, tray host, running tray,
+  systemd unit + autostart both enabled, BlueZ, portal, read-write access to each supported
+  hidraw node (via `discovery::registry::hidraw_matchers`), config and state DB. Prints
+  `ok`/`warn`/`fail` with a fix per problem; exits 1 on any `fail`, warnings do not fail.
 - `rigbat settings` — GTK-free eframe/egui settings window in a SEPARATE process (the tray spawns
   it). It edits `config.json`; the tray applies changes via the file watch. It holds a tokio
   runtime only to run device discovery off the UI thread — the winit event loop is never entered
-  from inside it, and eframe is built without accesskit for that reason.
+  from inside it. Both windows export an AT-SPI tree via eframe's `accesskit` feature.
 
 ## Toolchain and commands
 
@@ -99,7 +105,8 @@ src/
 ├── notifications/ # low-battery desktop notifications (zbus)
 ├── session/       # logind PrepareForSleep → resume re-poll
 ├── settings/      # eframe/egui settings window (separate process) + device table state
-├── autostart/     # ~/.config/autostart/rigbat.desktop
+├── autostart/     # ~/.config/autostart/rigbat.desktop + systemd user unit state
+├── doctor/        # `rigbat doctor`: setup checks with a fix per problem
 ├── i18n/          # Lang, per-language Fluent loaders, locale detection (catalogues in /i18n)
 ├── app/           # poll_once + Supervisor (owns discovery) + refresh signal + wiring
 ├── state/         # SQLite device inventory + reading history (XDG_STATE_HOME)
@@ -129,10 +136,16 @@ imports another adapter — text or policy that `cli`, `tray` and `settings` all
 
 - Gates (must pass before commit): `cargo fmt`, `cargo build`, `cargo test`,
   `cargo clippy --all-targets -- -D warnings`.
-- Settings-window rendering has its own coverage: `settings::tests::painted_text` runs a frame in
-  a headless `egui::Context` and returns the strings that survived their clip rectangle, so a
-  widget drawn into a few pixels fails the test instead of shipping. Assert against what is
-  painted, never only that the code ran.
+- Window rendering has its own coverage: `egui_test` runs frames in a headless `egui::Context`
+  and returns what was painted, whole or cut, and how many lines it wrapped to, so a widget drawn
+  into a few pixels or a label that wraps fails the test instead of shipping. Assert against what
+  is painted, never only that the code ran.
+- D-Bus loops are tested on a private bus (`bus_test`: its own `dbus-daemon`, the test re-run in a
+  child process pointed at it). zbus spawns tasks with `tokio::spawn` when an object server starts
+  and when a proxy or signal stream is dropped, so both must happen inside the runtime — a window
+  process's bus setup is tested from a plain `#[test]` for exactly that reason.
+- hidraw nodes are opened through `sources::hidraw::open_verified`: the node's uevent identity is
+  re-checked after every open, because a replugged device can take over a recycled `hidrawN`.
 - Adding infrastructure (a new D-Bus/HID/GUI dependency): put it behind a port (a trait) plus
   an implementation; never import it into `domain` — dependency direction stays inward.
 - Where to change what: new device → `CONTRIBUTING.md`; CLI flag → `main.rs` dispatch + `cli/`;

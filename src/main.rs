@@ -1,10 +1,13 @@
 mod app;
 mod appearance;
 mod autostart;
+#[cfg(test)]
+mod bus_test;
 mod cli;
 mod config;
 mod dashboard;
 mod discovery;
+mod doctor;
 mod domain;
 #[cfg(test)]
 mod egui_test;
@@ -32,6 +35,7 @@ Usage:
   rigbat tray              Run the system tray daemon
   rigbat settings          Open the settings window
   rigbat dashboard         Open the device overview (the tray icon's left click)
+  rigbat doctor            Check the setup and print how to fix each problem
 
 Options:
   --wide        Add transport and locator columns to the table
@@ -49,6 +53,7 @@ enum Invocation {
     Tray,
     Settings,
     Dashboard,
+    Doctor,
     Help,
     Version,
     /// Unrecognised argument; carries the offending token for the error message.
@@ -108,6 +113,7 @@ fn parse_args(args: &[String]) -> Invocation {
         "tray" => Invocation::Tray,
         "settings" => Invocation::Settings,
         "dashboard" => Invocation::Dashboard,
+        "doctor" => Invocation::Doctor,
         other => Invocation::Unknown(other.to_string()),
     }
 }
@@ -173,6 +179,9 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if invocation == Invocation::Doctor {
+        std::process::exit(rt.block_on(doctor::run()));
+    }
     rt.block_on(async_main(invocation));
 }
 
@@ -225,6 +234,7 @@ impl From<&Invocation> for LogProfile {
             | Invocation::Waybar => LogProfile::Daemon,
             Invocation::List { .. }
             | Invocation::Json
+            | Invocation::Doctor
             | Invocation::Help
             | Invocation::Version
             | Invocation::Unknown(_)
@@ -631,6 +641,16 @@ mod tests {
     fn mode_settings() {
         assert_eq!(parse_args(&s(&["settings"])), Invocation::Settings);
         assert_eq!(parse_args(&s(&["dashboard"])), Invocation::Dashboard);
+        assert_eq!(parse_args(&s(&["doctor"])), Invocation::Doctor);
+    }
+
+    #[test]
+    fn doctor_is_one_shot_and_rejects_mode_flags() {
+        assert_eq!(LogProfile::from(&Invocation::Doctor), LogProfile::OneShot);
+        assert_eq!(
+            parse_args(&s(&["doctor", "--json"])),
+            Invocation::UsageError("--json cannot be combined with `doctor`".to_string())
+        );
     }
 
     #[test]
@@ -720,6 +740,7 @@ mod tests {
             "tray",
             "settings",
             "dashboard",
+            "doctor",
             "--json",
             "--waybar",
             "--wide",

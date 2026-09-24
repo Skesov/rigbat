@@ -3,29 +3,44 @@ use std::time::Instant;
 use serde_json::{Value, json};
 
 use crate::config::Config;
-use crate::domain::{BatteryReading, DeviceInfo, DeviceState, Presence, PrimaryStatus, classify};
+use crate::domain::{DeviceInfo, DeviceState, PollOutcome, Presence, PrimaryStatus, classify};
 use crate::domain::{format_device_entry, select_featured, state_str};
 use crate::i18n::Lang;
 
-type Row = (DeviceInfo, Option<BatteryReading>);
+type Row = (DeviceInfo, PollOutcome);
+
+/// STATE column word; never translated, like `state_str`.
+fn state_word(outcome: PollOutcome) -> &'static str {
+    match outcome {
+        PollOutcome::Reading(r) => state_str(r.state),
+        PollOutcome::Failed => "offline",
+        PollOutcome::NoAccess => "no access",
+    }
+}
 
 pub fn to_json(rows: &[Row]) -> Value {
     let items: Vec<Value> = rows
         .iter()
-        .map(|(info, reading)| {
+        .map(|(info, outcome)| {
+            let reading = outcome.reading();
             let (percent, state) = match reading {
                 Some(r) => (json!(r.percent), json!(state_str(r.state))),
                 None => (Value::Null, Value::Null),
             };
-            json!({
+            let mut item = json!({
                 "name": info.name,
                 "kind": info.kind.as_str(),
                 "transport": info.transport.as_str(),
                 "locator": info.locator,
                 "online": reading.is_some(),
+                "presence": outcome.presence(),
                 "percent": percent,
                 "state": state,
-            })
+            });
+            if reading.is_some_and(|r| r.coarse) {
+                item["coarse"] = json!(true);
+            }
+            item
         })
         .collect();
 
@@ -153,10 +168,10 @@ pub fn print_table(rows: &[Row]) {
         .max()
         .unwrap_or(0);
 
-    for (info, reading) in rows {
-        let status = match reading {
-            None => "offline".to_owned(),
-            Some(r) => format!("{}%  {}", r.percent, state_str(r.state)),
+    for (info, outcome) in rows {
+        let status = match outcome {
+            PollOutcome::Reading(r) => format!("{}%  {}", r.percent, state_str(r.state)),
+            PollOutcome::Failed | PollOutcome::NoAccess => state_word(*outcome).to_owned(),
         };
         println!("{:<width$}  {}", info.name, status, width = name_width);
     }
@@ -200,10 +215,7 @@ pub fn print_table_wide(rows: &[Row]) {
     let percent_w = "PERCENT".chars().count();
     let state_w = rows
         .iter()
-        .map(|(_, reading)| match reading {
-            None => "offline".chars().count(),
-            Some(r) => state_str(r.state).chars().count(),
-        })
+        .map(|(_, outcome)| state_word(*outcome).chars().count())
         .max()
         .unwrap_or(0)
         .max("STATE".chars().count());
@@ -224,11 +236,11 @@ pub fn print_table_wide(rows: &[Row]) {
         sw = state_w,
     );
 
-    for (info, reading) in rows {
-        let (percent_col, state_col) = match reading {
-            None => ("-".to_owned(), "offline".to_owned()),
-            Some(r) => (format!("{}%", r.percent), state_str(r.state).to_owned()),
-        };
+    for (info, outcome) in rows {
+        let percent_col = outcome
+            .reading()
+            .map_or_else(|| "-".to_owned(), |r| format!("{}%", r.percent));
+        let state_col = state_word(*outcome);
         let locator_col = info.locator.as_deref().unwrap_or("-");
         println!(
             "{:<nw$}  {:<kw$}  {:<tw$}  {:<lw$}  {:<pw$}  {:<sw$}",
@@ -274,7 +286,7 @@ mod tests {
     #[test]
     fn to_json_online_device() {
         let reading = BatteryReading::new(75, ChargeState::Charging);
-        let rows: Vec<Row> = vec![(device("mouse"), Some(reading))];
+        let rows: Vec<Row> = vec![(device("mouse"), PollOutcome::Reading(reading))];
 
         let value = to_json(&rows);
         let arr = value.as_array().expect("array");
@@ -290,8 +302,24 @@ mod tests {
     }
 
     #[test]
+    fn to_json_flags_only_a_coarse_reading() {
+        let coarse = BatteryReading::new_coarse(60, ChargeState::Discharging);
+        let exact = BatteryReading::new(60, ChargeState::Discharging);
+        let rows: Vec<Row> = vec![
+            (device("pad"), PollOutcome::Reading(coarse)),
+            (device("mouse"), PollOutcome::Reading(exact)),
+        ];
+
+        let value = to_json(&rows);
+        let arr = value.as_array().expect("array");
+        assert_eq!(arr[0]["coarse"], true);
+        assert_eq!(arr[0]["percent"], 60);
+        assert!(arr[1].get("coarse").is_none());
+    }
+
+    #[test]
     fn to_json_offline_device() {
-        let rows: Vec<Row> = vec![(device("headset"), None)];
+        let rows: Vec<Row> = vec![(device("headset"), PollOutcome::Failed)];
 
         let value = to_json(&rows);
         let arr = value.as_array().expect("array");
@@ -306,7 +334,10 @@ mod tests {
     #[test]
     fn to_json_mixed() {
         let reading = BatteryReading::new(50, ChargeState::Discharging);
-        let rows: Vec<Row> = vec![(device("keyboard"), Some(reading)), (device("mouse"), None)];
+        let rows: Vec<Row> = vec![
+            (device("keyboard"), PollOutcome::Reading(reading)),
+            (device("mouse"), PollOutcome::Failed),
+        ];
 
         let value = to_json(&rows);
         let arr = value.as_array().expect("array");
@@ -321,11 +352,37 @@ mod tests {
     }
 
     #[test]
+    fn to_json_no_access_device_keeps_existing_keys_and_adds_presence() {
+        let reading = BatteryReading::new(50, ChargeState::Discharging);
+        let rows: Vec<Row> = vec![
+            (device("keyboard"), PollOutcome::Reading(reading)),
+            (device("headset"), PollOutcome::Failed),
+            (device("mouse"), PollOutcome::NoAccess),
+        ];
+
+        let value = to_json(&rows);
+        let arr = value.as_array().expect("array");
+
+        assert_eq!(arr[0]["presence"], "online");
+        assert_eq!(arr[1]["presence"], "unreachable");
+        assert_eq!(arr[2]["presence"], "no_access");
+        assert_eq!(arr[2]["online"], false);
+        assert!(arr[2]["percent"].is_null());
+        assert!(arr[2]["state"].is_null());
+    }
+
+    #[test]
+    fn table_state_word_tells_no_access_from_offline() {
+        assert_eq!(state_word(PollOutcome::Failed), "offline");
+        assert_eq!(state_word(PollOutcome::NoAccess), "no access");
+    }
+
+    #[test]
     fn to_json_includes_transport_and_locator() {
         let reading = BatteryReading::new(80, ChargeState::Discharging);
         let rows: Vec<Row> = vec![(
             device_with_locator("mouse", "AA:BB:CC:DD:EE:FF"),
-            Some(reading),
+            PollOutcome::Reading(reading),
         )];
 
         let value = to_json(&rows);
@@ -355,9 +412,10 @@ mod tests {
         let rows: Vec<Row> = vec![
             (
                 device_with_locator("MX Master 3", "AA:BB:CC:DD:EE:FF"),
-                Some(reading),
+                PollOutcome::Reading(reading),
             ),
-            (device("keyboard"), None),
+            (device("keyboard"), PollOutcome::Failed),
+            (device("mouse"), PollOutcome::NoAccess),
         ];
         // print_table_wide writes to stdout; we just ensure no panic.
         print_table_wide(&rows);
@@ -513,6 +571,20 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "mouse: 80%  charging");
         assert_eq!(lines[1], "keyboard: offline");
+    }
+
+    #[test]
+    fn waybar_features_an_online_device_over_one_without_access() {
+        let reading = BatteryReading::new(60, ChargeState::Discharging);
+        let states = vec![
+            device_state("mouse", Presence::NoAccess, None, None),
+            device_state("keyboard", Presence::Online, Some(reading), None),
+        ];
+
+        let value = to_waybar(&states, &Config::default(), Instant::now());
+        assert_eq!(value["text"], "60%");
+        let tooltip = value["tooltip"].as_str().expect("tooltip is a string");
+        assert!(tooltip.contains("mouse: no access (run rigbat doctor)"));
     }
 
     #[test]

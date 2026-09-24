@@ -26,6 +26,7 @@ entry-online = { $name }: { $percent }%  { $state }
 entry-online-estimate = { $name }: { $percent }%  { $state }  осталось { $estimate }
 entry-offline = { $name }: не на связи
 entry-offline-retained = { $name }: { $percent }%  не на связи ({ $age })
+entry-no-access = { $name }: нет доступа (запустите rigbat doctor)
 
 kind-mouse = мышь
 kind-keyboard = клавиатура
@@ -98,6 +99,7 @@ col-actions = Действия
 presence-online = На связи
 presence-unreachable = Недоступно
 presence-disconnected = Отключено
+presence-no-access = Нет доступа
 
 button-delete = Удалить
 button-confirm = Да
@@ -114,6 +116,6 @@ detail-default-interval = По умолчанию ({ $secs } с)
 
 dashboard-title = rigbat — устройства
 dashboard-tray-not-running = Трей rigbat не запущен.
-dashboard-remaining = осталось { $estimate }
 dashboard-last-reading = последние данные { $age }
+dashboard-no-access-hint = запустите rigbat doctor
 dashboard-in-tray = в трее

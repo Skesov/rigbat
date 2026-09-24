@@ -13,7 +13,8 @@ for d in /sys/class/power_supply/*; do
 done
 ```
 
-If yours is listed with a `capacity`, the existing `sysfs` backend already handles it —
+If yours is listed with a `capacity` — or has only a `capacity_level` (a coarse band such as
+`Normal`) — and its `scope` reads `Device`, the existing `sysfs` backend already handles it —
 no new code needed.
 
 ## 2. Bluetooth? (BlueZ Battery1)
@@ -66,12 +67,14 @@ Options, easiest first:
 Copy `src/sources/steelseries.rs` as a template. It shows the full shape:
 
 - a `DEVICES` table keyed by USB product id,
-- `discover()` that walks `/sys/class/hidraw` and matches vendor/product/interface,
+- `discover()` that walks `/sys/class/hidraw` and matches vendor/product/interface through
+  `match_node`,
 - `poll()` that opens the node `O_NONBLOCK`, writes the query, waits with `nix::poll`
   (so it never hangs), and parses the response,
 - pure `parse_*` functions with unit tests.
 
-Then add a row to `backends()` in `src/discovery/registry.rs`.
+Then add a row to `backends()` in `src/discovery/registry.rs`, and the backend's `match_node`
+to `hidraw_matchers()` there so `rigbat doctor` checks the node's permissions.
 
 ## Permissions
 

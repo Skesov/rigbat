@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::discovery::Context;
 use crate::domain::{BatteryReading, DeviceInfo};
 
@@ -11,9 +13,24 @@ pub mod sysfs;
 pub trait BatterySource: Send {
     fn device(&self) -> &DeviceInfo;
     /// Polls the device. Err indicates the device is unresponsive or unavailable
-    /// (the caller treats this as offline).
+    /// (the caller treats this as offline), or, as `AccessDenied`, that this
+    /// user may not open it at all.
     async fn poll(&mut self) -> anyhow::Result<BatteryReading>;
 }
+
+/// Reported apart from a silent device: retrying cannot help until access is granted.
+#[derive(Debug)]
+pub struct AccessDenied {
+    pub path: PathBuf,
+}
+
+impl std::fmt::Display for AccessDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "permission denied opening {}", self.path.display())
+    }
+}
+
+impl std::error::Error for AccessDenied {}
 
 /// Transport layer: discovers devices and creates battery sources.
 ///
