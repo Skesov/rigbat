@@ -49,8 +49,8 @@ trait in an inner layer — with the concrete dependency living in the implement
 `cli`, `tray` and `settings` sit at the same level, so none may import another: a sideways edge
 is how one surface's incidental choice becomes another's contract. What they share moves inward
 instead. Two things did, and they are the shape to copy — `domain::text` (`state_str`,
-`format_age`, `format_device_entry`), because a device reads the same in the tray menu, the CLI
-table and the Devices tab, and `domain::primary::select_featured`, because "which device does the
+`format_age`, `format_device_entry`, `device_line`), because a device reads the same in the tray
+menu, the dashboard, the CLI table and the Devices tab, and `domain::primary::select_featured`, because "which device does the
 single view show" is policy, answered identically by the aggregate icon, `--waybar` and the
 settings window's description of it. Both are pure, so both are tested without a bus or a
 display.
@@ -150,8 +150,8 @@ flows out through channels.
 - **Estimate**: on every reading the manager derives a time-remaining estimate
   (`domain::estimate`) from the device's percent-change history, refusing rather than guessing
   when the evidence is thin (coarse-bucket readings, a short window, an uneven step rate — see
-  the module doc for why). The tray menu renders it via `format_coarse` as e.g. "left" appended
-  to the device line.
+  the module doc for why). The tray menu and the dashboard render it via `format_coarse` (e.g. "~3h")
+  after the device's charge.
 
 ## Data flow per surface
 
@@ -239,6 +239,8 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
   control, plus a `Clear` button — the one action that needs no row, and therefore the way out of
   a pin naming a device the inventory has no row for (retired before the inventory existed, or
   deleted since). Forgetting a device clears its pin along with its inventory row.
+  In single-icon mode the tray menu sets it too: an `Automatic` checkmark clears it and a checkmark
+  per shown device pins that device.
 - Visibility is recorded as **who to hide** (`hidden_devices`), not who to show. A whitelist has
   to be rebuilt from the devices visible at that moment, so editing it from a partial view
   silently drops every device the view did not contain — which is exactly what made checkboxes

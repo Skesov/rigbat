@@ -3,6 +3,7 @@
 ## Tray menu and tooltip
 
 tray-no-devices = Нет устройств
+tray-automatic = Автоматически
 tray-refresh = Обновить
 tray-dashboard = Обзор устройств…
 tray-settings = Настройки…
@@ -27,6 +28,10 @@ entry-online-estimate = { $name }: { $percent }%  { $state }  осталось {
 entry-offline = { $name }: не на связи
 entry-offline-retained = { $name }: { $percent }%  не на связи ({ $age })
 entry-no-access = { $name }: нет доступа (запустите rigbat doctor)
+
+note-last-reading = последние данные { $age }
+note-no-access = запустите rigbat doctor
+note-remaining = осталось { $estimate }
 
 kind-mouse = мышь
 kind-keyboard = клавиатура
@@ -117,6 +122,4 @@ detail-default-interval = По умолчанию ({ $secs } с)
 
 dashboard-title = rigbat — устройства
 dashboard-tray-not-running = Трей rigbat не запущен.
-dashboard-last-reading = последние данные { $age }
-dashboard-no-access-hint = запустите rigbat doctor
 dashboard-in-tray = в трее

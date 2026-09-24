@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{MenuItem, ToolTip, Tray, TrayMethods};
 use tokio::sync::watch;
 
@@ -9,10 +10,10 @@ use crate::app::supervisor::TrayState;
 use crate::appearance::ColorScheme;
 use crate::config::{Config, TrayMode};
 use crate::domain::{
-    DeviceId, DeviceState, Presence, PrimaryStatus, device_status, format_device_entry,
+    DeviceId, DeviceState, Presence, PrimaryStatus, device_line, device_status,
     freedesktop_icon_name, select_featured,
 };
-use crate::i18n::{fl, loader};
+use crate::i18n::{Lang, fl, loader};
 use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
 
 // ---------------------------------------------------------------------------
@@ -194,14 +195,26 @@ fn resolve_for(
 // RigbatTray — unified SNI item for both aggregate and per-device icons
 // ---------------------------------------------------------------------------
 
+/// Writes `config.json`; a parameter so tests never touch the real file.
+pub type SaveConfig = fn(&Config) -> anyhow::Result<()>;
+
 pub struct RigbatTray {
     /// `Some(id)` = per-device icon; `None` = aggregate/primary icon.
     pub key: Option<DeviceId>,
     pub rx: watch::Receiver<TrayState>,
     pub theme_rx: watch::Receiver<ColorScheme>,
-    pub config: watch::Receiver<Config>,
+    pub config: watch::Sender<Config>,
+    pub save_config: SaveConfig,
     pub renderer: Box<dyn IconRenderer>,
     pub refresh: RefreshSignal,
+}
+
+/// A device row of the menu, read under one pair of borrows.
+struct MenuRow {
+    name: String,
+    label: String,
+    icon_name: String,
+    pinned: bool,
 }
 
 impl RigbatTray {
@@ -213,6 +226,51 @@ impl RigbatTray {
         resolve_for(self.key.as_ref(), &state, &cfg, Instant::now())
         // `state` and `cfg` (watch::Ref) are dropped here, before any await.
     }
+
+    /// Saves `primary_device` and publishes it on the config channel, whose
+    /// change makes the manager loop re-publish every icon: ksni does not
+    /// re-publish an icon after a menu event.
+    fn pin(&self, device: Option<String>) {
+        let mut cfg = self.config.borrow().clone();
+        if cfg.primary_device == device {
+            return;
+        }
+        cfg.primary_device = device;
+        match (self.save_config)(&cfg) {
+            Ok(()) => {
+                self.config.send_replace(cfg);
+            }
+            Err(e) => tracing::error!("failed to save the tray device choice: {e:#}"),
+        }
+    }
+
+    fn menu_rows(&self, now: Instant) -> (Vec<MenuRow>, TrayMode, bool, Lang) {
+        let state = self.rx.borrow();
+        let cfg = self.config.borrow();
+        let lang = cfg.lang();
+        let pinned = featured_id(&state, &cfg, now)
+            .filter(|id| cfg.primary_device.as_deref() == Some(id.name.as_str()));
+        let rows = state
+            .devices
+            .iter()
+            .filter(|d| tray_visible(d, &cfg, now))
+            .map(|d| {
+                let (status, _) = device_status(d, cfg.effective_low_threshold(&d.info.name));
+                MenuRow {
+                    name: d.info.name.clone(),
+                    label: mnemonic_escape(&device_line(d, status, now, lang)),
+                    icon_name: freedesktop_icon_name(d.info.kind).to_owned(),
+                    pinned: pinned.as_ref() == Some(&d.info.id()),
+                }
+            })
+            .collect();
+        (rows, cfg.tray_mode, cfg.primary_device.is_none(), lang)
+    }
+}
+
+/// DBusMenu labels swallow a single `_` as a mnemonic marker; `__` shows one.
+fn mnemonic_escape(label: &str) -> String {
+    label.replace('_', "__")
 }
 
 impl Tray for RigbatTray {
@@ -262,7 +320,7 @@ impl Tray for RigbatTray {
         let l = loader(lang);
         let title = self
             .resolve()
-            .map(|r| format_device_entry(&r.state, Instant::now(), lang))
+            .map(|r| device_line(&r.state, r.status, Instant::now(), lang))
             .unwrap_or_else(|| match &self.key {
                 Some(id) => fl!(l, "entry-offline", name = id.name.as_str()),
                 None => fl!(l, "tray-no-devices"),
@@ -274,98 +332,90 @@ impl Tray for RigbatTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        // Build the full-roster menu shared by both PrimaryOnly and PerDevice modes.
-        // Collect all data from borrows before building menu items (borrows are sync,
-        // no await here, but keeping scopes tight documents intent).
-        let now = Instant::now();
-
-        let (rows, lang) = {
-            let state = self.rx.borrow();
-            let cfg = self.config.borrow();
-            let lang = cfg.lang();
-
-            // The bullet and the rows come from one pair of borrows. Resolving
-            // the highlight separately re-borrowed the channels, so a state
-            // change landing between the two could bullet a device the rows
-            // below no longer described.
-            let highlight: Option<DeviceId> =
-                resolve_for(self.key.as_ref(), &state, &cfg, now).map(|r| r.state.info.id());
-
-            // Collect (label, icon_name) for each shown device.
-            let rows: Vec<(String, String)> = state
-                .devices
-                .iter()
-                .filter(|d| tray_visible(d, &cfg, now))
-                .map(|d| {
-                    let prefix = if highlight.as_ref() == Some(&d.info.id()) {
-                        "\u{25cf} " // "● "
-                    } else {
-                        "  "
-                    };
-                    let entry = format_device_entry(d, now, lang);
-                    let label = format!("{prefix}{entry}");
-                    let icon = freedesktop_icon_name(d.info.kind).to_owned();
-                    (label, icon)
-                })
-                .collect();
-
-            (rows, lang)
-        };
-        // All watch borrows are released here.
+        let (rows, mode, automatic, lang) = self.menu_rows(Instant::now());
         let l = loader(lang);
 
         let mut items: Vec<MenuItem<Self>> = Vec::new();
-
         if rows.is_empty() {
-            items.push(MenuItem::Standard(ksni::menu::StandardItem {
-                label: fl!(l, "tray-no-devices"),
-                enabled: false,
-                ..ksni::menu::StandardItem::default()
-            }));
-        } else {
-            // Device rows report status; they are not controls. Clicking one used
-            // to write `primary_device`, which only the aggregate icon consumes —
-            // in TrayMode::PerDevice there is no aggregate icon, so the click wrote
-            // to disk and changed nothing a user could see.
-            for (label, icon_name) in rows {
-                items.push(MenuItem::Standard(ksni::menu::StandardItem {
-                    label,
-                    icon_name,
+            items.push(
+                StandardItem {
+                    label: fl!(l, "tray-no-devices"),
                     enabled: false,
-                    ..ksni::menu::StandardItem::default()
-                }));
+                    ..StandardItem::default()
+                }
+                .into(),
+            );
+        } else if mode == TrayMode::PrimaryOnly {
+            items.push(
+                CheckmarkItem {
+                    label: fl!(l, "tray-automatic"),
+                    checked: automatic,
+                    activate: Box::new(|tray: &mut Self| tray.pin(None)),
+                    ..CheckmarkItem::default()
+                }
+                .into(),
+            );
+            for row in rows {
+                let name = row.name;
+                items.push(
+                    CheckmarkItem {
+                        label: row.label,
+                        icon_name: row.icon_name,
+                        checked: row.pinned,
+                        activate: Box::new(move |tray: &mut Self| tray.pin(Some(name.clone()))),
+                        ..CheckmarkItem::default()
+                    }
+                    .into(),
+                );
+            }
+        } else {
+            for row in rows {
+                items.push(
+                    StandardItem {
+                        label: row.label,
+                        icon_name: row.icon_name,
+                        activate: Box::new(|_: &mut Self| launch("dashboard")),
+                        ..StandardItem::default()
+                    }
+                    .into(),
+                );
             }
         }
 
         items.push(MenuItem::Separator);
-
-        items.push(MenuItem::Standard(ksni::menu::StandardItem {
-            label: fl!(l, "tray-dashboard"),
-            activate: Box::new(|_: &mut Self| launch("dashboard")),
-            ..ksni::menu::StandardItem::default()
-        }));
-
-        items.push(MenuItem::Standard(ksni::menu::StandardItem {
-            label: fl!(l, "tray-refresh"),
-            icon_name: "view-refresh".into(),
-            activate: Box::new(|app: &mut Self| app.refresh.trigger()),
-            ..ksni::menu::StandardItem::default()
-        }));
-
-        items.push(MenuItem::Standard(ksni::menu::StandardItem {
-            label: fl!(l, "tray-settings"),
-            activate: Box::new(|_: &mut Self| launch("settings")),
-            ..ksni::menu::StandardItem::default()
-        }));
-
+        items.push(
+            StandardItem {
+                label: fl!(l, "tray-dashboard"),
+                activate: Box::new(|_: &mut Self| launch("dashboard")),
+                ..StandardItem::default()
+            }
+            .into(),
+        );
+        items.push(
+            StandardItem {
+                label: fl!(l, "tray-refresh"),
+                activate: Box::new(|tray: &mut Self| tray.refresh.trigger()),
+                ..StandardItem::default()
+            }
+            .into(),
+        );
+        items.push(
+            StandardItem {
+                label: fl!(l, "tray-settings"),
+                activate: Box::new(|_: &mut Self| launch("settings")),
+                ..StandardItem::default()
+            }
+            .into(),
+        );
         items.push(MenuItem::Separator);
-
-        items.push(MenuItem::Standard(ksni::menu::StandardItem {
-            label: fl!(l, "tray-quit"),
-            activate: Box::new(|_| std::process::exit(0)),
-            ..ksni::menu::StandardItem::default()
-        }));
-
+        items.push(
+            StandardItem {
+                label: fl!(l, "tray-quit"),
+                activate: Box::new(|_| std::process::exit(0)),
+                ..StandardItem::default()
+            }
+            .into(),
+        );
         items
     }
 }
@@ -402,13 +452,14 @@ async fn reconcile(
     items: &mut HashMap<Option<DeviceId>, ksni::Handle<RigbatTray>>,
     rx: &watch::Receiver<TrayState>,
     theme_rx: &watch::Receiver<ColorScheme>,
-    config_rx: &watch::Receiver<Config>,
+    config: &watch::Sender<Config>,
+    save_config: SaveConfig,
     refresh: &RefreshSignal,
 ) {
     // Compute desired key list without holding any watch::Ref across an await.
     let desired: Vec<Option<DeviceId>> = {
         let state = rx.borrow();
-        let cfg = config_rx.borrow();
+        let cfg = config.borrow();
         desired_keys(cfg.tray_mode, &shown_ids(&state, &cfg, Instant::now()))
     }; // borrows dropped here
 
@@ -434,7 +485,8 @@ async fn reconcile(
                 key: key.clone(),
                 rx: rx.clone(),
                 theme_rx: theme_rx.clone(),
-                config: config_rx.clone(),
+                config: config.clone(),
+                save_config,
                 renderer: Box::new(TinySkiaRenderer::default()),
                 refresh: refresh.clone(),
             };
@@ -466,13 +518,15 @@ async fn reconcile(
 pub async fn run(
     mut rx: watch::Receiver<TrayState>,
     mut theme_rx: watch::Receiver<ColorScheme>,
-    mut config_rx: watch::Receiver<Config>,
+    config: watch::Sender<Config>,
+    save_config: SaveConfig,
     refresh: RefreshSignal,
 ) {
     let mut items: HashMap<Option<DeviceId>, ksni::Handle<RigbatTray>> = HashMap::new();
+    let mut config_rx = config.subscribe();
 
     loop {
-        reconcile(&mut items, &rx, &theme_rx, &config_rx, &refresh).await;
+        reconcile(&mut items, &rx, &theme_rx, &config, save_config, &refresh).await;
 
         tokio::select! {
             r = rx.changed() => if r.is_err() { break; },
@@ -491,8 +545,9 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        ColorScheme, MenuItem, RETAINED_ICON_MAX_AGE, RefreshSignal, RigbatTray, TinySkiaRenderer,
-        Tray as _, desired_keys, featured_id, resolve_for, shown_ids, sni_id, watch,
+        ColorScheme, MenuItem, RETAINED_ICON_MAX_AGE, RefreshSignal, RigbatTray, SaveConfig,
+        TinySkiaRenderer, Tray as _, desired_keys, featured_id, resolve_for, shown_ids, sni_id,
+        watch,
     };
     use crate::app::supervisor::TrayState;
     use crate::config::{Config, TrayMode};
@@ -1021,15 +1076,264 @@ mod tests {
         );
     }
 
-    fn tray_for(key: Option<DeviceId>, state: TrayState) -> RigbatTray {
+    fn saved(_: &Config) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn unsavable(_: &Config) -> anyhow::Result<()> {
+        anyhow::bail!("read-only file system")
+    }
+
+    fn tray_with(
+        key: Option<DeviceId>,
+        state: TrayState,
+        cfg: Config,
+        save_config: SaveConfig,
+    ) -> RigbatTray {
+        let mut cfg = cfg;
+        cfg.language.get_or_insert_with(|| "en".to_owned());
         RigbatTray {
             key,
             rx: watch::channel(state).1,
             theme_rx: watch::channel(ColorScheme::Dark).1,
-            config: watch::channel(Config::default()).1,
+            config: watch::channel(cfg).0,
+            save_config,
             renderer: Box::new(TinySkiaRenderer::default()),
             refresh: RefreshSignal::new(),
         }
+    }
+
+    fn tray_for(key: Option<DeviceId>, state: TrayState) -> RigbatTray {
+        tray_with(key, state, Config::default(), saved)
+    }
+
+    fn device(
+        name: &str,
+        kind: DeviceKind,
+        reading: BatteryReading,
+        estimate: crate::domain::Estimate,
+    ) -> DeviceState {
+        DeviceState {
+            info: DeviceInfo {
+                kind,
+                ..make_info(name)
+            },
+            last_reading: Some(reading),
+            last_seen: Some(Instant::now()),
+            presence: Presence::Online,
+            estimate,
+        }
+    }
+
+    /// One device per shape a row takes.
+    fn every_row_shape() -> TrayState {
+        use crate::domain::Estimate;
+        let mut keyboard = retained("NuPhy", 88, Duration::from_secs(2 * 3600));
+        keyboard.info.kind = DeviceKind::Keyboard;
+        TrayState {
+            devices: vec![
+                device(
+                    "MX_Master",
+                    DeviceKind::Mouse,
+                    make_reading(62),
+                    Estimate::Remaining(Duration::from_secs(3 * 3600)),
+                ),
+                device(
+                    "Ear",
+                    DeviceKind::Headset,
+                    BatteryReading::new(40, ChargeState::Charging),
+                    Estimate::Charging,
+                ),
+                device(
+                    "Pad",
+                    DeviceKind::Controller,
+                    BatteryReading::new(100, ChargeState::Full),
+                    Estimate::Unknown,
+                ),
+                device(
+                    "Aerox",
+                    DeviceKind::Mouse,
+                    make_reading(15),
+                    Estimate::Unknown,
+                ),
+                keyboard,
+                no_access("mouse"),
+            ],
+        }
+    }
+
+    /// The menu as the host receives it: `[x]`/`[ ]` a checkmark item and its
+    /// state, `#` the icon name, `---` a separator.
+    fn describe(tray: &RigbatTray) -> Vec<String> {
+        let line = |mark: String, label: String, enabled: bool, icon: String| {
+            let mut line = format!("{mark}{label}");
+            if !enabled {
+                line.insert_str(0, "(disabled) ");
+            }
+            if !icon.is_empty() {
+                line.push_str(&format!(" #{icon}"));
+            }
+            line
+        };
+        tray.menu()
+            .into_iter()
+            .map(|item| match item {
+                MenuItem::Standard(i) => line(String::new(), i.label, i.enabled, i.icon_name),
+                MenuItem::Checkmark(i) => {
+                    let mark = if i.checked { "[x] " } else { "[ ] " };
+                    line(mark.to_owned(), i.label, i.enabled, i.icon_name)
+                }
+                MenuItem::Separator => "---".to_owned(),
+                _ => "unexpected item kind".to_owned(),
+            })
+            .collect()
+    }
+
+    fn click(tray: &mut RigbatTray, label: &str) {
+        let activate = tray
+            .menu()
+            .into_iter()
+            .find_map(|item| match item {
+                MenuItem::Checkmark(i) if i.label == label => Some(i.activate),
+                _ => None,
+            })
+            .expect("no checkmark item with that label");
+        activate(tray);
+    }
+
+    const TAIL: [&str; 6] = [
+        "---",
+        "Device overview…",
+        "Refresh",
+        "Settings…",
+        "---",
+        "Quit",
+    ];
+
+    fn with_tail(rows: &[&str]) -> Vec<String> {
+        rows.iter().chain(&TAIL).map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn single_icon_menu_offers_automatic_then_every_device_as_a_checkmark() {
+        let tray = tray_for(None, every_row_shape());
+        assert_eq!(
+            describe(&tray),
+            with_tail(&[
+                "[x] Automatic",
+                "[ ] MX__Master: 62% · ~3h left #input-mouse",
+                "[ ] Ear: ⚡ 40% #audio-headset",
+                "[ ] Pad: 100% · full #input-gaming",
+                "[ ] Aerox: ⚠ 15% #input-mouse",
+                "[ ] NuPhy: Unreachable · last reading 2h ago #input-keyboard",
+                "[ ] mouse: No access · run rigbat doctor #input-mouse",
+            ])
+        );
+    }
+
+    #[test]
+    fn single_icon_menu_checks_the_pinned_device_not_automatic() {
+        let cfg = cfg_with_primary(Some("Ear"));
+        let tray = tray_with(None, every_row_shape(), cfg, saved);
+        let checked: Vec<String> = describe(&tray)
+            .into_iter()
+            .filter(|l| l.starts_with("[x]"))
+            .collect();
+        assert_eq!(checked, ["[x] Ear: ⚡ 40% #audio-headset"]);
+        assert!(describe(&tray).contains(&"[ ] Automatic".to_owned()));
+    }
+
+    /// The icon falls back to the first connected device, but the user did
+    /// not choose it, so nothing claims the choice.
+    #[test]
+    fn a_pin_to_a_device_that_is_not_shown_checks_nothing() {
+        let cfg = cfg_with_primary(Some("gone"));
+        let tray = tray_with(None, every_row_shape(), cfg, saved);
+        assert!(!describe(&tray).iter().any(|l| l.starts_with("[x]")));
+    }
+
+    #[test]
+    fn a_pin_shared_by_two_transports_checks_the_one_the_icon_shows() {
+        let cfg = cfg_with_primary(Some("MX"));
+        let tray = tray_with(None, same_name_two_transports(Presence::Online), cfg, saved);
+        assert_eq!(
+            describe(&tray),
+            with_tail(&[
+                "[ ] Automatic",
+                "[ ] MX: Unreachable · last reading just now #input-mouse",
+                "[x] MX: 40% #input-mouse",
+            ])
+        );
+    }
+
+    #[test]
+    fn per_device_menu_rows_are_enabled_plain_items() {
+        let cfg = Config {
+            tray_mode: TrayMode::PerDevice,
+            ..Config::default()
+        };
+        let tray = tray_with(Some(key("Aerox")), every_row_shape(), cfg, saved);
+        assert_eq!(
+            describe(&tray),
+            with_tail(&[
+                "MX__Master: 62% · ~3h left #input-mouse",
+                "Ear: ⚡ 40% #audio-headset",
+                "Pad: 100% · full #input-gaming",
+                "Aerox: ⚠ 15% #input-mouse",
+                "NuPhy: Unreachable · last reading 2h ago #input-keyboard",
+                "mouse: No access · run rigbat doctor #input-mouse",
+            ])
+        );
+    }
+
+    #[test]
+    fn no_devices_menu_says_so_in_either_mode() {
+        for tray_mode in [TrayMode::PrimaryOnly, TrayMode::PerDevice] {
+            let cfg = Config {
+                tray_mode,
+                ..Config::default()
+            };
+            let tray = tray_with(None, make_state(vec![]), cfg, saved);
+            assert_eq!(describe(&tray), with_tail(&["(disabled) No devices"]));
+        }
+    }
+
+    #[test]
+    fn menu_follows_the_configured_language() {
+        let cfg = Config {
+            language: Some("ru".to_owned()),
+            ..Config::default()
+        };
+        let tray = tray_with(None, every_row_shape(), cfg, saved);
+        let menu = describe(&tray);
+        assert_eq!(menu[0], "[x] Автоматически");
+        assert!(menu.contains(&"[ ] Pad: 100% · заряжено #input-gaming".to_owned()));
+        assert!(menu.contains(&"Обзор устройств…".to_owned()));
+    }
+
+    #[test]
+    fn clicking_a_device_pins_it_and_automatic_clears_the_pin() {
+        let mut tray = tray_for(None, every_row_shape());
+
+        click(&mut tray, "Ear: ⚡ 40%");
+        assert_eq!(tray.config.borrow().primary_device.as_deref(), Some("Ear"));
+        assert_eq!(tray.title(), "Ear");
+
+        click(&mut tray, "MX__Master: 62% · ~3h left");
+        assert_eq!(
+            tray.config.borrow().primary_device.as_deref(),
+            Some("MX_Master")
+        );
+
+        click(&mut tray, "Automatic");
+        assert_eq!(tray.config.borrow().primary_device, None);
+    }
+
+    #[test]
+    fn a_pin_that_cannot_be_saved_changes_nothing() {
+        let mut tray = tray_with(None, every_row_shape(), Config::default(), unsavable);
+        click(&mut tray, "Ear: ⚡ 40%");
+        assert_eq!(tray.config.borrow().primary_device, None);
     }
 
     #[test]
@@ -1038,31 +1342,26 @@ mod tests {
             devices: vec![no_access("mouse")],
         };
         let tray = tray_for(Some(key("mouse")), state);
-        let expected = "mouse: no access (run rigbat doctor)";
+        let expected = "mouse: No access · run rigbat doctor";
 
         assert_eq!(tray.tool_tip().title, expected);
-        let labels: Vec<String> = tray
-            .menu()
-            .into_iter()
-            .filter_map(|item| match item {
-                MenuItem::Standard(item) => Some(item.label),
-                _ => None,
-            })
-            .collect();
         assert!(
-            labels.iter().any(|label| label.ends_with(expected)),
-            "{labels:?}"
+            describe(&tray).contains(&format!("[ ] {expected} #input-mouse")),
+            "{:?}",
+            describe(&tray)
         );
     }
 
     mod bus {
-        use std::collections::BTreeSet;
+        use std::collections::{BTreeSet, HashMap};
         use std::time::Duration;
+
+        use zbus::zvariant::{OwnedValue, Value};
 
         use super::super::run;
         use super::{
             ColorScheme, Config, RefreshSignal, Transport, TrayMode, make_info, make_reading,
-            make_state, sni_id, watch,
+            make_state, saved, sni_id, watch,
         };
         use crate::bus_test::{eventually, isolated};
 
@@ -1078,6 +1377,85 @@ mod tests {
             fn is_status_notifier_host_registered(&self) -> bool {
                 true
             }
+        }
+
+        async fn serve_fake_watcher() -> zbus::Connection {
+            zbus::connection::Builder::session()
+                .expect("private bus")
+                .name("org.kde.StatusNotifierWatcher")
+                .expect("name")
+                .serve_at("/StatusNotifierWatcher", FakeWatcher)
+                .expect("path")
+                .build()
+                .await
+                .expect("fake watcher")
+        }
+
+        async fn item_property(
+            conn: &zbus::Connection,
+            bus_name: &str,
+            property: &str,
+        ) -> Option<String> {
+            let reply = conn
+                .call_method(
+                    Some(bus_name),
+                    "/StatusNotifierItem",
+                    Some("org.freedesktop.DBus.Properties"),
+                    "Get",
+                    &("org.kde.StatusNotifierItem", property),
+                )
+                .await
+                .ok()?;
+            let value: OwnedValue = reply.body().deserialize().ok()?;
+            String::try_from(value).ok()
+        }
+
+        /// The bus name of the item whose SNI `Id` is `id`.
+        async fn item_named(conn: &zbus::Connection, id: &str) -> Option<String> {
+            let dbus = zbus::fdo::DBusProxy::new(conn).await.ok()?;
+            for name in dbus.list_names().await.ok()? {
+                if name.starts_with("org.kde.StatusNotifierItem-")
+                    && item_property(conn, name.as_str(), "Id").await.as_deref() == Some(id)
+                {
+                    return Some(name.to_string());
+                }
+            }
+            None
+        }
+
+        type Layout = (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>);
+
+        /// Top-level menu items as (id, label, toggle-state), read the way a host reads them.
+        async fn menu(conn: &zbus::Connection, bus_name: &str) -> Vec<(i32, String, i32)> {
+            let reply = conn
+                .call_method(
+                    Some(bus_name),
+                    "/MenuBar",
+                    Some("com.canonical.dbusmenu"),
+                    "GetLayout",
+                    &(0i32, -1i32, Vec::<String>::new()),
+                )
+                .await
+                .expect("GetLayout");
+            let (_revision, (_root, _props, children)): (u32, Layout) =
+                reply.body().deserialize().expect("layout");
+            children
+                .into_iter()
+                .map(|child| {
+                    let (id, props, _): Layout = child.try_into().expect("menu item");
+                    let text = |key: &str| {
+                        props
+                            .get(key)
+                            .and_then(|v| String::try_from(v.try_clone().ok()?).ok())
+                            .unwrap_or_default()
+                    };
+                    let toggle = props
+                        .get("toggle-state")
+                        .and_then(|v| i32::try_from(v).ok())
+                        .unwrap_or(-1);
+                    (id, text("label"), toggle)
+                })
+                .collect()
         }
 
         async fn item_ids(conn: &zbus::Connection) -> BTreeSet<String> {
@@ -1119,15 +1497,7 @@ mod tests {
             if !isolated(module_path!(), "one_icon_per_device_id_follows_the_roster") {
                 return;
             }
-            let _watcher = zbus::connection::Builder::session()
-                .expect("private bus")
-                .name("org.kde.StatusNotifierWatcher")
-                .expect("name")
-                .serve_at("/StatusNotifierWatcher", FakeWatcher)
-                .expect("path")
-                .build()
-                .await
-                .expect("fake watcher");
+            let _watcher = serve_fake_watcher().await;
 
             let sysfs = make_info("mouse");
             let mut bluetooth = make_info("mouse");
@@ -1137,11 +1507,17 @@ mod tests {
                 (bluetooth.clone(), Some(make_reading(40))),
             ]));
             let (_theme_tx, theme_rx) = watch::channel(ColorScheme::Dark);
-            let (config_tx, config_rx) = watch::channel(Config {
+            let (config_tx, _config_rx) = watch::channel(Config {
                 tray_mode: TrayMode::PerDevice,
                 ..Config::default()
             });
-            tokio::spawn(run(state_rx, theme_rx, config_rx, RefreshSignal::new()));
+            tokio::spawn(run(
+                state_rx,
+                theme_rx,
+                config_tx.clone(),
+                saved,
+                RefreshSignal::new(),
+            ));
 
             let client = zbus::Connection::session().await.expect("private bus");
             let sysfs_id = sni_id(&sysfs.id());
@@ -1153,6 +1529,85 @@ mod tests {
 
             config_tx.send_modify(|c| c.tray_mode = TrayMode::PrimaryOnly);
             until_ids(&client, &["rigbat"]).await;
+        }
+
+        /// A click on a device row, sent as a host sends it, pins the device:
+        /// the config channel carries it and the aggregate icon re-publishes.
+        #[tokio::test]
+        async fn a_menu_click_pins_the_device_the_single_icon_shows() {
+            if !isolated(
+                module_path!(),
+                "a_menu_click_pins_the_device_the_single_icon_shows",
+            ) {
+                return;
+            }
+            let _watcher = serve_fake_watcher().await;
+
+            let mut keyboard = make_info("keyboard");
+            keyboard.kind = crate::domain::DeviceKind::Keyboard;
+            let (_state_tx, state_rx) = watch::channel(make_state(vec![
+                (make_info("mouse"), Some(make_reading(80))),
+                (keyboard, Some(make_reading(50))),
+            ]));
+            let (_theme_tx, theme_rx) = watch::channel(ColorScheme::Dark);
+            let (config_tx, _config_rx) = watch::channel(Config {
+                language: Some("en".to_owned()),
+                ..Config::default()
+            });
+            tokio::spawn(run(
+                state_rx,
+                theme_rx,
+                config_tx.clone(),
+                saved,
+                RefreshSignal::new(),
+            ));
+
+            let client = zbus::Connection::session().await.expect("private bus");
+            let client = &client;
+            let item = eventually(
+                TIMEOUT,
+                || async move { item_named(client, "rigbat").await },
+            )
+            .await;
+            let item = item.as_str();
+            let title = || async move { item_property(client, item, "Title").await };
+            assert_eq!(title().await.as_deref(), Some("mouse"));
+
+            let rows = menu(client, item).await;
+            let rows: Vec<(&str, i32)> = rows.iter().map(|(_, l, t)| (l.as_str(), *t)).collect();
+            assert_eq!(
+                &rows[..3],
+                [("Automatic", 1), ("mouse: 80%", 0), ("keyboard: 50%", 0)]
+            );
+
+            let keyboard_id = menu(client, item)
+                .await
+                .into_iter()
+                .find(|(_, label, _)| label == "keyboard: 50%")
+                .map(|(id, _, _)| id)
+                .expect("keyboard row");
+            client
+                .call_method(
+                    Some(item),
+                    "/MenuBar",
+                    Some("com.canonical.dbusmenu"),
+                    "Event",
+                    &(keyboard_id, "clicked", Value::from(0i32), 0u32),
+                )
+                .await
+                .expect("Event");
+
+            eventually(TIMEOUT, || async move {
+                (title().await.as_deref() == Some("keyboard")).then_some(())
+            })
+            .await;
+            assert_eq!(
+                config_tx.borrow().primary_device.as_deref(),
+                Some("keyboard")
+            );
+            let rows = menu(client, item).await;
+            let toggles: Vec<i32> = rows.iter().take(3).map(|(_, _, t)| *t).collect();
+            assert_eq!(toggles, [0, 0, 1]);
         }
     }
 }

@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use super::estimate::format_coarse;
-use super::{ChargeState, DeviceState, Estimate, Presence};
+use super::{ChargeState, DeviceState, Estimate, Presence, PrimaryStatus};
 use crate::i18n::{Lang, fl, loader};
 
 /// Wire value for `--json` and `list`; never translated (see `state_label`).
@@ -51,7 +51,7 @@ pub fn format_age(age: Duration, lang: Lang) -> String {
     }
 }
 
-/// Formats a device entry string for a menu item or tooltip.
+/// Formats a device entry string for the CLI table and the waybar tooltip.
 ///
 /// `Online` renders the live reading. `Unreachable`/`Disconnected` render the
 /// retained reading with its age (e.g. "88%  offline (2h ago)"), or plain
@@ -111,6 +111,96 @@ pub fn format_device_entry(state: &DeviceState, now: Instant, lang: Lang) -> Str
             )
         }
         _ => fl!(l, "entry-offline", name = name),
+    }
+}
+
+pub const CHARGING_SIGN: char = '\u{26A1}';
+pub const LOW_SIGN: char = '\u{26A0}';
+
+/// The charge as one short value: the dashboard's right-hand column and the
+/// tray menu's row. A low level carries a sign as well as a color.
+pub fn charge_value(
+    presence: Presence,
+    percent: Option<u8>,
+    charge: Option<ChargeState>,
+    status: PrimaryStatus,
+    lang: Lang,
+) -> String {
+    let text = match (presence, percent) {
+        (Presence::Online, None) => "—".to_owned(),
+        (Presence::Online, Some(p)) => match (status, charge) {
+            (PrimaryStatus::Charging { .. }, _) => format!("{CHARGING_SIGN} {p}%"),
+            (_, Some(ChargeState::Full)) => {
+                format!("{p}% · {}", state_label(ChargeState::Full, lang))
+            }
+            _ => format!("{p}%"),
+        },
+        (presence, _) => presence_label(presence, lang),
+    };
+    if matches!(status, PrimaryStatus::Low { .. }) {
+        format!("{LOW_SIGN} {text}")
+    } else {
+        text
+    }
+}
+
+pub fn presence_label(presence: Presence, lang: Lang) -> String {
+    let l = loader(lang);
+    match presence {
+        Presence::Online => fl!(l, "presence-online"),
+        Presence::Unreachable => fl!(l, "presence-unreachable"),
+        Presence::Disconnected => fl!(l, "presence-disconnected"),
+        Presence::NoAccess => fl!(l, "presence-no-access"),
+    }
+}
+
+/// Only what `charge_value` does not already say.
+pub fn status_note(
+    presence: Presence,
+    remaining: Option<Duration>,
+    seen_ago: Option<Duration>,
+    lang: Lang,
+) -> Option<String> {
+    let l = loader(lang);
+    match presence {
+        Presence::NoAccess => Some(fl!(l, "note-no-access")),
+        Presence::Online => remaining.map(|left| {
+            let estimate = format_coarse(left, lang);
+            fl!(l, "note-remaining", estimate = estimate.as_str())
+        }),
+        Presence::Unreachable | Presence::Disconnected => seen_ago.map(|ago| {
+            let age = format_age(ago, lang);
+            fl!(l, "note-last-reading", age = age.as_str())
+        }),
+    }
+}
+
+/// A dashboard row on one line: name, `charge_value`, then `status_note`.
+pub fn device_line(
+    device: &DeviceState,
+    status: PrimaryStatus,
+    now: Instant,
+    lang: Lang,
+) -> String {
+    let reading = device.last_reading;
+    let value = charge_value(
+        device.presence,
+        reading.map(|r| r.percent),
+        reading.map(|r| r.state),
+        status,
+        lang,
+    );
+    let remaining = match device.estimate {
+        Estimate::Remaining(left) => Some(left),
+        Estimate::Unknown | Estimate::Charging => None,
+    };
+    let seen_ago = device
+        .last_seen
+        .map(|seen| now.saturating_duration_since(seen));
+    let name = &device.info.name;
+    match status_note(device.presence, remaining, seen_ago, lang) {
+        Some(note) => format!("{name}: {value} · {note}"),
+        None => format!("{name}: {value}"),
     }
 }
 

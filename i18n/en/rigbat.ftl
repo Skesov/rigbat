@@ -3,6 +3,7 @@
 ## Tray menu and tooltip
 
 tray-no-devices = No devices
+tray-automatic = Automatic
 tray-refresh = Refresh
 tray-dashboard = Device overview…
 tray-settings = Settings…
@@ -27,6 +28,10 @@ entry-online-estimate = { $name }: { $percent }%  { $state }  { $estimate } left
 entry-offline = { $name }: offline
 entry-offline-retained = { $name }: { $percent }%  offline ({ $age })
 entry-no-access = { $name }: no access (run rigbat doctor)
+
+note-last-reading = last reading { $age }
+note-no-access = run rigbat doctor
+note-remaining = { $estimate } left
 
 kind-mouse = mouse
 kind-keyboard = keyboard
@@ -118,6 +123,4 @@ detail-default-interval = Use default ({ $secs } s)
 
 dashboard-title = rigbat — devices
 dashboard-tray-not-running = The rigbat tray is not running.
-dashboard-last-reading = last reading { $age }
-dashboard-no-access-hint = run rigbat doctor
 dashboard-in-tray = in tray

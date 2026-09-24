@@ -14,9 +14,7 @@ use futures_util::{Stream, StreamExt as _};
 use zbus::fdo::{DBusProxy, NameOwnerChangedStream};
 
 use crate::config;
-use crate::domain::{
-    ChargeState, DeviceKind, Presence, PrimaryStatus, format_age, format_coarse, state_label,
-};
+use crate::domain::{DeviceKind, Presence, PrimaryStatus, charge_value, status_note};
 use crate::gui;
 use crate::i18n::{Lang, fl, loader};
 use crate::icon::Theme;
@@ -282,8 +280,6 @@ impl Closer {
     }
 }
 
-const CHARGING: char = '\u{26A1}';
-const WARNING: char = '\u{26A0}';
 const REFRESH: &str = "\u{21BB}";
 
 struct Dashboard {
@@ -590,39 +586,18 @@ fn kind_glyph(kind: DeviceKind) -> &'static str {
     }
 }
 
-/// A low level carries a sign as well as a color.
 fn value_text(card: &DeviceCard, lang: Lang) -> String {
-    let text = match (card.presence, card.percent) {
-        (Presence::Online, None) => "—".to_owned(),
-        (Presence::Online, Some(p)) => match (card.status, card.charge) {
-            (PrimaryStatus::Charging { .. }, _) => format!("{CHARGING} {p}%"),
-            (_, Some(ChargeState::Full)) => {
-                format!("{p}% · {}", state_label(ChargeState::Full, lang))
-            }
-            _ => format!("{p}%"),
-        },
-        (presence, _) => presence_label(presence, lang),
-    };
-    if matches!(card.status, PrimaryStatus::Low { .. }) {
-        format!("{WARNING} {text}")
-    } else {
-        text
-    }
+    charge_value(card.presence, card.percent, card.charge, card.status, lang)
 }
 
-/// Only what the bar does not already say.
 fn row_note(card: &DeviceCard, lang: Lang, elapsed: u64) -> Option<String> {
-    let l = loader(lang);
-    match card.presence {
-        Presence::NoAccess => Some(fl!(l, "dashboard-no-access-hint")),
-        Presence::Online => card
-            .remaining_secs
-            .map(|secs| format_coarse(Duration::from_secs(secs), lang)),
-        Presence::Unreachable | Presence::Disconnected => card.seen_secs_ago.map(|secs| {
-            let age = format_age(Duration::from_secs(secs + elapsed), lang);
-            fl!(l, "dashboard-last-reading", age = age.as_str())
-        }),
-    }
+    status_note(
+        card.presence,
+        card.remaining_secs.map(Duration::from_secs),
+        card.seen_secs_ago
+            .map(|secs| Duration::from_secs(secs + elapsed)),
+        lang,
+    )
 }
 
 fn details(card: &DeviceCard, lang: Lang) -> String {
@@ -636,16 +611,6 @@ fn details(card: &DeviceCard, lang: Lang) -> String {
 /// `weak_text_color` misses WCAG 4.5:1 on a dark panel.
 fn secondary_text(visuals: &egui::Visuals) -> egui::Color32 {
     visuals.text_color()
-}
-
-fn presence_label(presence: Presence, lang: Lang) -> String {
-    let l = loader(lang);
-    match presence {
-        Presence::Online => fl!(l, "presence-online"),
-        Presence::Unreachable => fl!(l, "presence-unreachable"),
-        Presence::Disconnected => fl!(l, "presence-disconnected"),
-        Presence::NoAccess => fl!(l, "presence-no-access"),
-    }
 }
 
 fn color([r, g, b, a]: [u8; 4]) -> egui::Color32 {
@@ -667,7 +632,10 @@ fn open_settings() {
 mod tests {
     use super::*;
     use crate::config::DisplayMode;
-    use crate::domain::{ChargeState, DeviceKind, Transport};
+    use crate::domain::{
+        CHARGING_SIGN, ChargeState, DeviceKind, LOW_SIGN, Transport, format_age, format_coarse,
+        state_label,
+    };
     use crate::egui_test::{assert_single_lines_without_overlap, fully_painted_text_at};
 
     fn card(name: &str, presence: Presence, percent: Option<u8>) -> DeviceCard {
@@ -766,20 +734,21 @@ mod tests {
             let painted = painted(&mut d);
             let l = loader(lang);
             let age = format_age(Duration::from_secs(2 * 3600), lang);
+            let estimate = format_coarse(Duration::from_secs(7 * 3600), lang);
             let expected = [
                 "MX Anywhere 3".to_owned(),
                 "Nothing Ear (2)".to_owned(),
                 "\u{1F5B1}".to_owned(),
                 "\u{1F3A7}".to_owned(),
                 "62%".to_owned(),
-                format!("{WARNING} 15%"),
-                format!("{CHARGING} 40%"),
+                format!("{LOW_SIGN} 15%"),
+                format!("{CHARGING_SIGN} 40%"),
                 format!("100% · {}", state_label(ChargeState::Full, lang)),
                 fl!(l, "presence-disconnected"),
                 fl!(l, "presence-no-access"),
-                format_coarse(Duration::from_secs(7 * 3600), lang),
-                fl!(l, "dashboard-last-reading", age = age.as_str()),
-                fl!(l, "dashboard-no-access-hint"),
+                fl!(l, "note-remaining", estimate = estimate.as_str()),
+                fl!(l, "note-last-reading", age = age.as_str()),
+                fl!(l, "note-no-access"),
                 fl!(l, "tray-settings"),
             ];
             for text in expected {
@@ -840,7 +809,10 @@ mod tests {
         let unreachable = card("m", Presence::Unreachable, Some(88));
         assert_eq!(value_text(&unreachable, Lang::En), "Unreachable");
         let low = card("m", Presence::Unreachable, Some(12));
-        assert_eq!(value_text(&low, Lang::En), format!("{WARNING} Unreachable"));
+        assert_eq!(
+            value_text(&low, Lang::En),
+            format!("{LOW_SIGN} Unreachable")
+        );
     }
 
     #[test]
@@ -901,7 +873,7 @@ mod tests {
             for glyph in kinds.map(kind_glyph).into_iter().chain([REFRESH]) {
                 assert!(fonts.has_glyphs(&font, glyph), "{glyph:?}");
             }
-            for sign in [CHARGING, WARNING] {
+            for sign in [CHARGING_SIGN, LOW_SIGN] {
                 assert!(fonts.has_glyph(&font, sign), "{sign:?}");
             }
         });

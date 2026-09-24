@@ -391,7 +391,14 @@ async fn run_tray() {
     // config_tx must outlive every subscriber: it is the sole sender, and a
     // dropped sender makes every source task's config_rx.changed() resolve
     // with an error instead of waiting, spinning that task's select loop.
-    tray::manager::run(rx, theme_rx, config_tx.subscribe(), refresh).await;
+    tray::manager::run(
+        rx,
+        theme_rx,
+        config_tx.clone(),
+        crate::config::save,
+        refresh,
+    )
+    .await;
 }
 
 /// Runs `--waybar` as a long-lived process instead of a one-shot poll, so a

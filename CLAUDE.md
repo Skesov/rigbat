@@ -15,7 +15,7 @@ whose mouse is switched off is not a battery level. It keeps being polled and re
 answer. A device whose node the user may not open (`sources::AccessDenied`, typically a missing
 udev rule) reads `NoAccess` ("no access", pointing at `rigbat doctor`) instead of offline: it
 keeps its tray entry, never notifies, and is never featured over an online device. Tray: left click opens the dashboard (a row per device), right click the menu listing
-device status; device-type glyph, light/dark theme, display modes, time-remaining estimate, low-battery notifications
+device status (in single-icon mode a checkmark per device pins the icon to it); device-type glyph, light/dark theme, display modes, time-remaining estimate, low-battery notifications
 (confirmed by two distinct readings), separate settings window with a device inventory table,
 per-device poll intervals/thresholds and aggregate-icon pin, config persistence. UI in English and
 Russian (Fluent, `i18n/`), switchable live; the CLI stays English. A second `rigbat tray` exits
@@ -171,7 +171,10 @@ COSMIC-specific — the strictest SNI host; these workarounds are safe everywher
 
 - No hover tooltip for tray icons, so the icon image and the menu are the only identification
   channels (drives the device-type corner glyph and the full-roster menu).
-- `ksni` `RadioGroup`/nested submenus drop clicks — use plain `StandardItem` for actions.
+- `ksni` `RadioGroup`/nested submenus drop clicks — use plain `StandardItem` for actions and
+  `CheckmarkItem` for a choice (`cosmic-applets` 1.8 draws `toggle-state 1` as a checkmark). A
+  disabled item gets no press handler. Labels follow the DBusMenu mnemonic rule: a single `_`
+  is swallowed, so device names are escaped to `__`.
 - `cosmic-applets` 1.8: left press calls `Activate(0, 0)` unless `ItemIsMenu`, right press opens
   the menu, so `MENU_ON_ACTIVATE = false` and `activate` spawns the dashboard. The coordinates
   are always zero and a Wayland toplevel cannot place itself — the dashboard opens where the
