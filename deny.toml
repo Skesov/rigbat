@@ -8,6 +8,13 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 [advisories]
 # Unmaintained crates are reported for the whole graph; yanked ones fail.
 yanked = "deny"
+# quick-xml 0.39 reaches us only via accesskit -> atspi-common -> zbus-lockstep, which
+# atspi-common calls from #[cfg(test)] code alone; no XML is parsed at runtime. Drop these
+# once an eframe/accesskit update moves atspi-common off zbus-lockstep 0.5.
+ignore = [
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml via atspi-common test-only code, not reachable" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml via atspi-common test-only code, not reachable" },
+]
 
 [licenses]
 # Every licence here is one some crate in `cargo tree` actually needs; anything
