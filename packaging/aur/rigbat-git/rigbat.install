@@ -1,0 +1,16 @@
+post_install() {
+  cat <<'EOF'
+==> Start the tray with your graphical session (run as your user, not root):
+      systemctl --user enable --now rigbat.service
+    Or use the "Startup" toggle in `rigbat settings` instead, not both.
+==> USB HID devices (SteelSeries, 8BitDo) get access through the udev rule.
+    If one still shows offline, replug its USB receiver.
+EOF
+}
+
+post_upgrade() {
+  cat <<'EOF'
+==> If rigbat.service is enabled, restart it to run the new binary:
+      systemctl --user restart rigbat.service
+EOF
+}

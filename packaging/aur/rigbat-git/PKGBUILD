@@ -1,0 +1,68 @@
+# Maintainer: Vladimir Skesov <vladimirskesov at gmail dot com>
+
+pkgname=rigbat-git
+_pkgname=rigbat
+pkgver=r81.f598652
+pkgrel=1
+pkgdesc='System tray battery monitor for gaming peripherals'
+arch=('x86_64')
+url='https://github.com/Skesov/rigbat'
+license=('MIT OR Apache-2.0')
+# The binary links only glibc/libgcc; the windowing stack is dlopen()ed at runtime.
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'wayland' 'libx11' 'libxcursor' 'libxrandr'
+         'libxi' 'libglvnd')
+makedepends=('cargo' 'git')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+# makepkg's -flto turns the bundled SQLite objects into GCC bitcode that rust-lld cannot link.
+options=('!lto')
+install=rigbat.install
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$_pkgname"
+  ( set -o pipefail
+    git describe --long --tags --abbrev=7 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' ||
+    printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+  )
+}
+
+prepare() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$_pkgname"
+  install -Dm755 target/release/rigbat "$pkgdir/usr/bin/rigbat"
+
+  install -Dm644 packaging/70-rigbat.rules "$pkgdir/usr/lib/udev/rules.d/70-rigbat.rules"
+
+  install -Dm644 packaging/rigbat.service "$pkgdir/usr/lib/systemd/user/rigbat.service"
+  sed -i 's|^ExecStart=.*rigbat tray$|ExecStart=/usr/bin/rigbat tray|' \
+    "$pkgdir/usr/lib/systemd/user/rigbat.service"
+
+  install -Dm644 packaging/rigbat.desktop "$pkgdir/usr/share/applications/rigbat.desktop"
+  sed -i 's|^Exec=rigbat |Exec=/usr/bin/rigbat |' "$pkgdir/usr/share/applications/rigbat.desktop"
+
+  install -Dm644 packaging/icons/hicolor/scalable/apps/rigbat.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/rigbat.svg"
+
+  install -Dm644 -t "$pkgdir/usr/share/licenses/$_pkgname/" LICENSE-MIT LICENSE-APACHE
+}

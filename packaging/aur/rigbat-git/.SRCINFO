@@ -1,0 +1,26 @@
+pkgbase = rigbat-git
+	pkgdesc = System tray battery monitor for gaming peripherals
+	pkgver = r81.f598652
+	pkgrel = 1
+	url = https://github.com/Skesov/rigbat
+	install = rigbat.install
+	arch = x86_64
+	license = MIT OR Apache-2.0
+	makedepends = cargo
+	makedepends = git
+	depends = gcc-libs
+	depends = glibc
+	depends = libxkbcommon
+	depends = wayland
+	depends = libx11
+	depends = libxcursor
+	depends = libxrandr
+	depends = libxi
+	depends = libglvnd
+	provides = rigbat
+	conflicts = rigbat
+	options = !lto
+	source = rigbat::git+https://github.com/Skesov/rigbat.git
+	sha256sums = SKIP
+
+pkgname = rigbat-git
