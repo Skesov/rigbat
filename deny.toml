@@ -1,0 +1,40 @@
+# cargo-deny policy, run by the `deny` job in .github/workflows/ci.yml.
+# Local run: `cargo deny check`.
+
+[graph]
+# rigbat is Linux-only; licences and bans of Windows/macOS-only crates never ship.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+[advisories]
+# Unmaintained crates are reported for the whole graph; yanked ones fail.
+yanked = "deny"
+
+[licenses]
+# Every licence here is one some crate in `cargo tree` actually needs; anything
+# new fails the check until it is reviewed and added.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",   # arrayref
+    "BSD-3-Clause",   # tiny-skia
+    "ISC",            # inotify, libloading
+    "Zlib",           # foldhash, zlib-rs
+    "Unicode-3.0",    # ICU4X crates (via eframe -> url -> idna)
+    "CC0-1.0",        # notify, hexf-parse
+    "Unlicense",      # ksni
+    "MPL-2.0",        # option-ext (via directories); file-level copyleft, unmodified
+    "OFL-1.1",        # epaint_default_fonts: the fonts eframe embeds
+    "Ubuntu-font-1.0", # epaint_default_fonts
+]
+confidence-threshold = 0.9
+
+[bans]
+# The winit/wayland stack pulls two versions of several crates; warn, do not fail.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

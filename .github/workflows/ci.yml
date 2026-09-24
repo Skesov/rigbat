@@ -28,12 +28,13 @@ jobs:
       # runtime, but their build scripts still need the development headers.
       # rusqlite's `bundled` feature compiles SQLite, which needs the C
       # toolchain the runner already has.
+      # `dbus`: the D-Bus integration tests start a private dbus-daemon, and skip without one.
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
-            libxrandr-dev libxi-dev libgl1-mesa-dev pkg-config
+            libxrandr-dev libxi-dev libgl1-mesa-dev pkg-config dbus
 
       # rust-toolchain.toml pins the channel; this action honours it.
       - uses: dtolnay/rust-toolchain@stable
@@ -48,6 +49,13 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo build --locked
       - run: cargo test --locked
+
+  deny:
+    name: deny (advisories, bans, licenses, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
 
   msrv:
     name: msrv (${{ matrix.rust }})

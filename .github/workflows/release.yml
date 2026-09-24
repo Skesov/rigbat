@@ -39,6 +39,11 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
+    # Replaces the workflow-level permissions for this job.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     # One target for now. A cross-built aarch64 leg needs the X11/Wayland
     # headers inside the cross image, and a matrix leg that fails on every
     # release is worse than a target nobody has asked for yet.
@@ -86,6 +91,37 @@ jobs:
           sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
           echo "asset=${name}.tar.gz" >> "$GITHUB_OUTPUT"
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      # The shipped unit points at ~/.cargo/bin for `make service`; the
+      # packages install the binary to /usr/bin.
+      - name: Build the packages
+        id: packages
+        run: |
+          set -euo pipefail
+          version="${{ needs.release-please.outputs.version }}"
+          mkdir -p target/packaging
+          sed 's|^ExecStart=.*rigbat tray$|ExecStart=/usr/bin/rigbat tray|' \
+            packaging/rigbat.service > target/packaging/rigbat.service
+          grep -qx 'ExecStart=/usr/bin/rigbat tray' target/packaging/rigbat.service
+          deb="rigbat_${version}-1_amd64.deb"
+          rpm="rigbat-${version}-1.x86_64.rpm"
+          cargo deb --no-build --target "$TARGET" --output "${deb}"
+          cargo generate-rpm --target "$TARGET" --output "${rpm}"
+          sha256sum "${deb}" > "${deb}.sha256"
+          sha256sum "${rpm}" > "${rpm}.sha256"
+          echo "deb=${deb}" >> "$GITHUB_OUTPUT"
+          echo "rpm=${rpm}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ steps.stage.outputs.asset }}
+            ${{ steps.packages.outputs.deb }}
+            ${{ steps.packages.outputs.rpm }}
+
       - name: Attach to the release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -93,4 +129,8 @@ jobs:
           gh release upload "${{ needs.release-please.outputs.tag_name }}" \
             "${{ steps.stage.outputs.asset }}" \
             "${{ steps.stage.outputs.asset }}.sha256" \
+            "${{ steps.packages.outputs.deb }}" \
+            "${{ steps.packages.outputs.deb }}.sha256" \
+            "${{ steps.packages.outputs.rpm }}" \
+            "${{ steps.packages.outputs.rpm }}.sha256" \
             --clobber
