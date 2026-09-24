@@ -218,7 +218,7 @@ pub fn switch(ui: &mut egui::Ui, id: egui::Id, on: &mut bool, label: &str) -> eg
             egui::pos2(x, rect.center().y),
             knob_radius,
             egui::Color32::WHITE,
-            egui::Stroke::new(0.5, egui::Color32::from_black_alpha(60)),
+            egui::Stroke::new(0.5_f32, egui::Color32::from_black_alpha(60)),
         );
         if response.has_focus() {
             focus_ring(ui, rect, radius);
