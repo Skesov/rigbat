@@ -43,41 +43,42 @@ notify-low-body = Осталось { $percent }%
 
 tab-general = Основное
 tab-devices = Устройства
-status-saved = Изменения сохранены.
-button-close = Закрыть
 button-refresh = Обновить
 button-refreshing = Обновление…
 unit-seconds-suffix = { " " }с
 
 ## Settings window: General tab
 
-section-tray-display = Отображение в трее
+group-tray = Трей
+tray-icon-style = Вид значка
 display-icon-only = Только иконка
 display-percent-only = Проценты текстом
 display-percent-in-icon = Проценты внутри иконки
-tray-per-device = Отдельная иконка для каждого устройства
-tray-per-device-hint = Выберите устройства на вкладке «Устройства».
+tray-per-device = Значок на каждое устройство
+tray-per-device-hint = Какие именно — на вкладке «Устройства».
 tray-primary-hint-pinned = Общая иконка показывает { $name }. Сменить — на вкладке «Устройства».
 tray-primary-hint-auto = Общая иконка показывает первое подключённое устройство. Закрепить — на вкладке «Устройства».
 button-clear = Сбросить
 
-section-defaults = Общие настройки
+group-battery = Батарея
 default-low-threshold = Порог низкого заряда
 default-poll-interval = Опрашивать каждые
-poll-interval-hint = Более частый опрос постоянно будит устройство и сажает его батарею.
+poll-interval-hint = Более частый опрос сажает батарею устройства.
+interval-seconds = { $count } с
+interval-minutes = { $count } мин
+interval-hours = { $count } ч
 defaults-hint = Действует для всех устройств без собственных настроек. Чтобы настроить одно устройство, выберите его на вкладке «Устройства».
 
-section-notifications = Уведомления
 notifications-enabled = Уведомлять о низком заряде
 
-section-startup = Автозапуск
+group-system = Система
 autostart-enabled = Запускать при входе в систему
-autostart-managed-by-systemd = Управляется пользовательской службой systemd. Отключить: systemctl --user disable --now rigbat.service
+autostart-managed-by-systemd = Управляется службой rigbat.service
+autostart-systemd-disable = Отключить: systemctl --user disable --now rigbat.service
 
 section-language = Язык / Language
 language-system = Системный
 
-section-about = О программе
 about-project-page = Страница проекта
 
 ## Settings window: Devices tab

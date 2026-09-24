@@ -143,11 +143,11 @@ The service needs the session environment (Wayland/X display, session D-Bus),
 which modern desktops (GNOME, KDE, COSMIC) import into the systemd user manager
 at login automatically.
 
-Use the service **or** the in-app "Startup" toggle (which writes an XDG autostart
-entry), not both — each launches `rigbat tray`. A second instance detects the
-first through a session-bus name and exits immediately instead of doubling
-every device in the tray; the settings window also disables the Startup
-checkbox and explains why when it sees the service enabled.
+Use the service **or** the in-app "Start with session" switch (which writes an
+XDG autostart entry), not both — each launches `rigbat tray`. A second instance
+detects the first through a session-bus name and exits immediately instead of
+doubling every device in the tray; the settings window also locks the switch
+and says the service manages startup when it sees the service enabled.
 
 ## Permissions
 
@@ -180,7 +180,7 @@ controller on, undocked from its dongle.
 
 **General** — how the tray looks and behaves for every device: one icon per device or a single
 aggregate icon, the display mode, the default low-battery threshold (5–50%, default 20), the
-default poll interval (10–3600 s, default 60), low-battery notifications, whether rigbat
+default poll interval (30 s to 1 h, default 1 min), low-battery notifications, whether rigbat
 starts with the session, and the language (`System` follows `LANG`).
 
 **Devices** — a table of every device rigbat has ever seen on this machine, present or not:

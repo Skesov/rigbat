@@ -1,23 +1,22 @@
 mod devices;
+mod widgets;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, TryRecvError};
-use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_extras::{Column, Size, StripBuilder, TableBuilder};
 
 use crate::autostart;
 use crate::config::{self, Config, DeviceSettings, DisplayMode, TrayMode};
-use crate::domain::{DeviceInfo, PollOutcome, Presence};
+use crate::domain::{DeviceInfo, PollOutcome, Presence, PrimaryStatus};
 use crate::gui;
 use crate::i18n::{self, Lang, fl, loader};
+use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
 use crate::state;
 use devices::{DeleteState, DeviceRow, SortColumn, SortState};
-
-/// Seconds the "Changes saved." status line remains visible after a save.
-const SAVED_VISIBLE_SECS: u64 = 2;
 
 /// Height reserved under the Devices tab table for the selected device's
 /// settings, and only while one is selected.
@@ -51,10 +50,6 @@ const TABLE_HEADER_HEIGHT: f32 = 24.0;
 /// read as one action a stray click could confuse (T36).
 const TOGGLE_ACTIONS_GAP_WIDTH: f32 = 20.0;
 
-/// Height reserved for the shared status bar (separator + "Changes saved." +
-/// Close) at the bottom of the window, below both tabs.
-const STATUS_BAR_HEIGHT: f32 = 40.0;
-
 /// Global low-battery threshold range, percent. Below 5% the warning fires too
 /// late to matter; above 50% it stops meaning "low".
 const LOW_THRESHOLD_RANGE: std::ops::RangeInclusive<u8> = 5..=50;
@@ -63,9 +58,25 @@ const LOW_THRESHOLD_RANGE: std::ops::RangeInclusive<u8> = 5..=50;
 /// a HID device every second, which drains the battery it is meant to monitor.
 const POLL_INTERVAL_RANGE: std::ops::RangeInclusive<u64> = 10..=3600;
 
-/// The window's two top-level sections. Hand-rolled `SelectableLabel` tab
-/// bar, not `egui_dock` (a docking system for editor layouts, not a fixed
-/// two-or-three-section switcher) and not a sidebar (GNOME HIG reserves the
+/// The General tab's poll-interval choices, seconds.
+const POLL_INTERVAL_PRESETS: [u64; 7] = [30, 60, 120, 300, 900, 1800, 3600];
+
+/// Edge of an icon-style preview, points.
+const STYLE_PREVIEW_SIZE: f32 = 32.0;
+
+/// The largest icon `TinySkiaRenderer` is drawn for.
+const STYLE_PREVIEW_MAX_PIXELS: u32 = 64;
+
+/// The one reading every icon-style preview shows.
+const STYLE_PREVIEW_STATUS: PrimaryStatus = PrimaryStatus::Ok { percent: 72 };
+
+/// The low-battery threshold's slider and value box, points.
+const THRESHOLD_CONTROL_WIDTH: f32 = 240.0;
+const THRESHOLD_SLIDER_WIDTH: f32 = 180.0;
+
+/// The window's two top-level sections. Hand-rolled tab bar, not `egui_dock`
+/// (a docking system for editor layouts, not a fixed two-or-three-section
+/// switcher) and not a sidebar (GNOME HIG reserves the
 /// sidebar pattern for apps with many destinations or their own iconography;
 /// two sections is squarely view-switcher territory). Kept open for a third
 /// tab without redesigning navigation — add a variant and a label.
@@ -84,12 +95,18 @@ struct ScanResult {
     records: Vec<state::DeviceRecord>,
 }
 
+/// The icon-style tiles' pictures, rendered once per theme and pixel density.
+struct StylePreviews {
+    dark: bool,
+    pixels: u32,
+    textures: Vec<(DisplayMode, egui::TextureHandle)>,
+}
+
 struct SettingsApp {
     config: Config,
+    /// `None` when there is no home directory; every save then fails.
+    config_path: Option<PathBuf>,
     devices: Vec<DeviceInfo>,
-    /// Set to `Some(Instant::now())` on every successful save; cleared implicitly
-    /// by comparing elapsed time on each frame.
-    saved_at: Option<Instant>,
     /// Reflects `~/.config/autostart/rigbat.desktop` existence — not stored in Config.
     autostart_enabled: bool,
     /// Whether `rigbat.service` is enabled in the systemd user manager,
@@ -125,31 +142,27 @@ struct SettingsApp {
     /// dropping out of the current scan.
     selected_device: Option<String>,
     delete_state: DeleteState,
+    style_previews: Option<StylePreviews>,
 }
 
 impl SettingsApp {
-    /// Renders one section header: bold label followed by a small gap.
-    fn section_header(ui: &mut egui::Ui, title: &str) {
-        ui.strong(title);
-        ui.add_space(4.0);
-    }
-
-    /// Saves one user edit and flashes the "Changes saved." status for
-    /// `SAVED_VISIBLE_SECS`. Logs on failure; the status line stays unchanged.
+    /// Saves one user edit. Logs on failure; every control then keeps showing
+    /// the value that is on disk.
     ///
     /// `edit` names exactly the field the call site just changed — see
     /// `save_edit` for why. On success, `self.config` adopts the freshly
     /// saved config, so any field changed on disk by another process since
     /// this window opened is picked up too, not just the one this call
     /// touched.
-    fn persist(&mut self, ui: &egui::Ui, edit: impl FnOnce(&mut Config)) {
-        match save_edit(&config::load, &config::save, edit) {
-            Ok(on_disk) => {
-                self.config = on_disk;
-                self.saved_at = Some(Instant::now());
-                ui.ctx()
-                    .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
-            }
+    fn persist(&mut self, edit: impl FnOnce(&mut Config)) {
+        let Some(path) = self.config_path.clone() else {
+            tracing::error!("failed to save config: cannot determine config directory");
+            return;
+        };
+        let load = || config::load_from(&path);
+        let save = |cfg: &Config| config::save_to(&path, cfg);
+        match save_edit(&load, &save, edit) {
+            Ok(on_disk) => self.config = on_disk,
             Err(e) => tracing::error!("failed to save config: {e}"),
         }
     }
@@ -284,7 +297,7 @@ impl SettingsApp {
             .changed()
         {
             let name = name.to_string();
-            self.persist(ui, move |target| {
+            self.persist(move |target| {
                 toggle_primary(&mut target.primary_device, &name, is_primary);
             });
         }
@@ -321,7 +334,7 @@ impl SettingsApp {
         }
 
         if save {
-            self.save_threshold_override(ui, name, on.then_some(value));
+            self.save_threshold_override(name, on.then_some(value));
         }
     }
 
@@ -353,16 +366,16 @@ impl SettingsApp {
         }
 
         if save {
-            self.save_interval_override(ui, name, on.then_some(value));
+            self.save_interval_override(name, on.then_some(value));
         }
     }
 
     /// Writes one device's threshold override, leaving its interval override
     /// as the on-disk config has it — the two controls are rendered
     /// separately, so neither may write the other's field from a snapshot.
-    fn save_threshold_override(&mut self, ui: &egui::Ui, name: &str, threshold: Option<u8>) {
+    fn save_threshold_override(&mut self, name: &str, threshold: Option<u8>) {
         let name = name.to_string();
-        self.persist(ui, move |target| {
+        self.persist(move |target| {
             // Defaults come from `target`, the config being written, not from
             // the window's snapshot: `apply_device_override` drops an override
             // equal to the current default, and a second settings window (there
@@ -386,9 +399,9 @@ impl SettingsApp {
     }
 
     /// The interval half of `save_threshold_override`.
-    fn save_interval_override(&mut self, ui: &egui::Ui, name: &str, interval: Option<u64>) {
+    fn save_interval_override(&mut self, name: &str, interval: Option<u64>) {
         let name = name.to_string();
-        self.persist(ui, move |target| {
+        self.persist(move |target| {
             let default_threshold = target.low_threshold;
             let default_interval = target.poll_interval_secs;
             let threshold = target
@@ -587,7 +600,7 @@ impl SettingsApp {
             let mut shown = self.config.is_shown(&row.device.name);
             if ui.checkbox(&mut shown, "").changed() {
                 let name = row.device.name.clone();
-                self.persist(ui, move |target| {
+                self.persist(move |target| {
                     toggle_hidden(&mut target.hidden_devices, &name, shown);
                 });
             }
@@ -618,7 +631,7 @@ impl SettingsApp {
                 let Some(store_id) = row.store_id else { return };
                 ui.horizontal(|ui| {
                     if destructive_small_button(ui, &fl!(l, "button-confirm")).clicked() {
-                        self.delete_device(ui, store_id, &row.device.name);
+                        self.delete_device(store_id, &row.device.name);
                     }
                     if ui.small_button(fl!(l, "button-cancel")).clicked() {
                         self.delete_state = DeleteState::Idle;
@@ -639,10 +652,10 @@ impl SettingsApp {
     /// longer exists — and its pin on the aggregate icon, which would
     /// otherwise reattach itself the moment a sold device is plugged in
     /// somewhere else and seen again. Store I/O happens directly on the UI thread,
-    /// the same as `persist`'s `config::save`/`load`: a deliberate,
+    /// the same as `persist`'s config write: a deliberate,
     /// infrequent, user-confirmed click, not the per-frame inventory read
     /// `spawn_scan` keeps off the UI thread.
-    fn delete_device(&mut self, ui: &egui::Ui, store_id: i64, name: &str) {
+    fn delete_device(&mut self, store_id: i64, name: &str) {
         if let Some(store) = &self.store
             && let Err(e) = store.delete_device(store_id)
         {
@@ -652,7 +665,7 @@ impl SettingsApp {
         }
 
         let forgotten = name.to_string();
-        self.persist(ui, move |target| {
+        self.persist(move |target| {
             toggle_hidden(&mut target.hidden_devices, &forgotten, true);
             toggle_primary(&mut target.primary_device, &forgotten, false);
         });
@@ -769,178 +782,266 @@ impl eframe::App for SettingsApp {
         frame.show(ui, |ui| {
             self.render_tab_bar(ui);
             ui.add_space(8.0);
-            // A vertical strip, not plain top-to-bottom layout: `egui_extras`'s
-            // table (and the strip that lays it out beside the detail panel)
-            // claims all remaining height for itself — "if you want something
-            // below the table, put it in a strip" (egui_extras::table's own
-            // module doc). Reserving the status bar's row up front is what
-            // leaves it anything to render into on the Devices tab.
-            StripBuilder::new(ui)
-                .size(Size::remainder())
-                .size(Size::exact(STATUS_BAR_HEIGHT))
-                .vertical(|mut strip| {
-                    strip.cell(|ui| match self.tab {
-                        Tab::General => {
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                self.render_general_tab(ui);
-                            });
-                        }
-                        Tab::Devices => self.render_devices_tab(ui),
-                    });
-                    strip.cell(|ui| self.render_status_bar(ui));
-                });
+            match self.tab {
+                Tab::General => self.render_general_tab(ui),
+                Tab::Devices => self.render_devices_tab(ui),
+            }
         });
     }
 }
 
 impl SettingsApp {
-    /// Hand-rolled tab bar: `SelectableLabel`s bound to `Tab`, not
-    /// `egui_dock` (see `Tab`'s doc comment for why).
     fn render_tab_bar(&mut self, ui: &mut egui::Ui) {
         let l = loader(self.config.lang());
-        ui.horizontal(|ui| {
-            for (tab, label) in [
-                (Tab::General, fl!(l, "tab-general")),
-                (Tab::Devices, fl!(l, "tab-devices")),
-            ] {
-                if ui.selectable_label(self.tab == tab, label).clicked() {
-                    self.tab = tab;
-                }
-            }
-        });
-        ui.separator();
+        let tabs = [Tab::General, Tab::Devices];
+        let labels = [fl!(l, "tab-general"), fl!(l, "tab-devices")];
+        let selected = tabs.iter().position(|&tab| tab == self.tab).unwrap_or(0);
+        if let Some(tab) = widgets::tab_bar(ui, &labels, selected).and_then(|i| tabs.get(i)) {
+            self.tab = *tab;
+        }
     }
 
+    /// A centred column of preference groups, scrolling as a whole.
     fn render_general_tab(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let width = ui.available_width().min(widgets::CONTENT_MAX_WIDTH);
+                let margin = (ui.available_width() - width) / 2.0 - ui.spacing().item_spacing.x;
+                ui.horizontal(|ui| {
+                    ui.add_space(margin.max(0.0));
+                    ui.vertical(|ui| {
+                        ui.set_width(width);
+                        ui.add_space(8.0);
+                        self.render_tray_group(ui);
+                        self.render_battery_group(ui);
+                        self.render_system_group(ui);
+                        let l = loader(self.config.lang());
+                        widgets::footer(
+                            ui,
+                            &format!("rigbat {} ·", env!("CARGO_PKG_VERSION")),
+                            &fl!(l, "about-project-page"),
+                            env!("CARGO_PKG_REPOSITORY"),
+                        );
+                        ui.add_space(8.0);
+                    });
+                });
+            });
+    }
+
+    fn render_tray_group(&mut self, ui: &mut egui::Ui) {
         let lang = self.config.lang();
         let l = loader(lang);
-        // ── Tray display ──────────────────────────────────────────────────────
-        Self::section_header(ui, &fl!(l, "section-tray-display"));
-        // Bound to a local copy, not to `self.config`: `persist` adopts the
-        // saved config only when the write succeeds, so a failed save leaves
-        // `self.config` as it was and the next frame redraws the real value.
-        // Writing through `&mut self.config` instead left the window showing a
-        // setting that is not on disk, with nothing to correct it.
-        let mut display_mode = self.config.display_mode;
-        for mode in DisplayMode::ALL {
-            if ui
-                .radio_value(&mut display_mode, mode, mode.label(lang))
-                .changed()
-            {
-                // Persist immediately; the tray watches the file and re-renders.
-                self.persist(ui, move |target| target.display_mode = mode);
-            }
-        }
+        widgets::group(ui, &fl!(l, "group-tray"), None, |rows| {
+            rows.block(&fl!(l, "tray-icon-style"), |ui| self.render_style_tiles(ui));
 
-        ui.add_space(8.0);
-        let mut per_device = self.config.tray_mode == TrayMode::PerDevice;
-        if ui
-            .checkbox(&mut per_device, fl!(l, "tray-per-device"))
-            .changed()
-        {
-            let tray_mode = if per_device {
-                TrayMode::PerDevice
+            // Bound to a local copy, not to `self.config`: `persist` adopts
+            // the saved config only when the write succeeds, so a failed save
+            // leaves `self.config` as it was and the next frame redraws the
+            // real value.
+            let mut per_device = self.config.tray_mode == TrayMode::PerDevice;
+            let hint = if per_device {
+                fl!(l, "tray-per-device-hint")
             } else {
-                TrayMode::PrimaryOnly
+                aggregate_icon_hint(self.config.primary_device.as_deref(), lang)
             };
-            self.persist(ui, move |target| target.tray_mode = tray_mode);
-        }
-
-        let hint = if per_device {
-            fl!(l, "tray-per-device-hint")
-        } else {
-            aggregate_icon_hint(self.config.primary_device.as_deref(), lang)
-        };
-        // The pin is set from a device's row, so a pin naming a device the
-        // Devices tab has no row for — one retired before the inventory
-        // existed, or deleted since — would be unreachable without this.
-        // Clearing is the only action that needs no row, which is why it is
-        // the only one that lives here.
-        let pinned = !per_device && self.config.primary_device.is_some();
-        let mut clear_pin = false;
-        ui.indent("tray_device_picker", |ui| {
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new(hint).weak());
-                if pinned {
-                    clear_pin = ui.small_button(fl!(l, "button-clear")).clicked();
-                }
-            });
+            // The pin is set from a device's row, so a pin naming a device the
+            // Devices tab has no row for — one retired before the inventory
+            // existed, or deleted since — would be unreachable without this.
+            // Clearing is the only action that needs no row, which is why it
+            // is the only one that lives here.
+            let pinned = !per_device && self.config.primary_device.is_some();
+            let mut clear_pin = false;
+            let title = fl!(l, "tray-per-device");
+            let toggled = rows.row(
+                &title,
+                |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(widgets::secondary(ui, &hint));
+                        if pinned {
+                            clear_pin = ui.small_button(fl!(l, "button-clear")).clicked();
+                        }
+                    });
+                },
+                |ui| {
+                    widgets::switch(ui, switch_id("tray-per-device"), &mut per_device, &title)
+                        .changed()
+                },
+            );
+            if toggled {
+                let tray_mode = if per_device {
+                    TrayMode::PerDevice
+                } else {
+                    TrayMode::PrimaryOnly
+                };
+                self.persist(move |target| target.tray_mode = tray_mode);
+            }
+            if clear_pin {
+                self.persist(|target| target.primary_device = None);
+            }
         });
-        if clear_pin {
-            self.persist(ui, |target| target.primary_device = None);
-        }
+    }
 
-        // ── Battery ───────────────────────────────────────────────────────────
-        ui.add_space(16.0);
-        Self::section_header(ui, &fl!(l, "section-defaults"));
-
-        let mut threshold = self.config.low_threshold;
-        let resp = ui.add(
-            egui::Slider::new(&mut threshold, LOW_THRESHOLD_RANGE)
-                .text(fl!(l, "default-low-threshold"))
-                .suffix("%"),
-        );
-        if resp.drag_stopped() || resp.lost_focus() {
-            self.persist(ui, move |target| target.low_threshold = threshold);
-        }
-
-        let mut interval = self.config.poll_interval_secs;
-        let resp = ui
-            .add(
-                egui::Slider::new(&mut interval, POLL_INTERVAL_RANGE)
-                    .text(fl!(l, "default-poll-interval"))
-                    .suffix(fl!(l, "unit-seconds-suffix")),
-            )
-            .on_hover_text(fl!(l, "poll-interval-hint"));
-        if resp.drag_stopped() || resp.lost_focus() {
-            self.persist(ui, move |target| target.poll_interval_secs = interval);
-        }
-        ui.label(egui::RichText::new(fl!(l, "defaults-hint")).weak());
-
-        // ── Notifications ─────────────────────────────────────────────────────
-        ui.add_space(16.0);
-        Self::section_header(ui, &fl!(l, "section-notifications"));
-        // A local copy for the same reason as `display_mode` above.
-        let mut notifications_enabled = self.config.notifications_enabled;
-        if ui
-            .checkbox(&mut notifications_enabled, fl!(l, "notifications-enabled"))
-            .changed()
-        {
-            self.persist(ui, move |target| {
-                target.notifications_enabled = notifications_enabled;
-            });
-        }
-
-        // ── Startup ───────────────────────────────────────────────────────────
-        ui.add_space(16.0);
-        Self::section_header(ui, &fl!(l, "section-startup"));
-        if self.systemd_service_enabled {
-            ui.add_enabled_ui(false, |ui| {
-                ui.checkbox(&mut self.autostart_enabled, fl!(l, "autostart-enabled"));
-            });
-            ui.label(egui::RichText::new(fl!(l, "autostart-managed-by-systemd")).weak());
-        } else if ui
-            .checkbox(&mut self.autostart_enabled, fl!(l, "autostart-enabled"))
-            .changed()
-        {
-            match autostart::set_enabled(self.autostart_enabled) {
-                Ok(()) => {
-                    self.saved_at = Some(Instant::now());
-                    ui.ctx()
-                        .request_repaint_after(Duration::from_secs(SAVED_VISIBLE_SECS));
-                }
-                Err(e) => {
-                    tracing::warn!("failed to update autostart: {e}");
-                    // Revert the checkbox so it reflects the real filesystem state.
-                    self.autostart_enabled = !self.autostart_enabled;
+    /// One tile per `DisplayMode`, each showing the same made-up reading.
+    fn render_style_tiles(&mut self, ui: &mut egui::Ui) {
+        let lang = self.config.lang();
+        let current = self.config.display_mode;
+        let previews = self.style_previews(ui.ctx(), ui.visuals().dark_mode);
+        let width = widgets::tile_width(ui.available_width(), previews.len());
+        let mut chosen = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = widgets::TILE_GAP;
+            for (mode, texture) in &previews {
+                let caption = mode.label(lang);
+                let selected = *mode == current;
+                if widgets::tile(ui, width, selected, texture, STYLE_PREVIEW_SIZE, &caption)
+                    .clicked()
+                {
+                    chosen = Some(*mode);
                 }
             }
+        });
+        if let Some(mode) = chosen.filter(|&mode| mode != current) {
+            // The tray watches the file and re-renders.
+            self.persist(move |target| target.display_mode = mode);
         }
+    }
 
-        // ── Language ──────────────────────────────────────────────────────────
-        ui.add_space(16.0);
-        Self::section_header(ui, &fl!(l, "section-language"));
+    fn style_previews(
+        &mut self,
+        ctx: &egui::Context,
+        dark: bool,
+    ) -> Vec<(DisplayMode, egui::TextureHandle)> {
+        let pixels = ((STYLE_PREVIEW_SIZE * ctx.pixels_per_point()).round() as u32)
+            .min(STYLE_PREVIEW_MAX_PIXELS);
+        let fresh = self
+            .style_previews
+            .as_ref()
+            .is_some_and(|p| p.dark == dark && p.pixels == pixels);
+        if !fresh {
+            self.style_previews = Some(StylePreviews {
+                dark,
+                pixels,
+                textures: render_style_previews(ctx, dark, pixels),
+            });
+        }
+        self.style_previews
+            .as_ref()
+            .map(|p| p.textures.clone())
+            .unwrap_or_default()
+    }
+
+    fn render_battery_group(&mut self, ui: &mut egui::Ui) {
+        let lang = self.config.lang();
+        let l = loader(lang);
+        widgets::group(
+            ui,
+            &fl!(l, "group-battery"),
+            Some(&fl!(l, "defaults-hint")),
+            |rows| {
+                let mut threshold = self.config.low_threshold;
+                let resp = rows.row(&fl!(l, "default-low-threshold"), widgets::none, |ui| {
+                    widgets::trailing(ui, THRESHOLD_CONTROL_WIDTH, |ui| {
+                        ui.spacing_mut().slider_width = THRESHOLD_SLIDER_WIDTH;
+                        ui.add(egui::Slider::new(&mut threshold, LOW_THRESHOLD_RANGE).suffix("%"))
+                    })
+                });
+                if resp.drag_stopped() || resp.lost_focus() {
+                    self.persist(move |target| target.low_threshold = threshold);
+                }
+
+                let current = self.config.poll_interval_secs;
+                let mut interval = current;
+                let hint = fl!(l, "poll-interval-hint");
+                let changed = rows.row(
+                    &fl!(l, "default-poll-interval"),
+                    widgets::subtitle(&hint),
+                    |ui| {
+                        let mut changed = false;
+                        egui::ComboBox::from_id_salt("poll-interval")
+                            .selected_text(interval_label(current, lang))
+                            .show_ui(ui, |ui| {
+                                for secs in interval_choices(current) {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut interval,
+                                            secs,
+                                            interval_label(secs, lang),
+                                        )
+                                        .changed();
+                                }
+                            });
+                        changed
+                    },
+                );
+                if changed && interval != current {
+                    self.persist(move |target| target.poll_interval_secs = interval);
+                }
+
+                let mut notifications_enabled = self.config.notifications_enabled;
+                let title = fl!(l, "notifications-enabled");
+                let toggled = rows.row(&title, widgets::none, |ui| {
+                    widgets::switch(
+                        ui,
+                        switch_id("notifications-enabled"),
+                        &mut notifications_enabled,
+                        &title,
+                    )
+                    .changed()
+                });
+                if toggled {
+                    self.persist(move |target| {
+                        target.notifications_enabled = notifications_enabled;
+                    });
+                }
+            },
+        );
+    }
+
+    fn render_system_group(&mut self, ui: &mut egui::Ui) {
+        let l = loader(self.config.lang());
+        widgets::group(ui, &fl!(l, "group-system"), None, |rows| {
+            self.render_autostart_row(rows);
+            self.render_language_row(rows);
+        });
+    }
+
+    /// With `rigbat.service` enabled, a second launch path would start a
+    /// second tray, so the switch only reports that the service starts it.
+    fn render_autostart_row(&mut self, rows: &mut widgets::Rows<'_>) {
+        let l = loader(self.config.lang());
+        let title = fl!(l, "autostart-enabled");
+        let id = switch_id("autostart-enabled");
+        if self.systemd_service_enabled {
+            let how_to_disable = fl!(l, "autostart-systemd-disable");
+            let managed = fl!(l, "autostart-managed-by-systemd");
+            rows.row(
+                &title,
+                |ui| {
+                    ui.label(widgets::secondary(ui, &managed))
+                        .on_hover_text(&how_to_disable);
+                },
+                |ui| {
+                    ui.add_enabled_ui(false, |ui| {
+                        widgets::switch(ui, id, &mut true, &title)
+                            .on_disabled_hover_text(&how_to_disable);
+                    });
+                },
+            );
+            return;
+        }
+        let toggled = rows.row(&title, widgets::none, |ui| {
+            widgets::switch(ui, id, &mut self.autostart_enabled, &title).changed()
+        });
+        if toggled && let Err(e) = autostart::set_enabled(self.autostart_enabled) {
+            tracing::warn!("failed to update autostart: {e}");
+            // Revert the switch so it reflects the real filesystem state.
+            self.autostart_enabled = !self.autostart_enabled;
+        }
+    }
+
+    fn render_language_row(&mut self, rows: &mut widgets::Rows<'_>) {
+        let l = loader(self.config.lang());
         let mut choice = self.config.language.as_deref().and_then(Lang::from_tag);
         let system = format!(
             "{} ({})",
@@ -948,58 +1049,97 @@ impl SettingsApp {
             i18n::system().native_name()
         );
         let selected = choice.map_or_else(|| system.clone(), |lang| lang.native_name().to_owned());
-        let mut changed = false;
-        egui::ComboBox::from_id_salt("language")
-            .selected_text(selected)
-            .show_ui(ui, |ui| {
-                changed |= ui
-                    .selectable_value(&mut choice, None, system.as_str())
-                    .changed();
-                for lang in Lang::ALL {
+        let changed = rows.row(&fl!(l, "section-language"), widgets::none, |ui| {
+            let mut changed = false;
+            egui::ComboBox::from_id_salt("language")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
                     changed |= ui
-                        .selectable_value(&mut choice, Some(lang), lang.native_name())
+                        .selectable_value(&mut choice, None, system.as_str())
                         .changed();
-                }
-            });
+                    for lang in Lang::ALL {
+                        changed |= ui
+                            .selectable_value(&mut choice, Some(lang), lang.native_name())
+                            .changed();
+                    }
+                });
+            changed
+        });
         if changed {
-            self.persist(ui, move |target| {
+            self.persist(move |target| {
                 target.language = choice.map(|lang| lang.tag().to_owned());
             });
         }
-
-        // ── About ─────────────────────────────────────────────────────────────
-        ui.add_space(16.0);
-        Self::section_header(ui, &fl!(l, "section-about"));
-        ui.label(format!("rigbat {}", env!("CARGO_PKG_VERSION")));
-        ui.hyperlink_to(fl!(l, "about-project-page"), env!("CARGO_PKG_REPOSITORY"));
     }
+}
 
-    /// Status line + Close button, shared by both tabs (not just General's
-    /// scroll area): the Devices tab's override panel saves too, and Close
-    /// must stay reachable regardless of which tab is open.
-    fn render_status_bar(&mut self, ui: &mut egui::Ui) {
-        let l = loader(self.config.lang());
-        ui.add_space(8.0);
-        ui.separator();
+/// Global so a test can find the switch it clicks.
+fn switch_id(key: &str) -> egui::Id {
+    egui::Id::new(("settings-switch", key))
+}
 
-        ui.horizontal(|ui| {
-            // Show "Changes saved." for SAVED_VISIBLE_SECS after the last save.
-            let status = match self.saved_at {
-                Some(t) if t.elapsed() < Duration::from_secs(SAVED_VISIBLE_SECS) => {
-                    fl!(l, "status-saved")
-                }
-                _ => String::new(),
-            };
-            ui.weak(status);
+/// Tray icons for `STYLE_PREVIEW_STATUS` in every `DisplayMode`, in the
+/// `dark` or light theme, without a device-type corner glyph.
+fn render_style_previews(
+    ctx: &egui::Context,
+    dark: bool,
+    pixels: u32,
+) -> Vec<(DisplayMode, egui::TextureHandle)> {
+    let renderer = TinySkiaRenderer {
+        sizes: vec![pixels],
+    };
+    let theme = if dark { Theme::dark() } else { Theme::light() };
+    DisplayMode::ALL
+        .into_iter()
+        .filter_map(|mode| {
+            let icon = renderer
+                .render(STYLE_PREVIEW_STATUS, None, &theme, mode, false)
+                .into_iter()
+                .next()?;
+            let size = [
+                usize::try_from(icon.width).ok()?,
+                usize::try_from(icon.height).ok()?,
+            ];
+            let rgba: Vec<u8> = icon
+                .data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|&[a, r, g, b]| [r, g, b, a])
+                .collect();
+            let image = egui::ColorImage::from_rgba_premultiplied(size, &rgba);
+            let name = format!("style-preview-{mode:?}");
+            Some((
+                mode,
+                ctx.load_texture(name, image, egui::TextureOptions::LINEAR),
+            ))
+        })
+        .collect()
+}
 
-            // Push the Close button to the right.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(fl!(l, "button-close")).clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
-        });
+/// A poll interval as the General tab names it: whole hours, whole minutes,
+/// else seconds.
+fn interval_label(secs: u64, lang: Lang) -> String {
+    let l = loader(lang);
+    let (hours, minutes) = (secs / 3600, secs / 60);
+    if hours > 0 && secs.is_multiple_of(3600) {
+        fl!(l, "interval-hours", count = hours)
+    } else if minutes > 0 && secs.is_multiple_of(60) {
+        fl!(l, "interval-minutes", count = minutes)
+    } else {
+        fl!(l, "interval-seconds", count = secs)
     }
+}
+
+/// The presets, plus `current` when it is not one of them, so a value set
+/// by hand in `config.json` stays selectable instead of being replaced.
+fn interval_choices(current: u64) -> Vec<u64> {
+    let mut choices = POLL_INTERVAL_PRESETS.to_vec();
+    if !choices.contains(&current) {
+        choices.push(current);
+        choices.sort_unstable();
+    }
+    choices
 }
 
 /// Applies a device's desired threshold/interval override to `overrides`.
@@ -1160,8 +1300,8 @@ pub fn run() -> anyhow::Result<()> {
             gui::follow(rt.handle(), cc.egui_ctx.clone(), appearance);
             let mut app = SettingsApp {
                 config,
+                config_path: config::config_path(),
                 devices: Vec::new(),
-                saved_at: None,
                 autostart_enabled: autostart::is_enabled(),
                 systemd_service_enabled: autostart::systemd_service_enabled(),
                 rt,
@@ -1175,6 +1315,7 @@ pub fn run() -> anyhow::Result<()> {
                 device_sort: SortState::default(),
                 selected_device: None,
                 delete_state: DeleteState::default(),
+                style_previews: None,
             };
             app.spawn_scan(cc.egui_ctx.clone());
             Ok(Box::new(app))
@@ -1201,8 +1342,13 @@ mod tests {
     }
 
     use crate::egui_test::{
-        assert_single_lines_without_overlap, fully_painted_text_at, painted_text_at,
+        assert_no_overlap, assert_single_lines_without_overlap, click_at, fully_painted_text_at,
+        painted_text_at, run_frame,
     };
+
+    /// The narrowest the window gets, tall enough that the General tab's
+    /// column does not scroll: its rows are checked, not the scroll area.
+    const GENERAL_TAB_TEST_SIZE: [f32; 2] = [WINDOW_MIN_SIZE[0], 1000.0];
 
     fn painted_text(contents: impl FnMut(&mut egui::Ui)) -> Vec<String> {
         painted_text_at(WINDOW_DEFAULT_SIZE, contents)
@@ -1359,13 +1505,217 @@ mod tests {
             ..Config::default()
         });
 
-        let painted = painted_text(|ui| app.render_general_tab(ui));
+        let painted = painted_text_at(GENERAL_TAB_TEST_SIZE, |ui| app.render_general_tab(ui));
 
         assert!(
             painted.iter().any(|t| t == "Язык / Language"),
             "{painted:?}"
         );
         assert!(painted.iter().any(|t| t == "Русский"), "{painted:?}");
+    }
+
+    /// Every title and value on the tab, in both tray modes and with the
+    /// autostart switch both free and managed by systemd, painted whole on one
+    /// line and clear of every other string.
+    #[test]
+    fn general_tab_text_is_whole_on_one_line_in_every_language() {
+        for lang in Lang::ALL {
+            for per_device in [false, true] {
+                let mut app = settings_app_with(Config {
+                    language: Some(lang.tag().to_owned()),
+                    tray_mode: if per_device {
+                        TrayMode::PerDevice
+                    } else {
+                        TrayMode::PrimaryOnly
+                    },
+                    primary_device: Some("SteelSeries Aerox 5 Wireless".to_owned()),
+                    ..Config::default()
+                });
+                app.systemd_service_enabled = per_device;
+
+                let painted = fully_painted_text_at(GENERAL_TAB_TEST_SIZE, |ui| {
+                    app.render_tab_bar(ui);
+                    app.render_general_tab(ui);
+                });
+
+                let l = loader(lang);
+                let mut expected: Vec<String> = [
+                    "tab-general",
+                    "tab-devices",
+                    "group-tray",
+                    "tray-icon-style",
+                    "tray-per-device",
+                    "group-battery",
+                    "default-low-threshold",
+                    "default-poll-interval",
+                    "notifications-enabled",
+                    "group-system",
+                    "autostart-enabled",
+                    "section-language",
+                    "about-project-page",
+                ]
+                .into_iter()
+                .map(|id| l.get(id))
+                .collect();
+                expected.extend(DisplayMode::ALL.map(|mode| mode.label(lang)));
+                expected.extend(["20", "%"].map(str::to_owned));
+                expected.push(interval_label(Config::default().poll_interval_secs, lang));
+                expected.push(lang.native_name().to_owned());
+                expected.push(format!("rigbat {} ·", env!("CARGO_PKG_VERSION")));
+                expected.push(if per_device {
+                    l.get("autostart-managed-by-systemd")
+                } else {
+                    l.get("button-clear")
+                });
+                for text in &expected {
+                    let lines = painted.iter().find(|p| &p.text == text).map(|p| p.lines);
+                    assert_eq!(
+                        lines,
+                        Some(1),
+                        "{lang:?}: {text:?} is cut off, missing or wrapped: {painted:?}"
+                    );
+                }
+                assert_no_overlap(&painted);
+            }
+        }
+    }
+
+    #[test]
+    fn general_tab_column_is_centred_and_capped() {
+        let mut app = settings_app_with(Config::default());
+
+        let painted = fully_painted_text_at(GENERAL_TAB_TEST_SIZE, |ui| app.render_general_tab(ui));
+
+        let title = painted
+            .iter()
+            .find(|p| p.text == "Low battery threshold")
+            .expect("row title painted");
+        let value = painted
+            .iter()
+            .find(|p| p.text == "%")
+            .expect("slider value painted");
+        let margin = (GENERAL_TAB_TEST_SIZE[0] - widgets::CONTENT_MAX_WIDTH) / 2.0;
+        assert!(title.rect.left() > margin, "{:?}", title.rect);
+        assert!(
+            value.rect.right() < GENERAL_TAB_TEST_SIZE[0] - margin,
+            "{:?}",
+            value.rect
+        );
+    }
+
+    /// A fresh settings window over a scratch config file, so a click saves
+    /// somewhere other than `~/.config/rigbat/config.json`.
+    fn app_saving_to(test_name: &str, config: Config) -> (SettingsApp, PathBuf) {
+        let path = scratch_config_path(test_name);
+        config::save_to(&path, &config).unwrap();
+        let mut app = settings_app_with(config::load_from(&path));
+        app.config_path = Some(path.clone());
+        (app, path)
+    }
+
+    #[test]
+    fn clicking_the_per_device_switch_saves_the_tray_mode() {
+        let (mut app, path) = app_saving_to("per-device-switch", Config::default());
+        let ctx = egui::Context::default();
+        let size = GENERAL_TAB_TEST_SIZE;
+        run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
+        let switch = ctx
+            .read_response(switch_id("tray-per-device"))
+            .expect("the switch was laid out");
+
+        click_at(&ctx, size, switch.rect.center(), |ui| {
+            app.render_general_tab(ui)
+        });
+
+        assert_eq!(config::load_from(&path).tray_mode, TrayMode::PerDevice);
+        assert_eq!(app.config.tray_mode, TrayMode::PerDevice);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// Focus and Space are enough to flip a switch, and the switch reports
+    /// itself as a labelled checkbox to accessibility tools.
+    #[test]
+    fn a_switch_toggles_from_the_keyboard_and_carries_its_label() {
+        let (mut app, path) = app_saving_to("notifications-switch", Config::default());
+        let ctx = egui::Context::default();
+        let size = GENERAL_TAB_TEST_SIZE;
+        run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
+        ctx.memory_mut(|m| m.request_focus(switch_id("notifications-enabled")));
+        run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
+
+        let space = egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        let output = run_frame(&ctx, size, vec![space], |ui| app.render_general_tab(ui));
+
+        assert!(!config::load_from(&path).notifications_enabled);
+        let announced = output.platform_output.events.iter().any(|event| {
+            let info = event.widget_info();
+            info.typ == egui::WidgetType::Checkbox
+                && info.label.as_deref() == Some("Low battery notifications")
+                && info.selected == Some(false)
+        });
+        assert!(announced, "{:?}", output.platform_output.events);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn interval_labels_use_whole_units() {
+        let en: Vec<_> = [30, 45, 60, 90, 120, 900, 3600, 7200]
+            .map(|secs| interval_label(secs, Lang::En))
+            .into();
+        assert_eq!(
+            en,
+            [
+                "30 s", "45 s", "1 min", "90 s", "2 min", "15 min", "1 h", "2 h"
+            ]
+        );
+        assert_eq!(interval_label(300, Lang::Ru), "5 мин");
+        assert_eq!(interval_label(3600, Lang::Ru), "1 ч");
+    }
+
+    #[test]
+    fn interval_choices_are_the_presets_in_seconds() {
+        assert_eq!(
+            interval_choices(60),
+            [30, 60, 120, 300, 900, 1800, 3600].to_vec()
+        );
+    }
+
+    /// A value set by hand in `config.json` is offered as its own entry and
+    /// shown as the current one, not replaced by the nearest preset.
+    #[test]
+    fn an_interval_that_is_no_preset_survives() {
+        assert_eq!(
+            interval_choices(45),
+            [30, 45, 60, 120, 300, 900, 1800, 3600].to_vec()
+        );
+
+        let mut app = settings_app_with(Config {
+            poll_interval_secs: 45,
+            ..Config::default()
+        });
+        let painted = fully_painted_text_at(GENERAL_TAB_TEST_SIZE, |ui| app.render_general_tab(ui));
+
+        assert!(painted.iter().any(|p| p.text == "45 s"), "{painted:?}");
+        assert_eq!(app.config.poll_interval_secs, 45);
+    }
+
+    #[test]
+    fn style_previews_cover_every_display_mode() {
+        let ctx = egui::Context::default();
+
+        let previews = render_style_previews(&ctx, true, STYLE_PREVIEW_MAX_PIXELS);
+
+        let modes: Vec<_> = previews.iter().map(|(mode, _)| *mode).collect();
+        assert_eq!(modes, DisplayMode::ALL.to_vec());
+        for (mode, texture) in &previews {
+            assert_eq!(texture.size(), [64, 64], "{mode:?}");
+        }
     }
 
     /// The band under the table draws nothing at all until a row is selected
@@ -1405,8 +1755,8 @@ mod tests {
         config.language.get_or_insert_with(|| "en".to_owned());
         SettingsApp {
             config,
+            config_path: None,
             devices: Vec::new(),
-            saved_at: None,
             autostart_enabled: false,
             systemd_service_enabled: false,
             rt: Arc::new(
@@ -1424,6 +1774,7 @@ mod tests {
             device_sort: SortState::default(),
             selected_device: None,
             delete_state: DeleteState::default(),
+            style_previews: None,
         }
     }
 

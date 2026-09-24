@@ -43,42 +43,43 @@ notify-low-body = { $percent }% remaining
 
 tab-general = General
 tab-devices = Devices
-status-saved = Changes saved.
-button-close = Close
 button-refresh = Refresh
 button-refreshing = Refreshing…
 unit-seconds-suffix = { " " }s
 
 ## Settings window: General tab
 
-section-tray-display = Tray display
+group-tray = Tray
+tray-icon-style = Icon style
 display-icon-only = Battery icon only
 display-percent-only = Percentage as text
 display-percent-in-icon = Percentage inside icon
-tray-per-device = Show one icon per device
-tray-per-device-hint = Choose which devices get an icon on the Devices tab.
+tray-per-device = One icon per device
+tray-per-device-hint = Choose which on the Devices tab.
 tray-primary-hint-pinned = The single icon shows { $name }. Change it on the Devices tab.
 tray-primary-hint-auto = The single icon shows the first connected device. Pin one on the Devices tab.
 button-clear = Clear
 
-section-defaults = Defaults for all devices
+group-battery = Battery
 default-low-threshold = Low battery threshold
 default-poll-interval = Check every
-poll-interval-hint = Polling more often than this wakes the device constantly and drains its battery.
+poll-interval-hint = Checking more often drains the device's battery.
+interval-seconds = { $count } s
+interval-minutes = { $count } min
+interval-hours = { $count } h
 defaults-hint = Applies to every device that has no setting of its own. To change one device, select its row on the Devices tab.
 
-section-notifications = Notifications
 notifications-enabled = Low battery notifications
 
-section-startup = Startup
+group-system = System
 autostart-enabled = Start with session
-autostart-managed-by-systemd = Managed by the systemd user service. Disable it with: systemctl --user disable --now rigbat.service
+autostart-managed-by-systemd = Managed by rigbat.service
+autostart-systemd-disable = Disable it with: systemctl --user disable --now rigbat.service
 
 # Bilingual on purpose: findable whichever language is active.
 section-language = Language / Язык
 language-system = System
 
-section-about = About
 about-project-page = Project page
 
 ## Settings window: Devices tab

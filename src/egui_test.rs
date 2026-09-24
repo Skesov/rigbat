@@ -42,22 +42,51 @@ fn text_at(
     keep: impl Fn(egui::Rect, egui::Rect) -> bool,
 ) -> Vec<Painted> {
     let ctx = egui::Context::default();
-    let input = || egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(size[0], size[1]),
-        )),
-        ..Default::default()
-    };
     let mut painted = Vec::new();
     for _ in 0..2 {
-        let output = ctx.run_ui(input(), |ui| contents(ui));
+        let output = run_frame(&ctx, size, Vec::new(), &mut contents);
         painted.clear();
         for clipped in output.shapes {
             collect_text(&clipped.shape, clipped.clip_rect, &keep, &mut painted);
         }
     }
     painted
+}
+
+/// One frame of `contents` on a `size` screen, with `events` as its input.
+pub fn run_frame(
+    ctx: &egui::Context,
+    size: [f32; 2],
+    events: Vec<egui::Event>,
+    mut contents: impl FnMut(&mut egui::Ui),
+) -> egui::FullOutput {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(size[0], size[1]),
+        )),
+        events,
+        ..Default::default()
+    };
+    ctx.run_ui(input, |ui| contents(ui))
+}
+
+/// A primary-button click at `pos`: move, press, release, one frame each.
+pub fn click_at(
+    ctx: &egui::Context,
+    size: [f32; 2],
+    pos: egui::Pos2,
+    mut contents: impl FnMut(&mut egui::Ui),
+) {
+    let button = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::default(),
+    };
+    for event in [egui::Event::PointerMoved(pos), button(true), button(false)] {
+        run_frame(ctx, size, vec![event], &mut contents);
+    }
 }
 
 fn collect_text(
@@ -89,10 +118,15 @@ fn collect_text(
 
 /// Fails when a non-empty string wraps onto a second line or overlaps another.
 pub fn assert_single_lines_without_overlap(painted: &[Painted]) {
-    let labels: Vec<_> = painted.iter().filter(|p| !p.text.is_empty()).collect();
-    for p in &labels {
+    for p in painted.iter().filter(|p| !p.text.is_empty()) {
         assert_eq!(p.lines, 1, "{:?} wraps onto a second line", p.text);
     }
+    assert_no_overlap(painted);
+}
+
+/// Fails when two non-empty strings overlap.
+pub fn assert_no_overlap(painted: &[Painted]) {
+    let labels: Vec<_> = painted.iter().filter(|p| !p.text.is_empty()).collect();
     for (i, a) in labels.iter().enumerate() {
         for b in &labels[i + 1..] {
             let overlap = a.rect.intersect(b.rect);
