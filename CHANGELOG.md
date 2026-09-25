@@ -1,0 +1,115 @@
+# Changelog
+
+## [0.2.0](https://github.com/Skesov/rigbat/compare/v0.1.0...v0.2.0) (2026-09-25)
+
+
+### Features
+
+* adapt icon color to light/dark theme via xdg-portal ([0a4510f](https://github.com/Skesov/rigbat/commit/0a4510f91b899975882f108cf014593a3c273ec3))
+* add backend registry, discovery layer and BlueZ source ([528ff72](https://github.com/Skesov/rigbat/commit/528ff72139c9303803e7987fe6602cabeccd0367))
+* add CLI battery readout via sysfs source ([c95754c](https://github.com/Skesov/rigbat/commit/c95754c4b22f329ecc5e96773f412c9438ba9e78))
+* add config layer with XDG persistence ([2a6d47b](https://github.com/Skesov/rigbat/commit/2a6d47b6c7d26e939858347eb4a462862b47b473))
+* add left-click settings menu with display mode selection ([2254d8c](https://github.com/Skesov/rigbat/commit/2254d8c84d04df6c230fc72120ea0ba6b933450f))
+* add percent display modes to icon renderer ([61cf4c1](https://github.com/Skesov/rigbat/commit/61cf4c10c504b5fa35f1778dd2058d311dc14ad5))
+* add SNI tray mode with battery icon rendering ([dbd845c](https://github.com/Skesov/rigbat/commit/dbd845c3a3c169052e8e36f23a2aeac2a91d9052))
+* add SteelSeries HID source via hidraw (device-table backend) ([d45ed27](https://github.com/Skesov/rigbat/commit/d45ed27f5a71a5de0058b24e9e9285adba889e1d))
+* **cli:** add --wide flag with device transport and locator ([8dc9b05](https://github.com/Skesov/rigbat/commit/8dc9b053b74f18463fa25955600660f9a8c370e4))
+* **cli:** stream waybar output from a live supervisor ([2b4f203](https://github.com/Skesov/rigbat/commit/2b4f203f09d48221f382681997772a9cc4e14b16))
+* **config:** watch config.json for external changes ([b5d9004](https://github.com/Skesov/rigbat/commit/b5d900420fb923d151c2ffbb414f95f9f3cd5a52))
+* **dashboard:** open a device overview on the tray icon's left click ([f598652](https://github.com/Skesov/rigbat/commit/f598652afc40c28d3ad0ff7664dd5b829d9f4e9a))
+* detect device kind from name for menu glyphs ([bff8078](https://github.com/Skesov/rigbat/commit/bff8078eb1c026ef1005aa3507c8f9de07f8e369))
+* device inventory, reworked settings window, and a review pass ([90b6749](https://github.com/Skesov/rigbat/commit/90b6749d190e2d33e0a96bfa82d7e0781f7c61df))
+* device presence, waybar output, time estimate, reliability hardening ([d00d155](https://github.com/Skesov/rigbat/commit/d00d155c163b915712611b61dd539e1929a1a65f))
+* **discovery:** share one system-bus connection and rescan settings live ([6f6671d](https://github.com/Skesov/rigbat/commit/6f6671d069da4781353ef8bda3a74a273b07632c))
+* **i18n:** switch the UI between English and Russian ([08062cc](https://github.com/Skesov/rigbat/commit/08062ccf73c8882dd6f25b2f399fb2bf6db098c8))
+* **notifications:** log low-battery alerts instead of leaving no trace ([11579b2](https://github.com/Skesov/rigbat/commit/11579b26f2cebafcce249f646fed01d669014963))
+* **notifications:** low-battery desktop notifications ([11a8708](https://github.com/Skesov/rigbat/commit/11a87089a40f34d079ebbf582cf5041d38860fa1))
+* **packaging:** udev rules, desktop entry, icon, systemd hardening ([36e470a](https://github.com/Skesov/rigbat/commit/36e470a4182b2cbc31394eda13d4ca6237fc1e21))
+* re-poll all sources on resume from sleep via logind ([1dd1d6a](https://github.com/Skesov/rigbat/commit/1dd1d6adcafa2eb911c92b27cd48a196bafefe11))
+* rigbat doctor, no-access status, compact dashboard, hardening ([ae68a25](https://github.com/Skesov/rigbat/commit/ae68a2506e5111ccea6203ad3acba5ae34ca795d))
+* **settings:** add cross-DE settings window (egui) ([b78e070](https://github.com/Skesov/rigbat/commit/b78e070f5ab46561ee8f0313577115e225213bb5))
+* **settings:** add Startup autostart toggle ([3f5742c](https://github.com/Skesov/rigbat/commit/3f5742cf12c36e5cf6ac94f91f311c8c6caad272))
+* **settings:** Devices tab as expander rows in the General style ([a289865](https://github.com/Skesov/rigbat/commit/a289865822ff5195b1835a958eb20d05d4cd8855))
+* **settings:** lay the General tab out as grouped preference rows ([62e8e92](https://github.com/Skesov/rigbat/commit/62e8e92ea0548c051287d679df816d3fa8fa8d5e))
+* **settings:** make Notifications toggle functional ([74d9393](https://github.com/Skesov/rigbat/commit/74d9393dc12b10b7155478df9b2c2be9775902e9))
+* **settings:** make Visible devices section functional ([e697f96](https://github.com/Skesov/rigbat/commit/e697f965ea64699b7850fd0db16d6290476cddbd))
+* **settings:** nest device picker under per-device toggle ([1d00912](https://github.com/Skesov/rigbat/commit/1d00912136aff5e3fa22a234f4f9681fd81ad690))
+* **settings:** redesign window to sectioned layout ([5c87fd3](https://github.com/Skesov/rigbat/commit/5c87fd377f602ff7ef87b284994911234e92039b))
+* **sources:** read the 8BitDo Ultimate 2 Wireless battery ([fe63e35](https://github.com/Skesov/rigbat/commit/fe63e355baf1e33a3595c72cf6dc232658124138))
+* stable device identity, settings polish, and a modularity pass ([8dbe423](https://github.com/Skesov/rigbat/commit/8dbe423d369378e6cfce5cb5ca69a05e9d198f21))
+* switchable colour palettes with one set of status colours ([cef18dc](https://github.com/Skesov/rigbat/commit/cef18dcbbfadc8f699983301d2ca1a31387c4846))
+* **tray:** add Refresh menu item for instant device sync ([4276c3a](https://github.com/Skesov/rigbat/commit/4276c3a799d13e59abbc05d585a6a60db9f25509))
+* **tray:** corner glyph, per-device thresholds, hotplug rediscovery ([7ac7cf4](https://github.com/Skesov/rigbat/commit/7ac7cf42ad7ac9415117a3a2d5011183413cfc40))
+* **tray:** dim a remembered charge instead of blanking the icon ([e8486a6](https://github.com/Skesov/rigbat/commit/e8486a6a4d14c79ddbec9dd7d5fb743a1bedb4ff))
+* **tray:** one tray icon per device via TrayManager (U4b) ([67ba055](https://github.com/Skesov/rigbat/commit/67ba0550097f7a8fb3f7289caf0e156e7d3581eb))
+* **tray:** pick the featured device from the right-click menu ([a83175d](https://github.com/Skesov/rigbat/commit/a83175da5a0adc61bf387524be4ac8bd99c32a99))
+* **tray:** pick the tray device by clicking it in the menu ([298a36a](https://github.com/Skesov/rigbat/commit/298a36ae0afdca09fc0bf95d0872685485f13738))
+* **tray:** replace display submenu with Settings… launcher ([f9d755f](https://github.com/Skesov/rigbat/commit/f9d755f03d09599cfcfc6d053ea4adf5becda1c2))
+* **tray:** single-icon default via tray_mode + full-roster menu ([0995b4f](https://github.com/Skesov/rigbat/commit/0995b4f584323568e64a44310598a1d0959d3bbc))
+
+
+### Bug Fixes
+
+* **appearance:** idempotent theme watch to stop tray CPU spin ([0afe718](https://github.com/Skesov/rigbat/commit/0afe718342784c22317f4b26e7cec3090cfd7dba))
+* **app:** keep the discovery sweep on schedule; write the store on change ([e6d4cc6](https://github.com/Skesov/rigbat/commit/e6d4cc6a029529534fecc8487f53639b458fbcd3))
+* **app:** log poll failures instead of discarding them ([9a52e9c](https://github.com/Skesov/rigbat/commit/9a52e9c2305e5bac176922bdb3b2a0e17509758b))
+* apply display mode change to icon live via watch channel ([b2d8931](https://github.com/Skesov/rigbat/commit/b2d8931e1b43dd5efca8a647ec2b3d852063bab4))
+* **cli:** stop a mode flag from overriding the subcommand ([fa650d6](https://github.com/Skesov/rigbat/commit/fa650d6f187b8f6c1747fde4b15a927568a69940))
+* **cli:** wait for the featured device, not for every shown one ([d9e8a75](https://github.com/Skesov/rigbat/commit/d9e8a751d3fdc14db97269e2090f087d4c4c0ee1))
+* **config:** clamp the low-battery threshold to the percent range ([72fc41c](https://github.com/Skesov/rigbat/commit/72fc41c0d4d84545e64c53ed1ae805e005c69566))
+* **config:** ignore Access events in watch_file to stop inotify feedback loop ([1244b7c](https://github.com/Skesov/rigbat/commit/1244b7ce0b85a68345ee3187708285d293f553d3))
+* **domain:** estimate from step edges on a clock that counts suspend ([76d1dfc](https://github.com/Skesov/rigbat/commit/76d1dfc86bb6efbc9616712546d8c7827c9fdd00))
+* **domain:** match device category words before product lines ([094dc11](https://github.com/Skesov/rigbat/commit/094dc1180e7c70dcad8a82f84c4392a40f23817f))
+* findings from the five-way Rust review ([e60fb6e](https://github.com/Skesov/rigbat/commit/e60fb6e617e8fa2a7ab92eb82c4f68b6e35d3c27))
+* notification hysteresis, lowest-charge icon, recover from dead links ([32024c4](https://github.com/Skesov/rigbat/commit/32024c45fd7b7f14a50782599ddefe24ab563c95))
+* **notifications:** key low-battery streaks by device identity ([cffbc45](https://github.com/Skesov/rigbat/commit/cffbc45df65712425ac8e1f43d3133a08dcdd6b8))
+* **notifications:** require two confirmed readings before a low alert ([94348f8](https://github.com/Skesov/rigbat/commit/94348f8c3b87250bf29552934135f6e2004e6a37))
+* **packaging:** honour CARGO_HOME and the XDG base directories ([41051a8](https://github.com/Skesov/rigbat/commit/41051a857b46a0381570cd9c2398609bc390895c))
+* render tray icon at full slot size with battery nub, disable AA to avoid tiny-skia panic ([d805ca3](https://github.com/Skesov/rigbat/commit/d805ca30a0d544a1052822cc74ca4bbe739fa86a))
+* **settings:** raise the minimum window size to what the table needs ([2edae4f](https://github.com/Skesov/rigbat/commit/2edae4f118d232e8646ad2cabf666b7e1201750d))
+* **settings:** show the device name, and move its settings under the table ([ad135d8](https://github.com/Skesov/rigbat/commit/ad135d8f2135b57e5a81a61930d695adc2041d98))
+* **settings:** type the float literal rustc 1.98 no longer infers ([61e572a](https://github.com/Skesov/rigbat/commit/61e572aff3d7e7373b890c9ad410f0b65b0af8ac))
+* **settings:** type the switch stroke width rustc 1.98 no longer infers ([0e374fd](https://github.com/Skesov/rigbat/commit/0e374fdd1c795fc04c9d23f48d6aa821c4816824))
+* **sources:** stop draining when the dongle reports no device ([9611218](https://github.com/Skesov/rigbat/commit/961121844337d7714a9808c3219ce75d37823e1f))
+* **sources:** write the full-size hidraw output report ([619f75c](https://github.com/Skesov/rigbat/commit/619f75c59db7b56f29aa9945a2220d49788a2f0c))
+* **tray:** drop the icon of a device that has nothing left to report ([718e84b](https://github.com/Skesov/rigbat/commit/718e84b6cd9d86a08775320956110e6914b5521e))
+* **tray:** keep the device-kind glyph from erasing a digit ([051388e](https://github.com/Skesov/rigbat/commit/051388edad2171d4322fe0cbe1182d1aded858e1))
+* **tray:** never show a retained charge state as if it were live ([9b6f0bc](https://github.com/Skesov/rigbat/commit/9b6f0bc21cb7f43c276a1776c9fc84fb78ef8f52))
+* **tray:** reap the settings process, drop the inert menu control ([5f00704](https://github.com/Skesov/rigbat/commit/5f00704093f4e220f79ae3859147c347a7b76919))
+* **tray:** refuse to start a second tray instance ([14ed1a4](https://github.com/Skesov/rigbat/commit/14ed1a4df936105f414339573c59bf8ee9a24939))
+* use plain menu items for mode selection, drop broken beside mode, rename to Show as ([2e46113](https://github.com/Skesov/rigbat/commit/2e4611312ae1a75a339f40acc42a247fd8001edb))
+
+
+### Performance
+
+* **tray:** update only what changed; BlueZ pushes one device's percent ([46e854d](https://github.com/Skesov/rigbat/commit/46e854d0047313317843808f69e0d116125e963c))
+
+
+### Refactoring
+
+* **domain:** one roster policy for tray, waybar, CLI and dashboard ([6400ac4](https://github.com/Skesov/rigbat/commit/6400ac4b5817f526de56d7d3399855afc445051b))
+* drop module-wide dead_code allows, tray reads config via Receiver ([ae67afb](https://github.com/Skesov/rigbat/commit/ae67afb9267e95bcafc9cfa0194f16331393ac7f))
+* **lints:** deny #[allow] so a suppression has to expire ([a405319](https://github.com/Skesov/rigbat/commit/a4053193c61535f07df82f9adcb33706958b7243))
+* point every dependency inward and test that it stays so ([6d195b2](https://github.com/Skesov/rigbat/commit/6d195b2da4a7b3967a767f4fae59e2d52572f32e))
+* **sources:** share hidraw discovery; check USB ids against the udev rule ([240a6e3](https://github.com/Skesov/rigbat/commit/240a6e31794a998a0bc26d04b3a78926aaa2fdc4))
+* split oversized modules and test the untested loops ([8e07b14](https://github.com/Skesov/rigbat/commit/8e07b1434f199de373edb0b232bfe51263460ba0))
+* **state:** settings reads the tray's roster; store runs on its own thread ([d0c1368](https://github.com/Skesov/rigbat/commit/d0c136830b029824bf6d45507c418060b6695230))
+
+
+### Documentation
+
+* add contributor guide for new device support ([aefa9c1](https://github.com/Skesov/rigbat/commit/aefa9c1109cac5a8bf1e9c0b73c035729f5280b1))
+* add the files a public repository needs ([183509e](https://github.com/Skesov/rigbat/commit/183509e987be810aa5578fcb0fa122982f4f2213))
+* add the UI design document ([1ae7da4](https://github.com/Skesov/rigbat/commit/1ae7da43ffd3201463caaecc20415a2001480f94))
+* bring the documentation in line with the code ([5c3f2b6](https://github.com/Skesov/rigbat/commit/5c3f2b62d5e852fd41bf33a0f511889d12119fd8))
+* clarify DE compatibility, add architecture and dev workflow ([5cd8888](https://github.com/Skesov/rigbat/commit/5cd8888ef33c63b41dae03297aada98b1d7c0108))
+* correct the ignored-test list and the settings module tree ([b4c48e2](https://github.com/Skesov/rigbat/commit/b4c48e206480bc3fad41f2fdd124880a219333ec))
+* describe both tray modes and the streaming waybar module ([06ccd3c](https://github.com/Skesov/rigbat/commit/06ccd3c1fb418d7b2189e9b3055c28235c2480d6))
+* dual-license under MIT OR Apache-2.0 ([d1efa18](https://github.com/Skesov/rigbat/commit/d1efa182d31d1975b16975b90da37ecd54619c1d))
+* initial README ([baaefb3](https://github.com/Skesov/rigbat/commit/baaefb34b99fa423f4ce727972b3aaa458f7d8bc))
+* present rigbat as Rust-native, drop port framing ([efaf3ec](https://github.com/Skesov/rigbat/commit/efaf3ece09845bb88472cc4f40efe009b6d2bdb6))
+* resync project documents with the code ([dcd084b](https://github.com/Skesov/rigbat/commit/dcd084b56bc113c72e725df6e36f576968dc88d4))
+* split CLAUDE.md, move private workbench index to local ([76cd173](https://github.com/Skesov/rigbat/commit/76cd17399e1eb16bb5eaf938cd6f5708b50fb59a))
+* translate code comments and CLAUDE.md to English ([8040a23](https://github.com/Skesov/rigbat/commit/8040a23d1f0946dc57d31f8e9bad80e9106fb1e4))
+* update CLAUDE.md for M1 completion and run modes ([02a7ad4](https://github.com/Skesov/rigbat/commit/02a7ad46f06b28b5d3ba429ba3576fa8db8a97a4))
+* update CLAUDE.md with current state and platform gotchas ([603326f](https://github.com/Skesov/rigbat/commit/603326f4b515c9ea529c4f76ac4c296d6473a8ac))
