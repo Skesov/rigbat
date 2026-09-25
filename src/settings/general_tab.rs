@@ -1,10 +1,12 @@
 use eframe::egui;
 
 use super::{LOW_THRESHOLD_RANGE, SettingsApp, widgets};
+use crate::appearance::ColorScheme;
 use crate::autostart;
-use crate::domain::{DisplayMode, PrimaryStatus, TrayMode};
+use crate::domain::{DisplayMode, Palette, PrimaryStatus, TrayMode};
 use crate::i18n::{self, Lang, fl, loader};
 use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
+use crate::palette::{self, Rgb, Swatches};
 
 /// Every poll-interval choice, default and per device, seconds.
 const POLL_INTERVAL_PRESETS: [u64; 7] = [30, 60, 120, 300, 900, 1800, 3600];
@@ -15,6 +17,13 @@ const STYLE_PREVIEW_SIZE: f32 = 32.0;
 /// The largest icon `TinySkiaRenderer` is drawn for.
 const STYLE_PREVIEW_MAX_PIXELS: u32 = 64;
 
+/// Edge of a palette's swatch picture, points and image pixels.
+const SWATCH_PREVIEW_SIZE: f32 = 32.0;
+const SWATCH_PIXELS: usize = 16;
+/// A 2 × 2 grid of cells, `SWATCH_GAP` of background around and between them.
+const SWATCH_CELL: usize = 5;
+const SWATCH_GAP: usize = 2;
+
 /// The one reading every icon-style preview shows.
 const STYLE_PREVIEW_STATUS: PrimaryStatus = PrimaryStatus::Ok { percent: 72 };
 
@@ -22,11 +31,18 @@ const STYLE_PREVIEW_STATUS: PrimaryStatus = PrimaryStatus::Ok { percent: 72 };
 const THRESHOLD_CONTROL_WIDTH: f32 = 240.0;
 const THRESHOLD_SLIDER_WIDTH: f32 = 180.0;
 
-/// The icon-style tiles' pictures, rendered once per theme and pixel density.
+/// The icon-style tiles' pictures, rendered once per scheme, palette and pixel density.
 pub(super) struct StylePreviews {
     dark: bool,
+    palette: Palette,
     pixels: u32,
     textures: Vec<(DisplayMode, egui::TextureHandle)>,
+}
+
+/// The palette tiles' pictures, rendered once per scheme.
+pub(super) struct PaletteSwatches {
+    dark: bool,
+    textures: Vec<(Palette, egui::TextureHandle)>,
 }
 
 impl SettingsApp {
@@ -34,6 +50,7 @@ impl SettingsApp {
     pub(super) fn render_general_tab(&mut self, ui: &mut egui::Ui) {
         widgets::page(ui, "general-tab", |ui| {
             self.render_tray_group(ui);
+            self.render_appearance_group(ui);
             self.render_battery_group(ui);
             self.render_system_group(ui);
             let l = loader(self.config.lang());
@@ -131,18 +148,75 @@ impl SettingsApp {
     ) -> Vec<(DisplayMode, egui::TextureHandle)> {
         let pixels = ((STYLE_PREVIEW_SIZE * ctx.pixels_per_point()).round() as u32)
             .min(STYLE_PREVIEW_MAX_PIXELS);
+        let palette = self.config.palette;
         let fresh = self
             .style_previews
             .as_ref()
-            .is_some_and(|p| p.dark == dark && p.pixels == pixels);
+            .is_some_and(|p| p.dark == dark && p.palette == palette && p.pixels == pixels);
         if !fresh {
             self.style_previews = Some(StylePreviews {
                 dark,
+                palette,
                 pixels,
-                textures: render_style_previews(ctx, dark, pixels),
+                textures: render_style_previews(ctx, scheme(dark), palette, pixels),
             });
         }
         self.style_previews
+            .as_ref()
+            .map(|p| p.textures.clone())
+            .unwrap_or_default()
+    }
+
+    fn render_appearance_group(&mut self, ui: &mut egui::Ui) {
+        let l = loader(self.config.lang());
+        let hint = fl!(l, "appearance-palette-hint");
+        widgets::group(ui, &fl!(l, "group-appearance"), Some(&hint), |rows| {
+            rows.block(&fl!(l, "appearance-palette"), |ui| {
+                self.render_palette_tiles(ui);
+            });
+        });
+    }
+
+    /// One tile per `Palette`, each showing its colours on its own background.
+    fn render_palette_tiles(&mut self, ui: &mut egui::Ui) {
+        let lang = self.config.lang();
+        let current = self.config.palette;
+        let swatches = self.palette_swatches(ui.ctx(), ui.visuals().dark_mode);
+        let width = widgets::tile_width(ui.available_width(), swatches.len());
+        let mut chosen = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = widgets::TILE_GAP;
+            for (palette, texture) in &swatches {
+                let caption = palette.label(lang);
+                let selected = *palette == current;
+                if widgets::tile(ui, width, selected, texture, SWATCH_PREVIEW_SIZE, &caption)
+                    .clicked()
+                {
+                    chosen = Some(*palette);
+                }
+            }
+        });
+        if let Some(palette) = chosen.filter(|&palette| palette != current) {
+            self.persist(move |target| target.palette = palette);
+        }
+    }
+
+    fn palette_swatches(
+        &mut self,
+        ctx: &egui::Context,
+        dark: bool,
+    ) -> Vec<(Palette, egui::TextureHandle)> {
+        if self
+            .palette_swatches
+            .as_ref()
+            .is_none_or(|p| p.dark != dark)
+        {
+            self.palette_swatches = Some(PaletteSwatches {
+                dark,
+                textures: render_palette_swatches(ctx, scheme(dark)),
+            });
+        }
+        self.palette_swatches
             .as_ref()
             .map(|p| p.textures.clone())
             .unwrap_or_default()
@@ -301,17 +375,26 @@ fn switch_id(key: &str) -> egui::Id {
     egui::Id::new(("settings-switch", key))
 }
 
+fn scheme(dark: bool) -> ColorScheme {
+    if dark {
+        ColorScheme::Dark
+    } else {
+        ColorScheme::Light
+    }
+}
+
 /// Tray icons for `STYLE_PREVIEW_STATUS` in every `DisplayMode`, in the
-/// `dark` or light theme, without a device-type corner glyph.
+/// palette's colours, without a device-type corner glyph.
 fn render_style_previews(
     ctx: &egui::Context,
-    dark: bool,
+    scheme: ColorScheme,
+    palette: Palette,
     pixels: u32,
 ) -> Vec<(DisplayMode, egui::TextureHandle)> {
     let renderer = TinySkiaRenderer {
         sizes: vec![pixels],
     };
-    let theme = if dark { Theme::dark() } else { Theme::light() };
+    let theme = Theme::new(palette, scheme);
     DisplayMode::ALL
         .into_iter()
         .filter_map(|mode| {
@@ -338,6 +421,45 @@ fn render_style_previews(
             ))
         })
         .collect()
+}
+
+/// Every palette's swatch picture for `scheme`.
+fn render_palette_swatches(
+    ctx: &egui::Context,
+    scheme: ColorScheme,
+) -> Vec<(Palette, egui::TextureHandle)> {
+    Palette::ALL
+        .into_iter()
+        .map(|palette| {
+            let image = swatch_image(&palette::swatches(palette, scheme));
+            let name = format!("palette-swatch-{palette:?}");
+            let texture = ctx.load_texture(name, image, egui::TextureOptions::NEAREST);
+            (palette, texture)
+        })
+        .collect()
+}
+
+/// The foreground, charging, warning and low colours as a 2 × 2 grid on the background.
+fn swatch_image(s: &Swatches) -> egui::ColorImage {
+    let color = |[r, g, b]: Rgb| egui::Color32::from_rgb(r, g, b);
+    let cells = [s.fg, s.charging, s.warn, s.low];
+    let cell = |v: usize| {
+        (0..2).find(|i| {
+            let start = SWATCH_GAP + i * (SWATCH_CELL + SWATCH_GAP);
+            (start..start + SWATCH_CELL).contains(&v)
+        })
+    };
+    let pixels = (0..SWATCH_PIXELS * SWATCH_PIXELS)
+        .map(
+            |i| match (cell(i / SWATCH_PIXELS), cell(i % SWATCH_PIXELS)) {
+                (Some(row), Some(col)) => {
+                    cells.get(row * 2 + col).copied().map_or(color(s.bg), color)
+                }
+                _ => color(s.bg),
+            },
+        )
+        .collect();
+    egui::ColorImage::new([SWATCH_PIXELS, SWATCH_PIXELS], pixels)
 }
 
 /// A poll interval as the General tab names it: whole hours, whole minutes,
@@ -437,6 +559,8 @@ mod tests {
                     "group-tray",
                     "tray-icon-style",
                     "tray-per-device",
+                    "group-appearance",
+                    "appearance-palette",
                     "group-battery",
                     "default-low-threshold",
                     "default-poll-interval",
@@ -450,6 +574,7 @@ mod tests {
                 .map(|id| l.get(id))
                 .collect();
                 expected.extend(DisplayMode::ALL.map(|mode| mode.label(lang)));
+                expected.extend(Palette::ALL.map(|palette| palette.label(lang)));
                 expected.extend(["20", "%"].map(str::to_owned));
                 expected.push(interval_label(Config::default().poll_interval_secs, lang));
                 expected.push(lang.native_name().to_owned());
@@ -467,9 +592,55 @@ mod tests {
                         "{lang:?}: {text:?} is cut off, missing or wrapped: {painted:?}"
                     );
                 }
+                let hint = l.get("appearance-palette-hint");
+                assert!(
+                    painted.iter().any(|p| p.text == hint),
+                    "{lang:?}: the palette hint is cut off or missing: {painted:?}"
+                );
                 assert_no_overlap(&painted);
             }
         }
+    }
+
+    #[test]
+    fn clicking_a_palette_tile_saves_the_palette_and_restyles_the_previews() {
+        let (mut app, path) = app_saving_to("palette-tile", Config::default());
+        let size = GENERAL_TAB_TEST_SIZE;
+        let nord = fully_painted_text_at(size, |ui| app.render_general_tab(ui))
+            .into_iter()
+            .find(|p| p.text == "Nord")
+            .expect("the Nord tile is painted");
+        let ctx = egui::Context::default();
+        run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
+
+        click_at(&ctx, size, nord.rect.center(), |ui| {
+            app.render_general_tab(ui)
+        });
+
+        assert_eq!(config::load_from(&path).palette, Palette::Nord);
+        assert_eq!(app.config.palette, Palette::Nord);
+        run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
+        assert_eq!(
+            app.style_previews.as_ref().map(|p| p.palette),
+            Some(Palette::Nord),
+            "the icon-style tiles are drawn in the new palette"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_swatch_shows_four_colours_on_the_palette_background() {
+        let s = palette::swatches(Palette::Catppuccin, ColorScheme::Dark);
+        let image = swatch_image(&s);
+        let at = |x: usize, y: usize| image.pixels[y * SWATCH_PIXELS + x];
+        let color = |[r, g, b]: Rgb| egui::Color32::from_rgb(r, g, b);
+        let (near, far) = (SWATCH_GAP, SWATCH_PIXELS - SWATCH_GAP - 1);
+        assert_eq!(at(0, 0), color(s.bg));
+        assert_eq!(at(SWATCH_PIXELS / 2, SWATCH_PIXELS / 2), color(s.bg));
+        assert_eq!(at(near, near), color(s.fg));
+        assert_eq!(at(far, near), color(s.charging));
+        assert_eq!(at(near, far), color(s.warn));
+        assert_eq!(at(far, far), color(s.low));
     }
 
     #[test]
@@ -591,7 +762,12 @@ mod tests {
     fn style_previews_cover_every_display_mode() {
         let ctx = egui::Context::default();
 
-        let previews = render_style_previews(&ctx, true, STYLE_PREVIEW_MAX_PIXELS);
+        let previews = render_style_previews(
+            &ctx,
+            ColorScheme::Dark,
+            Palette::default(),
+            STYLE_PREVIEW_MAX_PIXELS,
+        );
 
         let modes: Vec<_> = previews.iter().map(|(mode, _)| *mode).collect();
         assert_eq!(modes, DisplayMode::ALL.to_vec());

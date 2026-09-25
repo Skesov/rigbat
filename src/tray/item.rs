@@ -119,10 +119,7 @@ impl View {
                 .as_ref()
                 .map_or(PrimaryStatus::Offline, |r| r.status),
             kind: resolved.as_ref().map(|r| r.state.info.kind),
-            theme: match scheme {
-                ColorScheme::Dark => Theme::dark(),
-                ColorScheme::Light => Theme::light(),
-            },
+            theme: Theme::new(cfg.palette, scheme),
             mode: cfg.display_mode,
             stale: resolved.as_ref().is_some_and(|r| r.stale),
         };
@@ -313,7 +310,7 @@ mod tests {
     use crate::config::Config;
     use crate::domain::{
         BatteryReading, BootTime, ChargeState, DeviceId, DeviceInfo, DeviceKind, DeviceState,
-        Presence, Transport, TrayMode, TrayState,
+        Palette, Presence, Transport, TrayMode, TrayState,
     };
     use crate::refresh::RefreshSignal;
     use crate::tray::fixtures::{
@@ -597,6 +594,25 @@ mod tests {
             let tray = tray_with(None, make_state(vec![]), cfg, saved);
             assert_eq!(describe(&tray), with_tail(&["(disabled) No devices"]));
         }
+    }
+
+    #[test]
+    fn the_icon_key_follows_the_palette() {
+        let state = every_row_shape();
+        let key = |palette| {
+            let cfg = Config {
+                palette,
+                ..Config::default()
+            };
+            tray_with(None, state.clone(), cfg, saved).view.icon
+        };
+        let catppuccin = key(Palette::Catppuccin);
+        let nord = key(Palette::Nord);
+        assert_ne!(catppuccin, nord);
+        assert_eq!(
+            catppuccin.theme,
+            crate::icon::Theme::new(Palette::Catppuccin, ColorScheme::Dark)
+        );
     }
 
     #[test]

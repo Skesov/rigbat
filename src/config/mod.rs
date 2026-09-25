@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{DisplayMode, TrayMode};
+use crate::domain::{DisplayMode, Palette, TrayMode};
 use crate::i18n::{self, Lang};
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
@@ -56,6 +56,8 @@ pub struct Config {
     /// UI language tag (`"ru"`); `None` follows the session locale. A string, not
     /// `Lang`, so a tag unknown to this build still loads.
     pub language: Option<String>,
+    /// Colours inside the session's light or dark scheme.
+    pub palette: Palette,
 }
 
 /// Moves every per-device setting from `from` to `to`, returning whether any
@@ -109,6 +111,7 @@ impl Default for Config {
             low_threshold: DEFAULT_LOW_THRESHOLD,
             device_overrides: HashMap::new(),
             language: None,
+            palette: Palette::Catppuccin,
         }
     }
 }
@@ -432,9 +435,11 @@ mod tests {
             notifications_enabled: false,
             tray_mode: TrayMode::PerDevice,
             primary_device: Some("mouse".to_string()),
+            palette: Palette::Everforest,
             ..Config::default()
         };
         let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains(r#""palette":"everforest""#), "{json}");
         let restored: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg, restored);
     }
@@ -462,6 +467,13 @@ mod tests {
         let mode = DisplayMode::PercentInIcon;
         let json = serde_json::to_string(&mode).unwrap();
         assert_eq!(json, r#""percent_in_icon""#);
+    }
+
+    #[test]
+    fn a_config_without_a_palette_loads_catppuccin() {
+        let cfg: Config = serde_json::from_str(r#"{"display_mode":"percent_only"}"#).unwrap();
+        assert_eq!(cfg.palette, Palette::Catppuccin);
+        assert_eq!(cfg.display_mode, DisplayMode::PercentOnly);
     }
 
     #[test]

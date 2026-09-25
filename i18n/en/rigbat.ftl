@@ -66,6 +66,14 @@ tray-primary-hint-pinned = The single icon shows { $name }. Change it on the Dev
 tray-primary-hint-auto = The single icon shows the connected device with the lowest charge. Pin one on the Devices tab.
 button-clear = Clear
 
+group-appearance = Appearance
+appearance-palette = Colours
+appearance-palette-hint = Charge colours on the tray icon, in the device overview and here. Light or dark follows the system.
+palette-catppuccin = Catppuccin
+palette-everforest = Everforest
+palette-gnome = GNOME
+palette-nord = Nord
+
 group-battery = Battery
 default-low-threshold = Low battery threshold
 default-poll-interval = Check every

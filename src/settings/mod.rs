@@ -17,7 +17,7 @@ use crate::gui;
 use crate::i18n::{Lang, fl, loader};
 use crate::state;
 use devices::{DeleteState, DeviceRow};
-use general_tab::StylePreviews;
+use general_tab::{PaletteSwatches, StylePreviews};
 
 /// The minimum is where both tabs' column reaches `CONTENT_MAX_WIDTH`; the
 /// tabs' width tests run at it.
@@ -103,6 +103,7 @@ struct SettingsApp {
     expanded_device: Option<DeviceId>,
     delete_state: DeleteState,
     style_previews: Option<StylePreviews>,
+    palette_swatches: Option<PaletteSwatches>,
     /// The language the window title was last set in.
     title_lang: Lang,
 }
@@ -353,6 +354,7 @@ pub fn run(tab: Tab) -> anyhow::Result<()> {
                 expanded_device: None,
                 delete_state: DeleteState::default(),
                 style_previews: None,
+                palette_swatches: None,
                 title_lang,
             };
             app.spawn_scan(cc.egui_ctx.clone(), scan::Scan::Read);
@@ -408,6 +410,7 @@ mod tests {
             expanded_device: None,
             delete_state: DeleteState::default(),
             style_previews: None,
+            palette_swatches: None,
             title_lang,
         }
     }

@@ -4,8 +4,8 @@ use eframe::egui;
 use tokio::sync::watch;
 
 use crate::appearance::{Appearance, ColorScheme};
-use crate::domain::DeviceKind;
-use crate::icon::Theme;
+use crate::domain::{DeviceKind, Palette};
+use crate::palette::{self, DIM, GRAPHIC_CONTRAST, Rgb, TEXT_CONTRAST};
 
 /// A device row in either window, and the least height of a settings row.
 pub const ROW_HEIGHT: f32 = 48.0;
@@ -85,47 +85,79 @@ pub fn secondary_text(visuals: &egui::Visuals) -> egui::Color32 {
 /// A charge value: in the low colour when low, strong when live, else secondary.
 pub fn charge_value_text(
     visuals: &egui::Visuals,
+    status: &StatusColors,
     text: String,
     low: bool,
     online: bool,
 ) -> egui::RichText {
     let text = egui::RichText::new(text);
     match (low, online) {
-        (true, _) => text.strong().color(color(theme(visuals).low)),
+        (true, _) => text.strong().color(status.low),
         (false, true) => text.strong(),
         (false, false) => text.color(secondary_text(visuals)),
     }
 }
 
-/// The status colours of the tray icon, for this window's scheme.
-pub fn theme(visuals: &egui::Visuals) -> Theme {
-    if visuals.dark_mode {
-        Theme::dark()
+/// The palette's status colours for a window, readable where the window paints them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StatusColors {
+    /// An ordinary reading's bar.
+    pub normal: egui::Color32,
+    pub charging: egui::Color32,
+    /// Text and bar.
+    pub low: egui::Color32,
+    /// Text.
+    pub warn: egui::Color32,
+    pub track: egui::Color32,
+}
+
+/// Text roles reach 4.5:1 on every surface text is painted on; bars reach
+/// 3:1 on the panel, dimmed included.
+pub fn status_colors(visuals: &egui::Visuals, palette: Palette) -> StatusColors {
+    let scheme = if visuals.dark_mode {
+        ColorScheme::Dark
     } else {
-        Theme::light()
+        ColorScheme::Light
+    };
+    let s = palette::swatches(palette, scheme);
+    let panel = rgb(visuals.panel_fill);
+    let text = |color| {
+        text_surfaces(visuals)
+            .into_iter()
+            .fold(color, |c, surface| {
+                palette::readable(c, rgb(surface), TEXT_CONTRAST, 1.0)
+            })
+    };
+    let bar = |color| palette::readable(color, panel, GRAPHIC_CONTRAST, DIM);
+    StatusColors {
+        normal: opaque(bar(s.fg)),
+        charging: opaque(bar(s.charging)),
+        low: opaque(text(s.low)),
+        warn: opaque(text(s.warn)),
+        track: opaque(s.track),
     }
 }
 
-pub fn color([r, g, b, a]: [u8; 4]) -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(r, g, b, a)
+/// The panel, a settings group's fill and a button's fill.
+pub fn text_surfaces(visuals: &egui::Visuals) -> [egui::Color32; 3] {
+    [
+        visuals.panel_fill,
+        visuals.panel_fill.blend(visuals.faint_bg_color),
+        visuals.widgets.inactive.weak_bg_fill,
+    ]
+}
+
+fn rgb(c: egui::Color32) -> Rgb {
+    [c.r(), c.g(), c.b()]
+}
+
+fn opaque([r, g, b]: Rgb) -> egui::Color32 {
+    egui::Color32::from_rgb(r, g, b)
 }
 
 /// WCAG 2.1 contrast ratio between two opaque colors.
 pub fn contrast_ratio(a: egui::Color32, b: egui::Color32) -> f32 {
-    let (la, lb) = (relative_luminance(a), relative_luminance(b));
-    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
-}
-
-fn relative_luminance(c: egui::Color32) -> f32 {
-    let linear = |v: u8| {
-        let s = f32::from(v) / 255.0;
-        if s <= 0.04045 {
-            s / 12.92
-        } else {
-            ((s + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    0.2126 * linear(c.r()) + 0.7152 * linear(c.g()) + 0.0722 * linear(c.b())
+    palette::contrast_ratio(rgb(a), rgb(b))
 }
 
 #[cfg(test)]
@@ -200,6 +232,32 @@ mod tests {
                     "dark_mode={}: {ratio:.2}:1 on the {surface} is below 4.5:1",
                     visuals.dark_mode
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn every_palette_status_colour_is_readable_where_the_window_paints_it() {
+        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
+            for palette in Palette::ALL {
+                let status = status_colors(&visuals, palette);
+                let at = |role| format!("{palette:?} dark_mode={} {role}", visuals.dark_mode);
+                for (role, color) in [("low", status.low), ("warn", status.warn)] {
+                    for surface in text_surfaces(&visuals) {
+                        let ratio = contrast_ratio(color, surface);
+                        assert!(ratio >= TEXT_CONTRAST, "{}: {ratio:.2}:1", at(role));
+                    }
+                }
+                for (role, color, opacity) in [
+                    ("normal", status.normal, DIM),
+                    ("charging", status.charging, DIM),
+                    ("low", status.low, 1.0),
+                ] {
+                    let panel = rgb(visuals.panel_fill);
+                    let painted = palette::over(rgb(color), panel, opacity);
+                    let ratio = palette::contrast_ratio(painted, panel);
+                    assert!(ratio >= GRAPHIC_CONTRAST, "{}: {ratio:.2}:1", at(role));
+                }
             }
         }
     }

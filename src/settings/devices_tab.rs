@@ -71,7 +71,7 @@ impl SettingsApp {
             });
         });
         if self.tray_unanswered {
-            let warn = ui.visuals().warn_fg_color;
+            let warn = gui::status_colors(ui.visuals(), self.config.palette).warn;
             ui.label(egui::RichText::new(fl!(l, "devices-tray-unanswered")).color(warn));
         }
         ui.add_space(widgets::TOOLBAR_GAP);
@@ -176,6 +176,7 @@ impl SettingsApp {
         now: i64,
     ) -> (egui::RichText, Option<String>) {
         let lang = self.config.lang();
+        let colors = gui::status_colors(visuals, self.config.palette);
         if row.presence == Presence::Disconnected {
             let seen = row.last_seen.map_or_else(
                 || "—".to_owned(),
@@ -184,7 +185,10 @@ impl SettingsApp {
                     fl!(loader(lang), "device-seen-ago", age = age.as_str())
                 },
             );
-            return (gui::charge_value_text(visuals, seen, false, false), None);
+            return (
+                gui::charge_value_text(visuals, &colors, seen, false, false),
+                None,
+            );
         }
         let threshold = self
             .config
@@ -203,7 +207,10 @@ impl SettingsApp {
         let low = matches!(status, PrimaryStatus::Low { .. });
         let online = row.presence == Presence::Online;
         let note = status_note(row.presence, None, None, lang);
-        (gui::charge_value_text(visuals, text, low, online), note)
+        (
+            gui::charge_value_text(visuals, &colors, text, low, online),
+            note,
+        )
     }
 
     /// One row open at a time; an armed Remove does not survive the move.
@@ -313,7 +320,7 @@ impl SettingsApp {
                     .clicked()
                     .then_some(RemoveStep::Arm),
                 DeleteCell::Confirm => {
-                    let error = ui.visuals().error_fg_color;
+                    let error = gui::status_colors(ui.visuals(), self.config.palette).low;
                     let confirm = egui::RichText::new(fl!(l, "device-remove-confirm")).color(error);
                     let confirmed = ui.button(confirm).clicked();
                     let cancelled = ui.button(fl!(l, "button-cancel")).clicked();

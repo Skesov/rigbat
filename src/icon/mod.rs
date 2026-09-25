@@ -1,4 +1,6 @@
-use crate::domain::{DeviceKind, DisplayMode, PrimaryStatus};
+use crate::appearance::ColorScheme;
+use crate::domain::{DeviceKind, DisplayMode, Palette, PrimaryStatus};
+use crate::palette::{self, DIM, GRAPHIC_CONTRAST, Rgb};
 use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform,
 };
@@ -64,35 +66,40 @@ pub struct Theme {
     pub offline: [u8; 4],
 }
 
-impl Theme {
-    /// Dark theme: light foreground (Nord off-white).
-    pub fn dark() -> Self {
-        Self {
-            normal: [216, 222, 233, 255],
-            low: [191, 97, 106, 255],
-            // 8.18:1 against a #1e1e1e panel — well clear of the 3:1 WCAG
-            // 2.1 SC 1.4.11 floor for graphical objects.
-            charging: [163, 190, 140, 255],
-            offline: [216, 222, 233, 180],
-        }
-    }
+/// Stand-ins for the host's panel, which rigbat cannot see, when measuring contrast.
+const NOMINAL_PANEL_DARK: Rgb = [0x1e, 0x1e, 0x1e];
+const NOMINAL_PANEL_LIGHT: Rgb = [0xf0, 0xf0, 0xf0];
 
-    /// Light theme: dark foreground (Nord polar night).
-    pub fn light() -> Self {
+impl Theme {
+    /// The palette's colours, each a graphical object of at least 3:1 on the
+    /// nominal panel; a colour that may be dimmed passes dimmed.
+    pub fn new(palette: Palette, scheme: ColorScheme) -> Self {
+        let s = palette::swatches(palette, scheme);
+        let panel = match scheme {
+            ColorScheme::Dark => NOMINAL_PANEL_DARK,
+            ColorScheme::Light => NOMINAL_PANEL_LIGHT,
+        };
+        let graphic = |color, opacity| {
+            let [r, g, b] = palette::readable(color, panel, GRAPHIC_CONTRAST, opacity);
+            [r, g, b, 255]
+        };
+        let normal = graphic(s.fg, DIM);
         Self {
-            normal: [59, 66, 82, 255],
-            low: [191, 97, 106, 255],
-            // The Nord green (#a3be8c) used on dark only reaches 1.79:1
-            // against a #f0f0f0 panel, well under the 3:1 WCAG 2.1
-            // SC 1.4.11 floor for graphical objects. This darker shade
-            // reaches 6.19:1, and still clears the floor at 3.23:1 once the
-            // fill is dimmed by STALE_ALPHA — which is the case that has to
-            // pass, since in IconOnly mode the fill level *is* the reading.
-            // Do not swap it for the dark-theme value.
-            charging: [69, 96, 53, 255],
-            offline: [59, 66, 82, 180],
+            normal,
+            low: graphic(s.low, 1.0),
+            charging: graphic(s.charging, DIM),
+            offline: dimmed(normal),
         }
     }
+}
+
+fn dimmed([r, g, b, a]: [u8; 4]) -> [u8; 4] {
+    [
+        r,
+        g,
+        b,
+        (f32::from(a) * DIM).round().clamp(0.0, 255.0) as u8,
+    ]
 }
 
 pub struct TinySkiaRenderer {
@@ -106,15 +113,6 @@ impl Default for TinySkiaRenderer {
         }
     }
 }
-
-/// Alpha multiplier applied to the fill bar of a stale-but-known reading.
-/// 0.38 (the Material/Apple convention) is for *disabled controls*, which
-/// WCAG 2.1 SC 1.4.11 exempts from contrast — a stale battery reading is
-/// still information the user must read, not a control, so that convention
-/// does not apply here. 0.70 keeps the outline/digit colours (never dimmed,
-/// see below) reading clearly muted at 22 px while every meaning-bearing
-/// mark stays at full contrast.
-const STALE_ALPHA: f32 = 0.70;
 
 impl IconRenderer for TinySkiaRenderer {
     fn render(
@@ -151,9 +149,7 @@ impl IconRenderer for TinySkiaRenderer {
         // carry the reading and stay at full colour/contrast.
         let dim_fill = stale && !matches!(status, PrimaryStatus::Low { .. });
         let fill_rgba = if dim_fill {
-            let [r, g, b, a] = color_rgba;
-            let scaled = (f32::from(a) * STALE_ALPHA).round().clamp(0.0, 255.0) as u8;
-            [r, g, b, scaled]
+            dimmed(color_rgba)
         } else {
             color_rgba
         };
@@ -743,6 +739,17 @@ fn pixmap_to_icon(pixmap: Pixmap) -> ksni::Icon {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    impl Theme {
+        fn dark() -> Self {
+            Self::new(Palette::default(), ColorScheme::Dark)
+        }
+
+        fn light() -> Self {
+            Self::new(Palette::default(), ColorScheme::Light)
+        }
+    }
 
     /// The device-kind glyph punches a transparent ring around itself so it
     /// reads against a battery fill. The canvas is square, the digit block is
@@ -794,8 +801,6 @@ mod tests {
             }
         }
     }
-    use super::*;
-    use crate::domain::DisplayMode;
 
     fn default_sizes() -> Vec<u32> {
         TinySkiaRenderer::default().sizes.clone()
@@ -1233,66 +1238,41 @@ mod tests {
         );
     }
 
-    /// WCAG 2.1 relative luminance of one sRGB channel (0-255).
-    fn linearize_channel(c: u8) -> f64 {
-        let c = f64::from(c) / 255.0;
-        if c <= 0.03928 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
+    /// WCAG 2.1 SC 1.4.11 asks 3:1 of a graphical object. The dimmed fill is
+    /// the case that has to pass: in IconOnly mode it is the whole reading.
+    #[test]
+    fn every_palette_icon_colour_clears_3_to_1_on_the_nominal_panel_dimmed_included() {
+        for palette_choice in Palette::ALL {
+            for (scheme, panel) in [
+                (ColorScheme::Dark, NOMINAL_PANEL_DARK),
+                (ColorScheme::Light, NOMINAL_PANEL_LIGHT),
+            ] {
+                let theme = Theme::new(palette_choice, scheme);
+                for (role, [r, g, b, a], dims) in [
+                    ("normal", theme.normal, true),
+                    ("charging", theme.charging, true),
+                    ("low", theme.low, false),
+                    ("offline", theme.offline, false),
+                ] {
+                    let opacity = f32::from(a) / 255.0 * if dims { DIM } else { 1.0 };
+                    let painted = palette::over([r, g, b], panel, opacity);
+                    let ratio = palette::contrast_ratio(painted, panel);
+                    assert!(
+                        ratio >= GRAPHIC_CONTRAST,
+                        "{palette_choice:?} {scheme:?} {role}: {ratio:.2}:1"
+                    );
+                }
+            }
         }
     }
 
-    /// WCAG 2.1 relative luminance of an sRGB colour.
-    fn relative_luminance(rgb: [u8; 3]) -> f64 {
-        let [r, g, b] = rgb;
-        0.2126 * linearize_channel(r)
-            + 0.7152 * linearize_channel(g)
-            + 0.0722 * linearize_channel(b)
-    }
-
-    /// WCAG 2.1 contrast ratio between two sRGB colours.
-    fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f64 {
-        let (l1, l2) = (relative_luminance(a), relative_luminance(b));
-        let (lighter, darker) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
-        (lighter + 0.05) / (darker + 0.05)
-    }
-
     #[test]
-    fn light_theme_charging_color_clears_wcag_graphical_object_contrast() {
-        let theme = Theme::light();
-        let [r, g, b, _] = theme.charging;
-        let panel = [0xf0, 0xf0, 0xf0]; // typical light panel background
-        let ratio = contrast_ratio([r, g, b], panel);
-
-        // WCAG 2.1 SC 1.4.11 (Non-text Contrast) requires 3:1 for graphical
-        // objects; a battery icon's charging colour is not an exempt
-        // "inactive control", so it must clear this floor.
-        assert!(
-            ratio >= 3.0,
-            "light theme charging colour contrast is {ratio:.2}:1, below the 3:1 WCAG floor"
-        );
-
-        // The dimmed fill is the case that actually has to pass: in IconOnly
-        // mode there are no digits, so the fill level is the whole reading.
-        // Composite the stale fill over the panel the way the renderer does.
-        let dimmed = [
-            (f64::from(r) * f64::from(STALE_ALPHA)
-                + f64::from(panel[0]) * (1.0 - f64::from(STALE_ALPHA)))
-            .round() as u8,
-            (f64::from(g) * f64::from(STALE_ALPHA)
-                + f64::from(panel[1]) * (1.0 - f64::from(STALE_ALPHA)))
-            .round() as u8,
-            (f64::from(b) * f64::from(STALE_ALPHA)
-                + f64::from(panel[2]) * (1.0 - f64::from(STALE_ALPHA)))
-            .round() as u8,
-        ];
-        let dimmed_ratio = contrast_ratio(dimmed, panel);
-        assert!(
-            dimmed_ratio >= 3.0,
-            "light theme charging fill dimmed by STALE_ALPHA is {dimmed_ratio:.2}:1, \
-             below the 3:1 WCAG floor"
-        );
+    fn the_palette_reaches_the_icon_colours() {
+        let catppuccin = Theme::new(Palette::Catppuccin, ColorScheme::Dark);
+        let nord = Theme::new(Palette::Nord, ColorScheme::Dark);
+        assert_eq!(catppuccin.low, [0xf3, 0x8b, 0xa8, 255]);
+        assert_eq!(nord.low, [0xbf, 0x61, 0x6a, 255]);
+        assert_eq!(catppuccin.offline[3], 179);
     }
 
     // --- corner glyph tests -----------------------------------------------
@@ -1568,7 +1548,7 @@ mod tests {
     //
     // Premultiplied-alpha handling: `Pixmap` stores premultiplied RGBA and
     // `icon_to_rgba` does not un-premultiply. For the fully opaque theme
-    // colours (alpha 255) that is a no-op, but `Theme::offline` (alpha 180)
+    // colours (alpha 255) that is a no-op, but `Theme::offline` (alpha 179)
     // is stored premultiplied. Rather than un-premultiply the rendered
     // buffer (which would need to replicate tiny-skia's internal rounding
     // to avoid off-by-one false negatives), these tests premultiply the

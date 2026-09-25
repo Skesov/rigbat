@@ -29,13 +29,14 @@ layers, never the reverse.
 ```text
         domain            pure types + logic (DeviceInfo, BatteryReading, PrimaryStatus,
           ▲               classify, guess_kind, freedesktop_icon_name, DeviceId, estimate,
-          │               roster policy, device text, TrayState, DisplayMode/TrayMode)
+          │               roster policy, device text, TrayState, DisplayMode/TrayMode/Palette)
         i18n              Fluent catalogues + Lang; pure, so domain may use it
         refresh           RefreshSignal, a tokio-only primitive with no crate imports
           │
         config            config.json: user intent, serialized; imports domain + i18n
           │
-   icon / ipc / gui / appearance / clock   shared ports: domain, refresh and each other, never config
+   icon / ipc / gui / appearance /      shared ports: domain, refresh and each other, never config
+   clock / palette
           │
         sources           BatterySource / BatteryBackend traits + Context + supervise +
           ▲               sysfs/bluez/steelseries/eightbitdo impls
@@ -167,7 +168,7 @@ minute, and a worker per core only adds idle wakeups. `TOKIO_WORKER_THREADS` sti
   itself for a vanished device) is demoted to `Unreachable` and respawned rather than left
   silently dead.
 - **Stale rendering**: a device that is `Unreachable`/`Disconnected` but still holds a reading
-  keeps its normal icon with the fill dimmed by `STALE_ALPHA`, rather than falling back to the
+  keeps its normal icon with the fill dimmed by `palette::DIM`, rather than falling back to the
   empty offline battery — Bluetooth peripherals sleep constantly, and the charge is still known.
   Only the fill dims: the outline and the digits carry the reading, so they stay at full strength
   and above the 3:1 WCAG 2.1 SC 1.4.11 floor for graphical objects (the standard's exemption

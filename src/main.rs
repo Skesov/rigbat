@@ -17,6 +17,7 @@ mod i18n;
 mod icon;
 mod ipc;
 mod notifications;
+mod palette;
 mod refresh;
 mod session;
 mod settings;

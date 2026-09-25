@@ -14,12 +14,17 @@ use futures_util::{Stream, StreamExt as _};
 use zbus::fdo::{DBusProxy, NameOwnerChangedStream};
 
 use crate::config;
-use crate::domain::{BootTime, Presence, PrimaryStatus, charge_value, roster_order, status_note};
-use crate::gui::{self, GLYPH_COLUMN, GLYPH_SIZE, ROW_HEIGHT, color, kind_glyph, secondary_text};
+use crate::domain::{
+    BootTime, Palette, Presence, PrimaryStatus, charge_value, roster_order, status_note,
+};
+use crate::gui::{
+    self, GLYPH_COLUMN, GLYPH_SIZE, ROW_HEIGHT, StatusColors, kind_glyph, secondary_text,
+};
 use crate::i18n::{Lang, fl, loader};
 use crate::ipc::single_instance::{SingleInstance, acquire_named};
 use crate::ipc::{DASHBOARD_NAME, DASHBOARD_PATH, DeviceCard, Snapshot, TRAY_NAME};
 use crate::ipc::{Dashboard1Proxy, Tray1Proxy};
+use crate::palette::DIM;
 
 const WINDOW_WIDTH: f32 = 380.0;
 const MARGIN: f32 = 12.0;
@@ -27,10 +32,6 @@ const ROW_PADDING: f32 = 5.0;
 const GAP: f32 = 8.0;
 const NOTE_SIZE: f32 = 12.0;
 const BAR_HEIGHT: f32 = 4.0;
-/// How far the bar's track leans from `extreme_bg_color` toward the fill.
-const TRACK_TINT: f32 = 0.25;
-/// Opacity of the bar of a row whose reading is not live.
-const DIMMED: f32 = 0.6;
 const FOOTER_HEIGHT: f32 = 32.0;
 const MAX_VISIBLE_ROWS: usize = 10;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -120,7 +121,8 @@ pub fn run() -> anyhow::Result<()> {
     });
     let tray = live.as_ref().map(|(tray, _, _)| tray.clone());
 
-    let lang = config::load().lang();
+    let config = config::load();
+    let (lang, palette) = (config.lang(), config.palette);
     let text_scale = appearance.borrow().text_scale;
     let size = window_size(first.as_ref().map_or(0, |s| s.devices.len()));
     let options = eframe::NativeOptions {
@@ -150,6 +152,7 @@ pub fn run() -> anyhow::Result<()> {
             Ok(Box::new(Dashboard::new(
                 first,
                 lang,
+                palette,
                 updates,
                 tray.zip(Some(handle)),
             )))
@@ -282,6 +285,7 @@ struct Dashboard {
     snapshot: Option<Snapshot>,
     received_at: BootTime,
     lang: Lang,
+    palette: Palette,
     updates: mpsc::Receiver<Option<Snapshot>>,
     tray: Option<(Tray1Proxy<'static>, tokio::runtime::Handle)>,
     /// The window size last asked for, in points.
@@ -300,6 +304,7 @@ impl Dashboard {
     fn new(
         snapshot: Option<Snapshot>,
         lang: Lang,
+        palette: Palette,
         updates: mpsc::Receiver<Option<Snapshot>>,
         tray: Option<(Tray1Proxy<'static>, tokio::runtime::Handle)>,
     ) -> Self {
@@ -307,6 +312,7 @@ impl Dashboard {
             snapshot: None,
             received_at: crate::clock::now(),
             lang,
+            palette,
             updates,
             tray,
             size: window_size(0),
@@ -382,6 +388,7 @@ impl Dashboard {
             return;
         }
         let lang = self.lang;
+        let status = gui::status_colors(ui.visuals(), self.palette);
         let elapsed = crate::clock::now()
             .saturating_duration_since(self.received_at)
             .as_secs();
@@ -392,7 +399,7 @@ impl Dashboard {
         list_ui.spacing_mut().item_spacing.y = 0.0;
         let rows = |ui: &mut egui::Ui| {
             for card in &snapshot.devices {
-                render_row(ui, card, lang, elapsed);
+                render_row(ui, card, lang, elapsed, &status);
             }
         };
         if snapshot.devices.len() > MAX_VISIBLE_ROWS {
@@ -468,12 +475,17 @@ fn sort_cards(cards: &mut [DeviceCard]) {
     cards.sort_by_cached_key(|c| roster_order(&c.name, c.presence));
 }
 
-fn render_row(ui: &mut egui::Ui, card: &DeviceCard, lang: Lang, elapsed: u64) {
+fn render_row(
+    ui: &mut egui::Ui,
+    card: &DeviceCard,
+    lang: Lang,
+    elapsed: u64,
+    status: &StatusColors,
+) {
     let size = egui::vec2(ui.available_width(), ROW_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     response.on_hover_text(details(card, lang));
     let visuals = ui.visuals().clone();
-    let theme = gui::theme(&visuals);
     let low = matches!(card.status, PrimaryStatus::Low { .. });
     let online = card.presence == Presence::Online;
 
@@ -491,7 +503,7 @@ fn render_row(ui: &mut egui::Ui, card: &DeviceCard, lang: Lang, elapsed: u64) {
     );
     let (top, bottom) = body.split_top_bottom_at_fraction(0.5);
 
-    let value = gui::charge_value_text(&visuals, value_text(card, lang), low, online);
+    let value = gui::charge_value_text(&visuals, status, value_text(card, lang), low, online);
     let value_rect = place(ui, top, egui::Align::Max, egui::Label::new(value));
     let name = egui::Label::new(egui::RichText::new(&card.name).strong()).truncate();
     place(
@@ -519,13 +531,12 @@ fn render_row(ui: &mut egui::Ui, card: &DeviceCard, lang: Lang, elapsed: u64) {
         None => bottom.right(),
     };
     let fill = match card.status {
-        PrimaryStatus::Low { .. } => color(theme.low),
-        PrimaryStatus::Charging { .. } => color(theme.charging),
-        PrimaryStatus::Ok { .. } => visuals.selection.bg_fill,
-        PrimaryStatus::Offline => color(theme.offline),
+        PrimaryStatus::Low { .. } => status.low,
+        PrimaryStatus::Charging { .. } => status.charging,
+        PrimaryStatus::Ok { .. } | PrimaryStatus::Offline => status.normal,
     };
     // Like the tray icon: dimmed when not live, except a low reading.
-    let opacity = if online || low { 1.0 } else { DIMMED };
+    let opacity = if online || low { 1.0 } else { DIM };
     let track = egui::Rect::from_center_size(
         egui::pos2((bottom.left() + bar_right) / 2.0, bottom.center().y),
         egui::vec2(bar_right - bottom.left(), BAR_HEIGHT),
@@ -535,7 +546,7 @@ fn render_row(ui: &mut egui::Ui, card: &DeviceCard, lang: Lang, elapsed: u64) {
     painter.rect_filled(
         track,
         BAR_HEIGHT / 2.0,
-        track_color(&visuals, fill).gamma_multiply(opacity),
+        status.track.gamma_multiply(opacity),
     );
     painter.rect_filled(filled, BAR_HEIGHT / 2.0, fill.gamma_multiply(opacity));
 }
@@ -554,11 +565,6 @@ fn place(
     ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout))
         .add(widget.selectable(false))
         .rect
-}
-
-/// A track that belongs to its fill, not a black groove.
-fn track_color(visuals: &egui::Visuals, fill: egui::Color32) -> egui::Color32 {
-    visuals.extreme_bg_color.lerp_to_gamma(fill, TRACK_TINT)
 }
 
 fn value_text(card: &DeviceCard, lang: Lang) -> String {
@@ -601,7 +607,7 @@ mod tests {
         CHARGING_SIGN, ChargeState, DeviceKind, DisplayMode, LOW_SIGN, Transport, format_age,
         format_coarse, state_label,
     };
-    use crate::egui_test::{assert_single_lines_without_overlap, fully_painted_text_at};
+    use crate::egui_test::{assert_single_lines_without_overlap, fully_painted_text_at, run_frame};
 
     fn card(name: &str, presence: Presence, percent: Option<u8>) -> DeviceCard {
         let status = match percent {
@@ -650,7 +656,13 @@ mod tests {
             devices,
             hidden: Vec::new(),
         };
-        Dashboard::new(Some(snapshot), lang, mpsc::channel().1, None)
+        Dashboard::new(
+            Some(snapshot),
+            lang,
+            Palette::default(),
+            mpsc::channel().1,
+            None,
+        )
     }
 
     fn roster() -> Vec<DeviceCard> {
@@ -808,7 +820,7 @@ mod tests {
     fn without_a_tray_or_devices_it_says_so_in_every_language() {
         for lang in Lang::ALL {
             let l = loader(lang);
-            let mut none = Dashboard::new(None, lang, mpsc::channel().1, None);
+            let mut none = Dashboard::new(None, lang, Palette::default(), mpsc::channel().1, None);
             let mut empty = dashboard(Vec::new(), lang);
             for (d, text) in [
                 (&mut none, fl!(l, "dashboard-tray-not-running")),
@@ -879,15 +891,81 @@ mod tests {
         assert_eq!(d.size, window_size(6));
     }
 
+    /// Fills of every rect and colours of every text the dashboard painted.
+    fn painted_colors(
+        d: &mut Dashboard,
+        palette: Palette,
+    ) -> (
+        StatusColors,
+        Vec<egui::Color32>,
+        Vec<(String, egui::Color32)>,
+    ) {
+        let ctx = egui::Context::default();
+        ctx.set_theme(egui::Theme::Dark);
+        d.palette = palette;
+        let output = run_frame(&ctx, d.wanted_size(), Vec::new(), |ui| d.show(ui));
+        let status = gui::status_colors(&ctx.global_style().visuals, palette);
+        let mut fills = Vec::new();
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            match &clipped.shape {
+                egui::Shape::Rect(rect) => fills.push(rect.fill),
+                egui::Shape::Text(text) => texts.push((
+                    text.galley.text().to_owned(),
+                    text.galley.job.sections[0].format.color,
+                )),
+                _ => {}
+            }
+        }
+        (status, fills, texts)
+    }
+
     #[test]
-    fn a_track_is_tinted_toward_its_fill_not_black() {
-        let visuals = egui::Visuals::dark();
-        let fill = visuals.selection.bg_fill;
-        let track = track_color(&visuals, fill);
-        assert_ne!(track, visuals.extreme_bg_color);
+    fn a_low_reading_paints_its_value_and_bar_in_the_palette_low_colour() {
+        let low = card("Aerox", Presence::Online, Some(15));
+        let value = value_text(&low, Lang::En);
+        let mut seen = Vec::new();
+        for palette in Palette::ALL {
+            let mut d = dashboard(vec![low.clone()], Lang::En);
+            let (status, fills, texts) = painted_colors(&mut d, palette);
+            assert!(fills.contains(&status.low), "{palette:?}: bar {fills:?}");
+            assert!(
+                fills.contains(&status.track),
+                "{palette:?}: track {fills:?}"
+            );
+            assert!(
+                texts.contains(&(value.clone(), status.low)),
+                "{palette:?}: value {texts:?}"
+            );
+            seen.push(status.low);
+        }
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            Palette::ALL.len(),
+            "every palette has its own low"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_reading_fills_in_the_neutral_not_the_accent() {
+        let mut d = dashboard(vec![card("MX", Presence::Online, Some(62))], Lang::En);
+        let (status, fills, _) = painted_colors(&mut d, Palette::Nord);
+        assert!(fills.contains(&status.normal), "{fills:?}");
+        let accent = egui::Visuals::dark().selection.bg_fill;
+        assert!(!fills.contains(&accent), "{fills:?}");
+    }
+
+    #[test]
+    fn a_retained_reading_dims_its_bar_by_the_shared_factor() {
+        let mut d = dashboard(
+            vec![card("NuPhy", Presence::Disconnected, Some(88))],
+            Lang::En,
+        );
+        let (status, fills, _) = painted_colors(&mut d, Palette::Catppuccin);
         assert!(
-            gui::contrast_ratio(track, fill) > 1.5,
-            "the fill must stand off its track"
+            fills.contains(&status.normal.gamma_multiply(DIM)),
+            "{fills:?}"
         );
     }
 

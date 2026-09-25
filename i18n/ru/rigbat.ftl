@@ -66,6 +66,14 @@ tray-primary-hint-pinned = Общий значок показывает { $name 
 tray-primary-hint-auto = Общий значок показывает подключённое устройство с самым низким зарядом. Закрепить — на вкладке «Устройства».
 button-clear = Сбросить
 
+group-appearance = Оформление
+appearance-palette = Цвета
+appearance-palette-hint = Цвета заряда на значке, в обзоре устройств и здесь. Светлая или тёмная тема — как в системе.
+palette-catppuccin = Catppuccin
+palette-everforest = Everforest
+palette-gnome = GNOME
+palette-nord = Nord
+
 group-battery = Батарея
 default-low-threshold = Порог низкого заряда
 default-poll-interval = Опрашивать каждые

@@ -19,6 +19,36 @@ pub enum TrayMode {
     PerDevice, // one icon per shown device
 }
 
+/// The colours inside the system's light or dark scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Palette {
+    #[default]
+    Catppuccin,
+    Everforest,
+    Gnome,
+    Nord,
+}
+
+impl Palette {
+    pub const ALL: [Palette; 4] = [
+        Palette::Catppuccin,
+        Palette::Everforest,
+        Palette::Gnome,
+        Palette::Nord,
+    ];
+
+    pub fn label(self, lang: Lang) -> String {
+        let l = loader(lang);
+        match self {
+            Palette::Catppuccin => fl!(l, "palette-catppuccin"),
+            Palette::Everforest => fl!(l, "palette-everforest"),
+            Palette::Gnome => fl!(l, "palette-gnome"),
+            Palette::Nord => fl!(l, "palette-nord"),
+        }
+    }
+}
+
 impl DisplayMode {
     /// All display modes in display order, used to build the Settings menu.
     pub const ALL: [DisplayMode; 3] = [
@@ -78,5 +108,14 @@ mod tests {
             "Percentage inside icon"
         );
         assert_eq!(DisplayMode::IconOnly.label(Lang::Ru), "Только значок");
+    }
+
+    #[test]
+    fn every_palette_has_a_label_in_every_language() {
+        for lang in Lang::ALL {
+            for palette in Palette::ALL {
+                assert!(!palette.label(lang).is_empty(), "{palette:?} in {lang:?}");
+            }
+        }
     }
 }
