@@ -113,7 +113,8 @@ src/
 ├── notifications/ # low-battery desktop notifications (zbus)
 ├── session/       # logind PrepareForSleep → resume re-poll
 ├── settings/      # eframe/egui settings window (separate process): mod.rs shell,
-│                 # general_tab.rs, devices_tab.rs, devices.rs (table state), widgets.rs
+│                 # general_tab.rs, devices_tab.rs, devices.rs (table state), widgets.rs,
+│                 # scan.rs (tray roster, or a local poll when no tray runs)
 ├── autostart/     # ~/.config/autostart/rigbat.desktop + systemd user unit state
 ├── doctor/        # `rigbat doctor`: setup checks with a fix per problem
 ├── i18n/          # Lang, per-language Fluent loaders, locale detection (catalogues in /i18n)
