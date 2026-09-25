@@ -685,7 +685,7 @@ mod tests {
         let mut visuals = egui::Visuals::light();
         visuals.extreme_bg_color = egui::Color32::from_rgb(250, 246, 240);
         visuals.widgets.noninteractive.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 110, 100));
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(120, 110, 100));
         let ctx = egui::Context::default();
         ctx.set_theme(egui::Theme::Light);
         ctx.set_visuals_of(egui::Theme::Light, visuals.clone());
