@@ -3,6 +3,13 @@ name: release
 on:
   push:
     branches: [master]
+  # Rebuilds the artifacts of a release that already exists, e.g. after the
+  # artifacts job failed on the push that created it.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, e.g. v0.2.0
+        required: true
 
 permissions:
   contents: write
@@ -17,6 +24,7 @@ jobs:
   # CHANGELOG.md. Merging that PR is what creates the tag and the release —
   # nothing here releases on its own.
   release-please:
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -37,7 +45,7 @@ jobs:
   # files a user needs to install it, and a checksum beside each.
   artifacts:
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    if: ${{ always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     # Replaces the workflow-level permissions for this job.
     permissions:
@@ -49,10 +57,11 @@ jobs:
     # release is worse than a target nobody has asked for yet.
     env:
       TARGET: x86_64-unknown-linux-gnu
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ env.TAG }}
 
       - name: Install build dependencies
         run: |
@@ -78,7 +87,7 @@ jobs:
         id: stage
         run: |
           set -euo pipefail
-          version="${{ needs.release-please.outputs.version }}"
+          version="${TAG#v}"
           name="rigbat-v${version}-${TARGET}"
           staging="$(mktemp -d)/${name}"
           mkdir -p "${staging}"
@@ -101,7 +110,7 @@ jobs:
         id: packages
         run: |
           set -euo pipefail
-          version="${{ needs.release-please.outputs.version }}"
+          version="${TAG#v}"
           mkdir -p target/packaging
           sed 's|^ExecStart=.*rigbat tray$|ExecStart=/usr/bin/rigbat tray|' \
             packaging/rigbat.service > target/packaging/rigbat.service
@@ -115,7 +124,11 @@ jobs:
           echo "deb=${deb}" >> "$GITHUB_OUTPUT"
           echo "rpm=${rpm}" >> "$GITHUB_OUTPUT"
 
+      # GitHub stores attestations only for public repositories (and
+      # organisation-owned private ones); on a user-owned private repository
+      # the step fails the whole release.
       - uses: actions/attest-build-provenance@v4
+        if: ${{ !github.event.repository.private }}
         with:
           subject-path: |
             ${{ steps.stage.outputs.asset }}
@@ -126,7 +139,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ needs.release-please.outputs.tag_name }}" \
+          gh release upload "$TAG" \
             "${{ steps.stage.outputs.asset }}" \
             "${{ steps.stage.outputs.asset }}.sha256" \
             "${{ steps.packages.outputs.deb }}" \
