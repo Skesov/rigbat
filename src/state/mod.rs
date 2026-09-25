@@ -52,7 +52,7 @@ pub struct DeviceRecord {
 /// What `record_seen` did to the inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seen {
-    /// A row already existed under this exact identity; only `last_seen` moved.
+    /// A row already existed under this exact identity; at most `last_seen` and `kind` moved.
     Existing,
     /// No row matched, so one was inserted.
     Inserted,
@@ -112,18 +112,16 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("the state store thread stopped mid-request"))?
     }
 
-    /// Upserts a `devices` row for `id`: inserts it with
-    /// `first_seen = last_seen = now` if this is the first time it has been
-    /// seen, or advances `last_seen` otherwise. Called once per discovered
-    /// device on every discovery sweep.
+    /// Upserts a `devices` row per device of one discovery sweep, in one
+    /// transaction: inserted with `first_seen = last_seen = now` if new,
+    /// otherwise `last_seen` advances once it lags by a few minutes. Returns
+    /// one outcome per device, in order.
     pub async fn record_seen(
         &self,
-        id: &DeviceId,
-        kind: DeviceKind,
+        devices: Vec<(DeviceId, DeviceKind)>,
         now: i64,
-    ) -> anyhow::Result<Seen> {
-        let id = id.clone();
-        self.call(move |db| db.record_seen(&id, kind, now)).await
+    ) -> anyhow::Result<Vec<Seen>> {
+        self.call(move |db| db.record_seen(&devices, now)).await
     }
 
     /// Queues one successful poll as a `readings` row and returns at once;
@@ -278,7 +276,11 @@ mod tests {
 
         let write = tokio::spawn({
             let store = store.clone();
-            async move { store.record_seen(&mouse(), DeviceKind::Mouse, 1000).await }
+            async move {
+                store
+                    .record_seen(vec![(mouse(), DeviceKind::Mouse)], 1000)
+                    .await
+            }
         });
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(
@@ -287,7 +289,7 @@ mod tests {
         );
 
         other_process.execute_batch("COMMIT").unwrap();
-        assert_eq!(write.await.unwrap().unwrap(), Seen::Inserted);
+        assert_eq!(write.await.unwrap().unwrap(), [Seen::Inserted]);
 
         cleanup(&path);
     }
@@ -298,7 +300,7 @@ mod tests {
         let path = scratch_db_path("ordered");
         let store = Store::start(SqliteStore::open(&path).unwrap()).unwrap();
         store
-            .record_seen(&mouse(), DeviceKind::Mouse, 1000)
+            .record_seen(vec![(mouse(), DeviceKind::Mouse)], 1000)
             .await
             .unwrap();
         store.record_reading(

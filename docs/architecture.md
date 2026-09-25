@@ -114,7 +114,10 @@ flows out through channels.
   collides, which is why that duplication otherwise goes unnoticed.
 - `Supervisor::spawn(config_rx)` starts a **manager task** holding a `DeviceRegistry` — the
   device order, infos, readings and per-device task handles, keyed by `DeviceId`. It owns
-  discovery: it runs `discover_all()` at start, every 30 s, and on every refresh request.
+  discovery: it runs `discover_all()` at start, every 30 s, and on every refresh request. The
+  30 s cadence is a `tokio::time::interval` created once, not a `sleep` in the `select!` loop: a
+  per-iteration sleep restarts on every reading, so with a few devices answering the sweep never
+  fired. A refresh-triggered sweep resets the interval.
 - Each discovered device gets its own **source task** that polls on that device's effective
   interval and sends `(DeviceId, reading)` to the manager over an `mpsc` channel. One failing
   source never affects the others.
@@ -281,7 +284,9 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
 - `state` module (`rusqlite`, bundled SQLite): the device inventory (first seen, last seen,
   transport, kind) and a reading history collapsed to change points (`LAG()` over equal-percent
   runs). Schema version lives in `PRAGMA user_version`; WAL plus `busy_timeout` plus
-  `BEGIN IMMEDIATE` let the tray and the settings process write the same file. Inside a process
+  `BEGIN IMMEDIATE` let the tray and the settings process write the same file;
+  `synchronous=NORMAL` (safe in WAL: power loss can drop the last commits, never corrupt the file)
+  and a 2 MiB `journal_size_limit` keep the fsync count and the WAL file small. Inside a process
   the connection belongs to one dedicated thread (`state::Store`, an actor): callers send a
   request and await a oneshot reply, and a reading is queued without waiting. A write the other
   process holds can stall that thread for up to `busy_timeout`, never a tokio worker. The store is
@@ -297,7 +302,12 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
   `RETENTION_INTERVAL` (1 h), and drops readings orphaned by a deleted device. Inventory rows are
   never pruned on age — a device you own but have not switched on for a month must still be in the
   table you manage it from. Storing change points rather than samples is what keeps 14 days small:
-  a device at a steady 80% writes one row, not one per poll.
+  a device at a steady 80% writes one row, not one per poll. A reading is stored only when its
+  percent or charge state differs from the device's last stored row, or that row is an hour old
+  (`READING_HEARTBEAT_SECS`); a heartbeat repeats the percent, so the `LAG()` collapse drops it
+  and the seeded history is the same change points. Each sweep upserts all its devices'
+  inventory rows in one transaction, and `last_seen` moves only once it lags by
+  `LAST_SEEN_RESOLUTION_SECS` (5 min). The age prune uses an index on `readings.at` (schema v4).
 
 ### Device identity
 

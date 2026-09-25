@@ -24,9 +24,19 @@ use super::{DeviceRecord, Seen};
 /// How long `readings` rows are kept. `domain::estimate` only ever looks at
 /// the most recent `HISTORY_CAP` change points (see `app::supervisor`), so
 /// this is generous headroom rather than a window the estimator needs
-/// filled — it exists to keep the file in the low megabytes for a realistic
-/// device count at one row per device per poll.
+/// filled.
 const RETENTION_SECS: i64 = 14 * 24 * 60 * 60;
+
+/// A reading equal to the last stored one is written only once that row is
+/// this old, so an idle device still leaves a recent row behind.
+const READING_HEARTBEAT_SECS: i64 = 60 * 60;
+
+/// `last_seen` moves only once it lags by this much, sparing a write per device
+/// per discovery sweep; the inventory shows it in minutes.
+const LAST_SEEN_RESOLUTION_SECS: i64 = 5 * 60;
+
+/// Truncates the WAL after a checkpoint; SQLite's default (-1) never shrinks it.
+const JOURNAL_SIZE_LIMIT_BYTES: i64 = 2 * 1024 * 1024;
 
 /// A settings-window read losing a brief race with a tray write should not
 /// surface as a user-visible error, but a genuinely stuck writer should not
@@ -59,8 +69,12 @@ impl SqliteStore {
 fn configure(conn: &Connection) -> anyhow::Result<()> {
     conn.busy_timeout(BUSY_TIMEOUT)
         .context("setting busy_timeout")?;
-    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
-        .context("configuring WAL journal mode and foreign keys")?;
+    // synchronous=NORMAL in WAL risks only the last commits on power loss, never corruption.
+    conn.execute_batch(&format!(
+        "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;
+         PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT_BYTES}; PRAGMA foreign_keys = ON;"
+    ))
+    .context("configuring the journal and foreign keys")?;
     Ok(())
 }
 
@@ -94,6 +108,9 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
         if version < 3 {
             drop_sysfs_rows(conn)?;
         }
+        if version < 4 {
+            index_readings_by_time(conn)?;
+        }
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
             .context("stamping the schema version")
     })();
@@ -115,7 +132,7 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
 
 /// The schema this build expects. `migrate` runs every step between the
 /// version stamped in the file and this one.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 fn create_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
@@ -211,6 +228,12 @@ fn drop_sysfs_rows(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Serves the retention prune, which deletes by age across all devices.
+fn index_readings_by_time(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS readings_at ON readings (at)")
+        .context("indexing readings by time")
+}
+
 // ---------------------------------------------------------------------------
 // String encoding for the two domain enums this schema persists as TEXT.
 // ---------------------------------------------------------------------------
@@ -262,69 +285,79 @@ fn find_device_id(conn: &Connection, id: &DeviceId) -> rusqlite::Result<Option<i
     .optional()
 }
 
+fn upsert_seen(
+    tx: &rusqlite::Transaction<'_>,
+    id: &DeviceId,
+    kind: DeviceKind,
+    now: i64,
+) -> anyhow::Result<Seen> {
+    if let Some(row_id) = find_device_id(tx, id).context("looking up existing device row")? {
+        // MAX(...) keeps last_seen monotonic even if the wall clock steps
+        // backward (NTP correction, manual change): an inventory "last seen"
+        // that visibly regresses is a worse failure mode than one that
+        // briefly lags a backward step. `kind` is written whenever it
+        // changes: a device classified wrongly once (or reclassified by a
+        // later `guess_kind`) would otherwise keep the old type forever.
+        tx.execute(
+            "UPDATE devices SET last_seen = MAX(last_seen, ?1), kind = ?2
+              WHERE id = ?3 AND (?1 - last_seen >= ?4 OR kind <> ?2)",
+            params![now, kind.as_str(), row_id, LAST_SEEN_RESOLUTION_SECS],
+        )
+        .context("updating last_seen")?;
+        return Ok(Seen::Existing);
+    }
+    match find_renamed(tx, id).context("looking up a renamed device row")? {
+        Some((row_id, previous_name)) => {
+            tx.execute(
+                "UPDATE devices SET name = ?1, kind = ?2, last_seen = MAX(last_seen, ?3)
+                  WHERE id = ?4",
+                params![id.name, kind.as_str(), now, row_id],
+            )
+            .context("renaming device row")?;
+            Ok(Seen::Renamed {
+                from: previous_name,
+            })
+        }
+        None => {
+            tx.execute(
+                "INSERT INTO devices (name, transport, locator, kind, first_seen, last_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                params![
+                    id.name,
+                    id.transport.as_str(),
+                    id.locator,
+                    kind.as_str(),
+                    now
+                ],
+            )
+            .context("inserting new device row")?;
+            Ok(Seen::Inserted)
+        }
+    }
+}
+
 impl SqliteStore {
+    /// Records one discovery sweep's devices in a single transaction.
     pub(super) fn record_seen(
         &mut self,
-        id: &DeviceId,
-        kind: DeviceKind,
+        devices: &[(DeviceId, DeviceKind)],
         now: i64,
-    ) -> anyhow::Result<Seen> {
-        let conn = &mut self.conn;
-        let tx = conn
+    ) -> anyhow::Result<Vec<Seen>> {
+        let tx = self
+            .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("beginning record_seen transaction")?;
-        let outcome = match find_device_id(&tx, id).context("looking up existing device row")? {
-            Some(row_id) => {
-                // MAX(...) keeps last_seen monotonic even if the wall clock
-                // steps backward (NTP correction, manual change): an
-                // inventory "last seen" that visibly regresses is a worse
-                // failure mode than one that briefly lags a backward step.
-                // `readings.at` is not guarded the same way — see
-                // `record_reading`.
-                // `kind` is written on every sweep, not only on insert: a
-                // device classified wrongly once (or reclassified by a later
-                // `guess_kind`) would otherwise keep the old type in the
-                // inventory forever, since nothing else updates the row.
-                tx.execute(
-                    "UPDATE devices SET last_seen = MAX(last_seen, ?1), kind = ?2 WHERE id = ?3",
-                    params![now, kind.as_str(), row_id],
-                )
-                .context("updating last_seen")?;
-                Seen::Existing
-            }
-            None => match find_renamed(&tx, id).context("looking up a renamed device row")? {
-                Some((row_id, previous_name)) => {
-                    tx.execute(
-                        "UPDATE devices SET name = ?1, kind = ?2, last_seen = MAX(last_seen, ?3)
-                          WHERE id = ?4",
-                        params![id.name, kind.as_str(), now, row_id],
-                    )
-                    .context("renaming device row")?;
-                    Seen::Renamed {
-                        from: previous_name,
-                    }
-                }
-                None => {
-                    tx.execute(
-                        "INSERT INTO devices (name, transport, locator, kind, first_seen, last_seen)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                        params![
-                            id.name,
-                            id.transport.as_str(),
-                            id.locator,
-                            kind.as_str(),
-                            now
-                        ],
-                    )
-                    .context("inserting new device row")?;
-                    Seen::Inserted
-                }
-            },
-        };
+        let outcomes = devices
+            .iter()
+            .map(|(id, kind)| upsert_seen(&tx, id, *kind, now))
+            .collect::<anyhow::Result<Vec<_>>>()?;
         tx.commit().context("committing record_seen transaction")?;
-        Ok(outcome)
+        Ok(outcomes)
     }
 
+    /// Stores a reading only if it differs from the device's last stored row,
+    /// or that row is `READING_HEARTBEAT_SECS` old — `recent_readings` needs
+    /// the change points, and those are exactly the changes.
     pub(super) fn record_reading(
         &mut self,
         id: &DeviceId,
@@ -344,17 +377,34 @@ impl SqliteStore {
             // reading's caller an error over.
             return Ok(());
         };
+        let last: Option<(i64, i64, String)> = tx
+            .query_row(
+                "SELECT at, percent, state FROM readings
+                  WHERE device_id = ?1 ORDER BY at DESC LIMIT 1",
+                params![device_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .context("reading the last stored reading")?;
+        let state = state_to_str(reading.state);
+        if let Some((at, percent, stored_state)) = last
+            && percent == i64::from(reading.percent)
+            && stored_state == state
+            && now.saturating_sub(at) < READING_HEARTBEAT_SECS
+        {
+            return Ok(());
+        }
         // Timestamped as observed, not clamped forward like `last_seen`: a
         // wall-clock step backward can make this collide with (and, via
         // ON CONFLICT, overwrite) an existing row at the recomputed second,
-        // losing one data point. Accepted — polls repeat every interval, so
-        // one lost sample among thousands is inconsequential, unlike
-        // `last_seen`, which is the field a user actually reads.
+        // losing one data point. Accepted — one lost sample is
+        // inconsequential, unlike `last_seen`, which is the field a user
+        // actually reads.
         tx.execute(
             "INSERT INTO readings (device_id, at, percent, state) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (device_id, at)
              DO UPDATE SET percent = excluded.percent, state = excluded.state",
-            params![device_id, now, reading.percent, state_to_str(reading.state)],
+            params![device_id, now, reading.percent, state],
         )
         .context("inserting reading")?;
         tx.commit().context("committing record_reading transaction")
@@ -372,13 +422,11 @@ impl SqliteStore {
             return Ok(Vec::new());
         };
 
-        // A device polled every 60s writes one readings row per poll (see
-        // RETENTION_SECS), most of which repeat the last percent. This
+        // Heartbeat rows and state-only changes repeat the last percent. This
         // collapses runs of equal percent down to their first row —
         // exactly what `push_reading` keeps for the live, in-memory
         // history — so a caller can replay the result straight into a
-        // fresh history and get what a live run would have produced,
-        // instead of `cap` raw polls that are mostly duplicates.
+        // fresh history and get what a live run would have produced.
         let mut stmt = conn
             .prepare(
                 "WITH ranked AS (
@@ -513,13 +561,30 @@ mod tests {
         }
     }
 
+    fn seen(store: &mut SqliteStore, id: &DeviceId, kind: DeviceKind, now: i64) -> Seen {
+        let mut outcomes = store.record_seen(&[(id.clone(), kind)], now).unwrap();
+        assert_eq!(outcomes.len(), 1);
+        outcomes.remove(0)
+    }
+
+    fn stored_readings(store: &SqliteStore) -> Vec<(i64, i64, String)> {
+        store
+            .conn
+            .prepare("SELECT at, percent, state FROM readings ORDER BY at")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
     #[test]
     fn opening_twice_leaves_schema_and_data_intact() {
         let path = scratch_db_path("idempotent");
         {
             let mut store = SqliteStore::open(&path).unwrap();
             let a = id("mouse", Transport::Sysfs, Some("a"));
-            store.record_seen(&a, DeviceKind::Mouse, 1000).unwrap();
+            seen(&mut store, &a, DeviceKind::Mouse, 1000);
         }
 
         let store = SqliteStore::open(&path).unwrap();
@@ -541,10 +606,8 @@ mod tests {
         let mut store = SqliteStore::open(&path).unwrap();
         let id = id("8BitDo Ultimate 2", Transport::Hidraw, Some("A1B2C3D4E5"));
 
-        store.record_seen(&id, DeviceKind::Other, 1000).unwrap();
-        store
-            .record_seen(&id, DeviceKind::Controller, 2000)
-            .unwrap();
+        seen(&mut store, &id, DeviceKind::Other, 1000);
+        seen(&mut store, &id, DeviceKind::Controller, 2000);
 
         let devices = store.list_devices().unwrap();
         assert_eq!(devices.len(), 1);
@@ -563,21 +626,15 @@ mod tests {
         {
             let mut store = SqliteStore::open(&path).unwrap();
             let node_keyed = id("8BitDo Ultimate 2", Transport::Hidraw, Some("hidraw13"));
-            store
-                .record_seen(&node_keyed, DeviceKind::Controller, 1000)
-                .unwrap();
+            seen(&mut store, &node_keyed, DeviceKind::Controller, 1000);
             let serial_keyed = id("8BitDo Ultimate 2", Transport::Hidraw, Some("A1B2C3D4E5"));
-            store
-                .record_seen(&serial_keyed, DeviceKind::Controller, 1000)
-                .unwrap();
+            seen(&mut store, &serial_keyed, DeviceKind::Controller, 1000);
             let bluetooth = id(
                 "NuPhy Air75",
                 Transport::Bluetooth,
                 Some("00:00:5E:00:53:02"),
             );
-            store
-                .record_seen(&bluetooth, DeviceKind::Keyboard, 1000)
-                .unwrap();
+            seen(&mut store, &bluetooth, DeviceKind::Keyboard, 1000);
             store.conn.execute_batch("PRAGMA user_version = 1").unwrap();
         }
 
@@ -603,7 +660,7 @@ mod tests {
         let mut store = SqliteStore::open(&path).unwrap();
         let before = id("MX Anywhere 3", Transport::Sysfs, Some("00:00:5e:00:53:01"));
         assert_eq!(
-            store.record_seen(&before, DeviceKind::Mouse, 1000).unwrap(),
+            seen(&mut store, &before, DeviceKind::Mouse, 1000),
             Seen::Inserted
         );
         store
@@ -616,7 +673,7 @@ mod tests {
 
         let after = id("Work mouse", Transport::Sysfs, Some("00:00:5e:00:53:01"));
         assert_eq!(
-            store.record_seen(&after, DeviceKind::Mouse, 2000).unwrap(),
+            seen(&mut store, &after, DeviceKind::Mouse, 2000),
             Seen::Renamed {
                 from: "MX Anywhere 3".to_string()
             }
@@ -639,15 +696,11 @@ mod tests {
         let path = scratch_db_path("rename-null-locator");
         let mut store = SqliteStore::open(&path).unwrap();
         let before = id("headset", Transport::Bluetooth, None);
-        store
-            .record_seen(&before, DeviceKind::Headset, 1000)
-            .unwrap();
+        seen(&mut store, &before, DeviceKind::Headset, 1000);
 
         let after = id("other headset", Transport::Bluetooth, None);
         assert_eq!(
-            store
-                .record_seen(&after, DeviceKind::Headset, 2000)
-                .unwrap(),
+            seen(&mut store, &after, DeviceKind::Headset, 2000),
             Seen::Inserted
         );
         assert_eq!(store.list_devices().unwrap().len(), 2);
@@ -664,15 +717,13 @@ mod tests {
         {
             let mut store = SqliteStore::open(&path).unwrap();
             let sysfs = id("MX Anywhere 3", Transport::Sysfs, Some("hidpp_battery_6"));
-            store.record_seen(&sysfs, DeviceKind::Mouse, 1000).unwrap();
+            seen(&mut store, &sysfs, DeviceKind::Mouse, 1000);
             let bluetooth = id(
                 "NuPhy Air75",
                 Transport::Bluetooth,
                 Some("00:00:5E:00:53:02"),
             );
-            store
-                .record_seen(&bluetooth, DeviceKind::Keyboard, 1000)
-                .unwrap();
+            seen(&mut store, &bluetooth, DeviceKind::Keyboard, 1000);
             store.conn.execute_batch("PRAGMA user_version = 2").unwrap();
         }
 
@@ -690,8 +741,8 @@ mod tests {
         let mut store = SqliteStore::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
 
-        store.record_seen(&a, DeviceKind::Mouse, 1000).unwrap();
-        store.record_seen(&a, DeviceKind::Mouse, 2000).unwrap();
+        seen(&mut store, &a, DeviceKind::Mouse, 1000);
+        seen(&mut store, &a, DeviceKind::Mouse, 2000);
 
         let devices = store.list_devices().unwrap();
         assert_eq!(devices.len(), 1);
@@ -700,7 +751,7 @@ mod tests {
 
         // A different locator on the same name is a different device.
         let b = id("mouse", Transport::Sysfs, Some("b"));
-        store.record_seen(&b, DeviceKind::Mouse, 3000).unwrap();
+        seen(&mut store, &b, DeviceKind::Mouse, 3000);
         assert_eq!(store.list_devices().unwrap().len(), 2);
 
         cleanup(&path);
@@ -712,9 +763,9 @@ mod tests {
         let mut store = SqliteStore::open(&path).unwrap();
         let a = id("headset", Transport::Bluetooth, None);
 
-        store.record_seen(&a, DeviceKind::Headset, 5000).unwrap();
+        seen(&mut store, &a, DeviceKind::Headset, 5000);
         // A clock step backward must not make last_seen regress...
-        store.record_seen(&a, DeviceKind::Headset, 1000).unwrap();
+        seen(&mut store, &a, DeviceKind::Headset, 1000);
         // ...and repeated None-locator upserts must stay one row, not two
         // (SQLite's UNIQUE constraint alone does not dedup NULL columns).
         let devices = store.list_devices().unwrap();
@@ -768,7 +819,7 @@ mod tests {
                     transport,
                     None,
                 );
-                store.record_seen(&device, kind, 42).unwrap();
+                seen(&mut store, &device, kind, 42);
                 expected.push((device, kind));
             }
         }
@@ -793,7 +844,7 @@ mod tests {
         let path = scratch_db_path("unknown-enum");
         let mut store = SqliteStore::open(&path).unwrap();
         let known = id("kbd", Transport::Bluetooth, None);
-        store.record_seen(&known, DeviceKind::Keyboard, 42).unwrap();
+        seen(&mut store, &known, DeviceKind::Keyboard, 42);
         store
             .conn
             .execute_batch(
@@ -816,7 +867,7 @@ mod tests {
         let mut store = SqliteStore::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
 
-        store.record_seen(&a, DeviceKind::Mouse, 1000).unwrap();
+        seen(&mut store, &a, DeviceKind::Mouse, 1000);
         store
             .record_reading(&a, BatteryReading::new(80, ChargeState::Discharging), 1000)
             .unwrap();
@@ -839,7 +890,7 @@ mod tests {
         let mut store = SqliteStore::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
         let now = 100_000_000;
-        store.record_seen(&a, DeviceKind::Mouse, now).unwrap();
+        seen(&mut store, &a, DeviceKind::Mouse, now);
 
         let inside = now - RETENTION_SECS + 10;
         let outside = now - RETENTION_SECS - 10;
@@ -878,7 +929,7 @@ mod tests {
         let path = scratch_db_path("dedup");
         let mut store = SqliteStore::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
-        store.record_seen(&a, DeviceKind::Mouse, 0).unwrap();
+        seen(&mut store, &a, DeviceKind::Mouse, 0);
 
         for at in [0, 60, 120] {
             store
@@ -901,7 +952,7 @@ mod tests {
         let a = id("mouse", Transport::Sysfs, Some("a"));
         {
             let mut store = SqliteStore::open(&path).unwrap();
-            store.record_seen(&a, DeviceKind::Mouse, 0).unwrap();
+            seen(&mut store, &a, DeviceKind::Mouse, 0);
             for (i, percent) in [80u8, 79, 78, 77, 76, 75].into_iter().enumerate() {
                 store
                     .record_reading(
@@ -918,6 +969,166 @@ mod tests {
         let store = SqliteStore::open(&path).unwrap();
         let capped = store.recent_readings(&a, 3).unwrap();
         assert_eq!(capped, vec![(500, 75), (400, 76), (300, 77)]);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn repeated_identical_readings_store_one_row_plus_hourly_heartbeats() {
+        let path = scratch_db_path("heartbeat");
+        let mut store = SqliteStore::open(&path).unwrap();
+        let a = id("mouse", Transport::Sysfs, Some("a"));
+        seen(&mut store, &a, DeviceKind::Mouse, 0);
+
+        for at in (0..=2 * READING_HEARTBEAT_SECS).step_by(60) {
+            store
+                .record_reading(&a, BatteryReading::new(80, ChargeState::Discharging), at)
+                .unwrap();
+        }
+
+        let ats: Vec<i64> = stored_readings(&store).into_iter().map(|r| r.0).collect();
+        assert_eq!(
+            ats,
+            vec![0, READING_HEARTBEAT_SECS, 2 * READING_HEARTBEAT_SECS]
+        );
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_changed_percent_or_state_is_stored_at_once() {
+        let path = scratch_db_path("change");
+        let mut store = SqliteStore::open(&path).unwrap();
+        let a = id("mouse", Transport::Sysfs, Some("a"));
+        seen(&mut store, &a, DeviceKind::Mouse, 0);
+
+        for (at, percent, state) in [
+            (0, 80, ChargeState::Discharging),
+            (60, 80, ChargeState::Discharging),
+            (120, 79, ChargeState::Discharging),
+            (180, 79, ChargeState::Charging),
+            (240, 79, ChargeState::Charging),
+        ] {
+            store
+                .record_reading(&a, BatteryReading::new(percent, state), at)
+                .unwrap();
+        }
+
+        assert_eq!(
+            stored_readings(&store),
+            vec![
+                (0, 80, "discharging".to_owned()),
+                (120, 79, "discharging".to_owned()),
+                (180, 79, "charging".to_owned()),
+            ]
+        );
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn last_seen_moves_only_past_its_resolution_but_kind_always_updates() {
+        let path = scratch_db_path("seen-resolution");
+        let mut store = SqliteStore::open(&path).unwrap();
+        let a = id("mouse", Transport::Sysfs, Some("a"));
+        let last_seen = |store: &SqliteStore| store.list_devices().unwrap()[0].last_seen;
+
+        seen(&mut store, &a, DeviceKind::Other, 1000);
+        seen(&mut store, &a, DeviceKind::Other, 1030);
+        assert_eq!(last_seen(&store), 1000);
+
+        seen(&mut store, &a, DeviceKind::Mouse, 1060);
+        assert_eq!(store.list_devices().unwrap()[0].kind, DeviceKind::Mouse);
+
+        seen(
+            &mut store,
+            &a,
+            DeviceKind::Mouse,
+            1060 + LAST_SEEN_RESOLUTION_SECS,
+        );
+        assert_eq!(last_seen(&store), 1060 + LAST_SEEN_RESOLUTION_SECS);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn record_seen_reports_each_device_of_a_sweep_in_order() {
+        let path = scratch_db_path("seen-batch");
+        let mut store = SqliteStore::open(&path).unwrap();
+        let a = id("mouse", Transport::Sysfs, Some("a"));
+        let b = id("keyboard", Transport::Bluetooth, Some("b"));
+        seen(&mut store, &a, DeviceKind::Mouse, 1000);
+
+        let outcomes = store
+            .record_seen(
+                &[(b.clone(), DeviceKind::Keyboard), (a, DeviceKind::Mouse)],
+                2000,
+            )
+            .unwrap();
+
+        assert_eq!(outcomes, vec![Seen::Inserted, Seen::Existing]);
+        assert_eq!(store.list_devices().unwrap().len(), 2);
+
+        cleanup(&path);
+    }
+
+    /// A file written by the previous build (v3: no index on `readings.at`)
+    /// opens, gains the index, and keeps its rows.
+    #[test]
+    fn a_v3_database_migrates_to_v4_keeping_its_rows() {
+        let path = scratch_db_path("v4-migration");
+        {
+            let conn = Connection::open(&path).unwrap();
+            create_schema(&conn).unwrap();
+            conn.execute_batch(
+                "INSERT INTO devices (id, name, transport, locator, kind, first_seen, last_seen)
+                 VALUES (1, 'mouse', 'bluetooth', 'a', 'mouse', 10, 20);
+                 INSERT INTO readings (device_id, at, percent, state)
+                 VALUES (1, 10, 80, 'discharging'), (1, 20, 79, 'discharging');
+                 PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        let plan: String = store
+            .conn
+            .query_row(
+                "EXPLAIN QUERY PLAN DELETE FROM readings WHERE at < 15",
+                [],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("readings_at"),
+            "prune does not use the index: {plan}"
+        );
+        let mouse = id("mouse", Transport::Bluetooth, Some("a"));
+        assert_eq!(
+            store.recent_readings(&mouse, 10).unwrap(),
+            vec![(20, 79), (10, 80)]
+        );
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn every_connection_syncs_at_normal_and_caps_the_wal() {
+        let path = scratch_db_path("pragmas");
+        let store = SqliteStore::open(&path).unwrap();
+        let pragma = |name: &str| -> i64 {
+            store
+                .conn
+                .query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(pragma("synchronous"), 1, "NORMAL");
+        assert_eq!(pragma("journal_size_limit"), JOURNAL_SIZE_LIMIT_BYTES);
 
         cleanup(&path);
     }

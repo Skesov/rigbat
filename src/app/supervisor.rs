@@ -5,14 +5,14 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
 use tokio::task::AbortHandle;
-use tokio::time::sleep;
+use tokio::time::{MissedTickBehavior, interval_at, sleep};
 
 use super::migration::migrate_shown_devices_once;
 use crate::config::Config;
 use crate::discovery::BackendSweep;
 use crate::domain::estimate::estimate as estimate_remaining;
 use crate::domain::{
-    BatteryReading, DeviceId, DeviceInfo, DeviceState, Estimate, Presence, TrayState,
+    BatteryReading, DeviceId, DeviceInfo, DeviceKind, DeviceState, Estimate, Presence, TrayState,
 };
 use crate::refresh::RefreshSignal;
 use crate::sources::hidraw::NodeReassigned;
@@ -378,27 +378,35 @@ impl DeviceRegistry {
         let now_instant = Instant::now();
         let now_unix = state::now_unix();
 
-        let mut fresh_ids: Vec<DeviceId> = Vec::new();
+        let mut found: Vec<(&'static str, Box<dyn BatterySource>)> = Vec::new();
         let mut succeeded_backends: Vec<&'static str> = Vec::new();
 
         for sweep in sweeps {
             let BackendSweep { name, result } = sweep;
-            let fresh = match result {
+            match result {
                 Ok(sources) => {
                     succeeded_backends.push(name);
-                    sources
+                    found.extend(sources.into_iter().map(|src| (name, src)));
                 }
                 // Already logged once, by `discovery::discover_all` — not
                 // logged again here per device or per sweep.
                 Err(_) => continue,
-            };
+            }
+        }
 
-            for src in fresh {
-                let id = src.device().id();
-                fresh_ids.push(id.clone());
-                if let Some(rename) = self.admit(src, id, name, now_instant, now_unix, ctx).await {
-                    renames.push(rename);
-                }
+        let devices = found
+            .iter()
+            .map(|(_, src)| (src.device().id(), src.device().kind))
+            .collect();
+        let mut seen = self.record_seen(devices, now_unix).await.into_iter();
+        let mut fresh_ids: Vec<DeviceId> = Vec::new();
+        for (name, src) in found {
+            fresh_ids.push(src.device().id());
+            if let Some(rename) = self
+                .admit(src, name, seen.next(), now_instant, now_unix, ctx)
+                .await
+            {
+                renames.push(rename);
             }
         }
 
@@ -408,49 +416,57 @@ impl DeviceRegistry {
         renames
     }
 
-    /// One device a successful sweep found: upserts its inventory row, then
-    /// respawns a crashed task, keeps a healthy one, or adds the entry and
-    /// spawns its task. Returns the rename the store detected, if any.
+    /// Upserts the inventory row of every device a sweep found, whether it is
+    /// brand new, still running, or reappearing. Empty without a store or on
+    /// a store error.
+    async fn record_seen(
+        &self,
+        devices: Vec<(DeviceId, DeviceKind)>,
+        now_unix: i64,
+    ) -> Vec<state::Seen> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        store
+            .record_seen(devices, now_unix)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("state store: failed to record the devices seen: {e:#}");
+                Vec::new()
+            })
+    }
+
+    /// One device a successful sweep found: follows the rename the store
+    /// detected, then respawns a crashed task, keeps a healthy one, or adds
+    /// the entry and spawns its task. Returns the rename, if any.
     async fn admit(
         &mut self,
         src: Box<dyn BatterySource>,
-        id: DeviceId,
         name: &'static str,
+        seen: Option<state::Seen>,
         now_instant: Instant,
         now_unix: i64,
         ctx: &SourceCtx,
     ) -> Option<(String, String)> {
-        // Cloned because `forget` below needs `&mut self` while it is in use.
-        let store = self.store.clone();
+        let id = src.device().id();
         let mut rename = None;
-        // Every device discovery finds gets upserted, whether it is
-        // brand new, still running, or reappearing — this is the
-        // `devices` row's `last_seen`, updated once per sweep.
-        if let Some(store) = &store {
-            match store.record_seen(&id, src.device().kind, now_unix).await {
-                Ok(state::Seen::Renamed { from }) => {
-                    tracing::info!(
-                        device = %id.name,
-                        previous = %from,
-                        "device renamed; inventory row and settings follow it"
-                    );
-                    // The live roster is keyed by the same identity, so
-                    // the entry under the old name has to go now. Left
-                    // to `retire_vanished` it would linger as a
-                    // Disconnected duplicate for DISCONNECTED_RETENTION
-                    // — one device showing twice in the tray for a day,
-                    // while the Devices tab already shows it once.
-                    self.forget(&DeviceId {
-                        name: from.clone(),
-                        ..id.clone()
-                    });
-                    rename = Some((from, id.name.clone()));
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(device = %id.name, "state store: failed to record device seen: {e:#}");
-                }
-            }
+        if let Some(state::Seen::Renamed { from }) = seen {
+            tracing::info!(
+                device = %id.name,
+                previous = %from,
+                "device renamed; inventory row and settings follow it"
+            );
+            // The live roster is keyed by the same identity, so
+            // the entry under the old name has to go now. Left
+            // to `retire_vanished` it would linger as a
+            // Disconnected duplicate for DISCONNECTED_RETENTION
+            // — one device showing twice in the tray for a day,
+            // while the Devices tab already shows it once.
+            self.forget(&DeviceId {
+                name: from.clone(),
+                ..id.clone()
+            });
+            rename = Some((from, id.name.clone()));
         }
 
         if let Some(task) = self.tasks.get(&id) {
@@ -502,7 +518,7 @@ impl DeviceRegistry {
                 // `seed_history`. A device reappearing after
                 // `Disconnected` reuses the Occupied arm above and keeps
                 // whatever history it already has in memory instead.
-                let battery_history = match &store {
+                let battery_history = match &self.store {
                     Some(store) => seed_history(store, &id, now_instant, now_unix).await,
                     None => Vec::new(),
                 };
@@ -709,6 +725,13 @@ async fn manager_task<F, Fut, L, S>(
         migration_sweeps,
     );
 
+    // Outlives iterations: a per-iteration sleep restarts on every reading and starves.
+    let mut sweep_timer = interval_at(
+        tokio::time::Instant::now() + DISCOVERY_INTERVAL,
+        DISCOVERY_INTERVAL,
+    );
+    sweep_timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     loop {
         tokio::select! {
             msg = mpsc_rx.recv() => {
@@ -720,34 +743,29 @@ async fn manager_task<F, Fut, L, S>(
                             SourceEvent::NodeReassigned => registry.retire(&id, generation),
                         }
                         publish(&registry, &watch_tx);
+                        continue;
                     }
                     // All source tasks dropped their senders — nothing left to do.
                     None => return,
                 }
             }
-            _ = sleep(DISCOVERY_INTERVAL) => {
-                let renames = rediscover(&mut registry, discover(), &ctx, &watch_tx).await;
-                apply_renames(&renames, &config_tx, &load_config, &save_config);
-                // Retried per sweep, not per loop iteration: readings arrive
-                // far more often than sweeps, and counting those would burn
-                // the deadline in seconds instead of minutes.
-                if !migration_done {
-                    migration_sweeps = migration_sweeps.saturating_add(1);
-                    migration_done = migrate_shown_devices_once(
-                        &registry.names(), &config_tx, &load_config, &save_config, migration_sweeps,
-                    );
-                }
-            }
-            _ = waiter.wait() => {
-                let renames = rediscover(&mut registry, discover(), &ctx, &watch_tx).await;
-                apply_renames(&renames, &config_tx, &load_config, &save_config);
-                if !migration_done {
-                    migration_sweeps = migration_sweeps.saturating_add(1);
-                    migration_done = migrate_shown_devices_once(
-                        &registry.names(), &config_tx, &load_config, &save_config, migration_sweeps,
-                    );
-                }
-            }
+            _ = sweep_timer.tick() => {}
+            _ = waiter.wait() => sweep_timer.reset(),
+        }
+        let renames = rediscover(&mut registry, discover(), &ctx, &watch_tx).await;
+        apply_renames(&renames, &config_tx, &load_config, &save_config);
+        // Retried per sweep, not per loop iteration: readings arrive
+        // far more often than sweeps, and counting those would burn
+        // the deadline in seconds instead of minutes.
+        if !migration_done {
+            migration_sweeps = migration_sweeps.saturating_add(1);
+            migration_done = migrate_shown_devices_once(
+                &registry.names(),
+                &config_tx,
+                &load_config,
+                &save_config,
+                migration_sweeps,
+            );
         }
     }
 }
@@ -2288,7 +2306,7 @@ mod tests {
         // Pre-populate the store directly, standing in for a previous run
         // that recorded this device's change-point history.
         store
-            .record_seen(&id, a.kind, 0)
+            .record_seen(vec![(id.clone(), a.kind)], 0)
             .await
             .expect("record_seen");
         for (at, percent) in [(0i64, 80u8), (600, 79), (1200, 78)] {
@@ -2333,5 +2351,39 @@ mod tests {
         // An increase clears everything recorded before it.
         push_history_point(&mut history, base, 90);
         assert_eq!(history, vec![(base, 90)]);
+    }
+
+    /// Readings every few seconds must not postpone the periodic sweep.
+    #[tokio::test(start_paused = true)]
+    async fn readings_do_not_postpone_the_discovery_sweep() {
+        let cfg = Config {
+            poll_interval_secs: 5,
+            ..Config::default()
+        };
+        let (tx, _config_rx) = config_channel(cfg);
+        let sweeps = Arc::new(AtomicUsize::new(0));
+        let sweeps_seen = sweeps.clone();
+        let (_rx, _refresh) = Supervisor::spawn_with(
+            tx,
+            move || {
+                sweeps_seen.fetch_add(1, Ordering::Relaxed);
+                let sources: Vec<Box<dyn BatterySource>> = vec![Box::new(OkSource {
+                    info: device("mouse"),
+                    reading: reading_discharging(80),
+                })];
+                async move { vec![ok_sweep("sysfs", sources)] }
+            },
+            no_migration_load,
+            no_migration_save,
+            None,
+        );
+
+        tokio::time::sleep(DISCOVERY_INTERVAL * 3 + Duration::from_secs(1)).await;
+
+        assert_eq!(
+            sweeps.load(Ordering::Relaxed),
+            4,
+            "initial sweep plus one per interval"
+        );
     }
 }
