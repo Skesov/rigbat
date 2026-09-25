@@ -54,9 +54,10 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
   hidraw node (via `discovery::registry::hidraw_matchers`), config and state DB. Prints
   `ok`/`warn`/`fail` with a fix per problem; exits 1 on any `fail`, warnings do not fail.
 - `rigbat settings` — GTK-free eframe/egui settings window in a SEPARATE process (the tray spawns
-  it). It edits `config.json`; the tray applies changes via the file watch. It holds a tokio
-  runtime only to run device discovery off the UI thread — the winit event loop is never entered
-  from inside it. Both windows export an AT-SPI tree via eframe's `accesskit` feature.
+  it). It edits `config.json`; the tray applies changes via the file watch. Its device list is
+  the running tray's `org.rigbat.Tray1` snapshot; only with no tray does it discover and poll
+  itself. It holds a tokio runtime only for that work off the UI thread — the winit event loop is
+  never entered from inside it. Both windows export an AT-SPI tree via eframe's `accesskit` feature.
 
 ## Toolchain and commands
 
@@ -71,7 +72,7 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
 
 ## Key decisions
 
-- **Concurrency:** `tokio`, message-passing, no `Mutex` on shared data. Supervisor owns state; data flows through `mpsc` (readings) and `watch` (to tray, and for the refresh signal — a generation counter, `app::refresh::RefreshSignal`, not `Notify`, whose `notify_waiters()` drops triggers fired mid-poll). Each source is a separate task with its own interval; a panicking source is detected on the next discovery sweep (`is_finished()`) and respawned, not left silently dead.
+- **Concurrency:** `tokio`, message-passing, no `Mutex` on shared data (`disallowed-types` in `clippy.toml`). Supervisor owns state; data flows through `mpsc` (readings) and `watch` (to tray, and for the refresh signal — a generation counter, `app::refresh::RefreshSignal`, not `Notify`, whose `notify_waiters()` drops triggers fired mid-poll). Each source is a separate task with its own interval; a panicking source is detected on the next discovery sweep (`is_finished()`) and respawned, not left silently dead.
 - **Source port:** `trait BatterySource { async fn poll(&mut self) -> Result<BatteryReading> }`. Handle policy is not universal — it follows how the device talks, which is the vendor's choice, not rigbat's: a **request/response** device (write a query, read the echo — SteelSeries) holds its handle for the source's whole lifetime, because reopening per poll can deadlock it mid-exchange; a **stream-only** device (pushes input reports unprompted — 8BitDo in DInput at 1000 Hz) opens per poll and closes, because holding the handle open just queues reports into the kernel's ring for the whole interval between polls, almost all discarded, and there is nothing to deadlock since nothing is written. A new backend establishes which kind it faces — read the report descriptor, watch whether the device sends anything unprompted — before picking a policy; neither is the default.
 - **Tray:** `ksni`, SNI-only. XEmbed is not embedded — closed by external `snixembed`. No GTK dependency.
 - **Icon:** render behind the `IconRenderer -> Vec<ksni::Icon>` port (multiple sizes for HiDPI). Implementation in `tiny-skia`; migration to SVG/resvg is a new implementation behind the same port.
@@ -81,7 +82,8 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
   observations (device inventory, reading history). The XDG spec defines `STATE_HOME` as data not
   important enough for `DATA_HOME` — a directory whose loss must be survivable — so decisions do
   not belong there. Desktop practice agrees: Chrome keeps `Preferences` as JSON beside `History` as
-  SQLite. The store is optional: if it cannot be opened, monitoring continues without it.
+  SQLite. The store is optional: if it cannot be opened, monitoring continues without it. One
+  thread owns the connection (`state::Store`, an actor); async callers await its reply.
 - **Hide, don't show:** the config records which devices to _hide_. A whitelist has to be rebuilt
   from whatever is connected at the moment, which silently drops the rest; an exclusion list is
   edited one entry at a time, so a partial view cannot damage what it cannot see.

@@ -8,6 +8,8 @@ use anyhow::Context as _;
 pub struct Context {
     /// `Mutex<Option<_>>` rather than a `OnceCell`, deliberately: the cached
     /// connection has to be *replaceable*. See `system_bus`.
+    // A memoized handle, not shared data: the lock serialises one dial.
+    #[expect(clippy::disallowed_types)]
     system_bus: tokio::sync::Mutex<Option<zbus::Connection>>,
 }
 

@@ -643,6 +643,7 @@ mod tests {
             name: name.to_owned(),
             kind: DeviceKind::Mouse,
             transport: Transport::Hidraw,
+            locator: None,
             presence,
             percent,
             charge: percent.map(|_| ChargeState::Discharging),
@@ -677,6 +678,7 @@ mod tests {
         let snapshot = Snapshot {
             display_mode: DisplayMode::IconOnly,
             devices,
+            hidden: Vec::new(),
         };
         Dashboard::new(Some(snapshot), lang, mpsc::channel().1, None)
     }
@@ -901,6 +903,7 @@ mod tests {
         d.accept(Some(Snapshot {
             display_mode: DisplayMode::IconOnly,
             devices: every_state(),
+            hidden: Vec::new(),
         }));
         d.fit_window(&ctx);
         assert_eq!(d.size, window_size(6));

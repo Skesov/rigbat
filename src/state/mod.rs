@@ -22,8 +22,10 @@ mod store;
 pub use store::SqliteStore;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use anyhow::Context as _;
+use tokio::sync::oneshot;
 
 use crate::domain::{BatteryReading, DeviceId, DeviceKind};
 
@@ -47,12 +49,6 @@ pub struct DeviceRecord {
     pub last_seen: i64,
 }
 
-/// A persisted device inventory and reading history, behind a port so the
-/// supervisor's tests never need a real database — the same shape
-/// `discovery::Context` uses to inject infrastructure from the composition
-/// root. All methods are synchronous: SQLite I/O here is the same kind of
-/// brief, direct blocking call `config::save` already makes from async
-/// contexts in this codebase, not something that needs `spawn_blocking`.
 /// What `record_seen` did to the inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seen {
@@ -67,47 +63,123 @@ pub enum Seen {
     Renamed { from: String },
 }
 
-pub trait Store: Send + Sync {
+type Job = Box<dyn FnOnce(&mut SqliteStore) + Send>;
+
+/// A handle to the device inventory and reading history. One dedicated thread
+/// owns the SQLite connection and runs requests in the order they were sent;
+/// callers await the reply, so a write held by another process (up to
+/// `busy_timeout`) stalls that thread, never a tokio worker.
+#[derive(Clone)]
+pub struct Store {
+    jobs: std::sync::mpsc::Sender<Job>,
+}
+
+impl Store {
+    /// Moves `db` onto its own thread, which exits once every handle is dropped.
+    pub fn start(mut db: SqliteStore) -> anyhow::Result<Self> {
+        let (jobs, queue) = std::sync::mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("rigbat-state".into())
+            .spawn(move || {
+                for job in queue {
+                    job(&mut db);
+                }
+            })
+            .context("spawning the state store thread")?;
+        Ok(Self { jobs })
+    }
+
+    fn send<T: Send + 'static>(
+        &self,
+        op: impl FnOnce(&mut SqliteStore) -> anyhow::Result<T> + Send + 'static,
+    ) -> anyhow::Result<oneshot::Receiver<anyhow::Result<T>>> {
+        let (reply, answer) = oneshot::channel();
+        self.jobs
+            .send(Box::new(move |db| {
+                // The caller may have stopped waiting; the work is done either way.
+                let _ = reply.send(op(db));
+            }))
+            .map_err(|_| anyhow::anyhow!("the state store thread has stopped"))?;
+        Ok(answer)
+    }
+
+    async fn call<T: Send + 'static>(
+        &self,
+        op: impl FnOnce(&mut SqliteStore) -> anyhow::Result<T> + Send + 'static,
+    ) -> anyhow::Result<T> {
+        self.send(op)?
+            .await
+            .map_err(|_| anyhow::anyhow!("the state store thread stopped mid-request"))?
+    }
+
     /// Upserts a `devices` row for `id`: inserts it with
     /// `first_seen = last_seen = now` if this is the first time it has been
     /// seen, or advances `last_seen` otherwise. Called once per discovered
     /// device on every discovery sweep.
-    fn record_seen(&self, id: &DeviceId, kind: DeviceKind, now: i64) -> anyhow::Result<Seen>;
-
-    /// Records one successful poll as a `readings` row. A no-op (not an
-    /// error) if `id` has no `devices` row yet — `record_seen` is always
-    /// called before a device can be polled, so this should not happen in
-    /// practice, but a reading is not worth losing the device's inventory
-    /// entry over.
-    fn record_reading(
+    pub async fn record_seen(
         &self,
         id: &DeviceId,
-        reading: BatteryReading,
+        kind: DeviceKind,
         now: i64,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<Seen> {
+        let id = id.clone();
+        self.call(move |db| db.record_seen(&id, kind, now)).await
+    }
+
+    /// Queues one successful poll as a `readings` row and returns at once;
+    /// a failure is logged on the store thread. A no-op if `id` has no
+    /// `devices` row — `record_seen` always runs before a device is polled.
+    pub fn record_reading(&self, id: &DeviceId, reading: BatteryReading, now: i64) {
+        let id = id.clone();
+        let sent = self.send(move |db| {
+            if let Err(e) = db.record_reading(&id, reading, now) {
+                tracing::warn!(device = %id.name, "state store: failed to record reading: {e:#}");
+            }
+            Ok(())
+        });
+        if let Err(e) = sent {
+            tracing::warn!("state store: failed to record reading: {e:#}");
+        }
+    }
 
     /// The most recent `cap` percent-change points for `id` (readings where
     /// the percent differs from the previous one), most-recent-first —
     /// mirrors `push_reading`'s dedup so a caller can replay them straight
     /// into a fresh change-point history. Empty if `id` has no readings, or
     /// no `devices` row.
-    fn recent_readings(&self, id: &DeviceId, cap: usize) -> anyhow::Result<Vec<(i64, u8)>>;
+    pub async fn recent_readings(
+        &self,
+        id: &DeviceId,
+        cap: usize,
+    ) -> anyhow::Result<Vec<(i64, u8)>> {
+        let id = id.clone();
+        self.call(move |db| db.recent_readings(&id, cap)).await
+    }
 
     /// Every device this store has ever recorded, in no particular order
     /// stronger than "stable enough for a UI to sort".
-    fn list_devices(&self) -> anyhow::Result<Vec<DeviceRecord>>;
+    pub async fn list_devices(&self) -> anyhow::Result<Vec<DeviceRecord>> {
+        self.call(|db| db.list_devices()).await
+    }
 
     /// Forgets a device: deletes its `devices` row and, by cascade, every
     /// `readings` row for it. Does not touch `config::Config` —
     /// `hidden_devices` is the caller's responsibility (the settings
-    /// window), since this module never depends on `config`.
-    fn delete_device(&self, id: i64) -> anyhow::Result<()>;
+    /// window), since this module never depends on `config`. Blocks the
+    /// calling thread, which must not be a runtime thread.
+    pub fn delete_device_blocking(&self, id: i64) -> anyhow::Result<()> {
+        self.send(move |db| db.delete_device(id))?
+            .blocking_recv()
+            .map_err(|_| anyhow::anyhow!("the state store thread stopped mid-request"))?
+    }
 
     /// Deletes `readings` rows older than the retention window, and any
     /// `readings` row whose device no longer exists (normally handled by
     /// the `ON DELETE CASCADE` foreign key already; see `SqliteStore::prune`
     /// for why this is checked again explicitly).
-    fn prune(&self, now: i64) -> anyhow::Result<()>;
+    pub async fn prune(&self, now: i64) -> anyhow::Result<()> {
+        self.call(move |db| db.prune(now)).await
+    }
 }
 
 /// `$XDG_STATE_HOME/rigbat/rigbat.db` — `None` if there is no state
@@ -120,7 +192,7 @@ pub fn db_path() -> Option<PathBuf> {
 /// Opens the state store, or returns `None` and logs a warning once if it
 /// cannot: no state directory, a read-only filesystem, a corrupt file. The
 /// caller runs with today's behaviour in that case — see the module doc.
-pub fn open() -> Option<Arc<dyn Store>> {
+pub fn open() -> Option<Store> {
     let path = match db_path() {
         Some(path) => path,
         None => {
@@ -130,8 +202,8 @@ pub fn open() -> Option<Arc<dyn Store>> {
             return None;
         }
     };
-    match SqliteStore::open(&path) {
-        Ok(store) => Some(Arc::new(store)),
+    match SqliteStore::open(&path).and_then(Store::start) {
+        Ok(store) => Some(store),
         Err(e) => {
             tracing::warn!(
                 "failed to open state store at {path:?}: {e:#}; device inventory and reading history are disabled"
@@ -145,10 +217,10 @@ pub fn open() -> Option<Arc<dyn Store>> {
 /// again every `RETENTION_INTERVAL` for the life of the process. Best
 /// effort: a failed pass is logged and tried again next interval rather
 /// than taken as a reason to stop the daemon.
-pub fn spawn_retention(store: Arc<dyn Store>) {
+pub fn spawn_retention(store: Store) {
     tokio::spawn(async move {
         loop {
-            if let Err(e) = store.prune(now_unix()) {
+            if let Err(e) = store.prune(now_unix()).await {
                 tracing::warn!("state store: retention prune failed: {e:#}");
             }
             tokio::time::sleep(RETENTION_INTERVAL).await;
@@ -171,6 +243,75 @@ pub fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{ChargeState, Transport};
+
+    fn scratch_db_path(test_name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "rigbat-state-actor-test-{test_name}-{}.db",
+            std::process::id()
+        ))
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    fn mouse() -> DeviceId {
+        DeviceId {
+            name: "mouse".to_owned(),
+            transport: Transport::Sysfs,
+            locator: Some("a".to_owned()),
+        }
+    }
+
+    /// A write another process holds locks the database for up to
+    /// `busy_timeout`; the single runtime thread here must keep running meanwhile.
+    #[tokio::test]
+    async fn a_locked_database_does_not_stall_the_runtime() {
+        let path = scratch_db_path("locked");
+        let store = Store::start(SqliteStore::open(&path).unwrap()).unwrap();
+        let other_process = rusqlite::Connection::open(&path).unwrap();
+        other_process.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let write = tokio::spawn({
+            let store = store.clone();
+            async move { store.record_seen(&mouse(), DeviceKind::Mouse, 1000).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !write.is_finished(),
+            "the write should still wait on the lock"
+        );
+
+        other_process.execute_batch("COMMIT").unwrap();
+        assert_eq!(write.await.unwrap().unwrap(), Seen::Inserted);
+
+        cleanup(&path);
+    }
+
+    /// A queued reading is visible to the next request: one thread, one queue.
+    #[tokio::test]
+    async fn requests_run_in_the_order_they_were_sent() {
+        let path = scratch_db_path("ordered");
+        let store = Store::start(SqliteStore::open(&path).unwrap()).unwrap();
+        store
+            .record_seen(&mouse(), DeviceKind::Mouse, 1000)
+            .await
+            .unwrap();
+        store.record_reading(
+            &mouse(),
+            BatteryReading::new(80, ChargeState::Discharging),
+            1000,
+        );
+
+        let history = store.recent_readings(&mouse(), 10).await.unwrap();
+        assert_eq!(history, [(1000, 80)]);
+
+        cleanup(&path);
+    }
 
     #[test]
     fn now_unix_is_plausible() {

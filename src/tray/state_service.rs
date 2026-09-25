@@ -9,45 +9,52 @@ use super::manager::featured_id;
 use crate::app::refresh::RefreshSignal;
 use crate::app::supervisor::TrayState;
 use crate::config::{Config, TrayMode};
-use crate::domain::{Estimate, device_status, is_visible};
+use crate::domain::{DeviceState, Estimate, device_status, is_visible};
 use crate::ipc::{DeviceCard, Snapshot, TRAY_PATH};
 
-/// Every shown device, classified exactly as its tray icon is.
+/// Every device, classified exactly as its tray icon is; hidden ones apart.
 pub fn snapshot(state: &TrayState, cfg: &Config, now: Instant) -> Snapshot {
     let featured = featured_id(state, cfg, now);
-    let devices = state
+    let card = |d: &DeviceState, in_tray: bool| {
+        let (status, stale) = device_status(d, cfg.effective_low_threshold(&d.info.name));
+        DeviceCard {
+            name: d.info.name.clone(),
+            kind: d.info.kind,
+            transport: d.info.transport,
+            locator: d.info.locator.clone(),
+            presence: d.presence,
+            percent: d.last_reading.map(|r| r.percent),
+            charge: d.last_reading.map(|r| r.state),
+            status,
+            stale,
+            seen_secs_ago: d
+                .last_seen
+                .map(|seen| now.saturating_duration_since(seen).as_secs()),
+            remaining_secs: match d.estimate {
+                Estimate::Remaining(left) => Some(left.as_secs()),
+                Estimate::Unknown | Estimate::Charging => None,
+            },
+            in_tray,
+        }
+    };
+    let (shown, hidden): (Vec<&DeviceState>, Vec<&DeviceState>) = state
         .devices
         .iter()
-        .filter(|d| cfg.is_shown(&d.info.name))
+        .partition(|d| cfg.is_shown(&d.info.name));
+    let devices = shown
+        .into_iter()
         .map(|d| {
-            let (status, stale) = device_status(d, cfg.effective_low_threshold(&d.info.name));
             let in_tray = match cfg.tray_mode {
                 TrayMode::PerDevice => is_visible(d, |name| cfg.is_shown(name), now),
                 TrayMode::PrimaryOnly => featured.as_ref() == Some(&d.info.id()),
             };
-            DeviceCard {
-                name: d.info.name.clone(),
-                kind: d.info.kind,
-                transport: d.info.transport,
-                presence: d.presence,
-                percent: d.last_reading.map(|r| r.percent),
-                charge: d.last_reading.map(|r| r.state),
-                status,
-                stale,
-                seen_secs_ago: d
-                    .last_seen
-                    .map(|seen| now.saturating_duration_since(seen).as_secs()),
-                remaining_secs: match d.estimate {
-                    Estimate::Remaining(left) => Some(left.as_secs()),
-                    Estimate::Unknown | Estimate::Charging => None,
-                },
-                in_tray,
-            }
+            card(d, in_tray)
         })
         .collect();
     Snapshot {
         display_mode: cfg.display_mode,
         devices,
+        hidden: hidden.into_iter().map(|d| card(d, false)).collect(),
     }
 }
 
@@ -136,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_devices_are_left_out() {
+    fn hidden_devices_are_listed_apart() {
         let now = Instant::now();
         let state = TrayState {
             devices: vec![
@@ -148,12 +155,11 @@ mod tests {
             hidden_devices: vec!["keyboard".to_owned()],
             ..Config::default()
         };
-        let names: Vec<_> = snapshot(&state, &cfg, now)
-            .devices
-            .into_iter()
-            .map(|c| c.name)
-            .collect();
-        assert_eq!(names, ["mouse"]);
+        let snapshot = snapshot(&state, &cfg, now);
+        let names = |cards: &[DeviceCard]| cards.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&snapshot.devices), ["mouse"]);
+        assert_eq!(names(&snapshot.hidden), ["keyboard"]);
+        assert!(!snapshot.hidden[0].in_tray);
     }
 
     #[test]

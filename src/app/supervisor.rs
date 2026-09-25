@@ -69,7 +69,7 @@ impl Supervisor {
     pub fn spawn(
         config_tx: watch::Sender<Config>,
         ctx: Arc<Context>,
-        store: Option<Arc<dyn state::Store>>,
+        store: Option<state::Store>,
         role: ConfigRole,
     ) -> (watch::Receiver<TrayState>, RefreshSignal) {
         // Only the owner may write the config. `--waybar` does not take the
@@ -123,7 +123,7 @@ impl Supervisor {
         discover: F,
         load_config: L,
         save_config: S,
-        store: Option<Arc<dyn state::Store>>,
+        store: Option<state::Store>,
     ) -> (watch::Receiver<TrayState>, RefreshSignal)
     where
         F: Fn() -> Fut + Send + 'static,
@@ -229,13 +229,13 @@ fn push_history_point(history: &mut Vec<(Instant, u8)>, now: Instant, percent: u
 /// clamped to `now`: clamping would misrepresent its age and could distort
 /// the estimate's rate calculation, whereas dropping it just means seeding
 /// starts from a shorter, still-honest window.
-fn seed_history(
-    store: &dyn state::Store,
+async fn seed_history(
+    store: &state::Store,
     id: &DeviceId,
     now: Instant,
     now_unix: i64,
 ) -> Vec<(Instant, u8)> {
-    let rows = match store.recent_readings(id, HISTORY_CAP) {
+    let rows = match store.recent_readings(id, HISTORY_CAP).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(device = %id.name, "state store: failed to load history for seeding: {e:#}");
@@ -267,7 +267,7 @@ struct DeviceRegistry {
     /// upserts a `devices` row and seeds a new entry's history from it;
     /// `record` writes each successful poll. `None` runs exactly as before
     /// the store existed — see `src/state/mod.rs` for why it stays optional.
-    store: Option<Arc<dyn state::Store>>,
+    store: Option<state::Store>,
 }
 
 struct SourceTask {
@@ -298,7 +298,7 @@ struct SourceCtx {
 }
 
 impl DeviceRegistry {
-    fn new(store: Option<Arc<dyn state::Store>>) -> Self {
+    fn new(store: Option<state::Store>) -> Self {
         Self {
             order: Vec::new(),
             entries: HashMap::new(),
@@ -344,10 +344,8 @@ impl DeviceRegistry {
                 entry.last_seen = Some(now);
                 entry.consecutive_failures = 0;
                 entry.presence = Presence::Online;
-                if let Some(store) = &self.store
-                    && let Err(e) = store.record_reading(id, r, state::now_unix())
-                {
-                    tracing::warn!(device = %id.name, "state store: failed to record reading: {e:#}");
+                if let Some(store) = &self.store {
+                    store.record_reading(id, r, state::now_unix());
                 }
             }
             None => {
@@ -373,7 +371,12 @@ impl DeviceRegistry {
     /// `DeviceId`/`transport` — is what answers "which backend owns this
     /// id": `Transport::Hidraw` is shared by both the `steelseries` and
     /// `eightbitdo` backends, so transport cannot make that call.
-    fn reconcile(&mut self, sweeps: Vec<BackendSweep>, ctx: &SourceCtx) -> Vec<(String, String)> {
+    async fn reconcile(
+        &mut self,
+        sweeps: Vec<BackendSweep>,
+        ctx: &SourceCtx,
+    ) -> Vec<(String, String)> {
+        let store = self.store.clone();
         let mut renames: Vec<(String, String)> = Vec::new();
         let now_instant = Instant::now();
         let now_unix = state::now_unix();
@@ -400,8 +403,8 @@ impl DeviceRegistry {
                 // Every device discovery finds gets upserted, whether it is
                 // brand new, still running, or reappearing — this is the
                 // `devices` row's `last_seen`, updated once per sweep.
-                if let Some(store) = &self.store {
-                    match store.record_seen(&id, src.device().kind, now_unix) {
+                if let Some(store) = &store {
+                    match store.record_seen(&id, src.device().kind, now_unix).await {
                         Ok(state::Seen::Renamed { from }) => {
                             tracing::info!(
                                 device = %id.name,
@@ -476,8 +479,8 @@ impl DeviceRegistry {
                         // `seed_history`. A device reappearing after
                         // `Disconnected` reuses the Occupied arm above and keeps
                         // whatever history it already has in memory instead.
-                        let battery_history = match &self.store {
-                            Some(store) => seed_history(store.as_ref(), &id, now_instant, now_unix),
+                        let battery_history = match &store {
+                            Some(store) => seed_history(store, &id, now_instant, now_unix).await,
                             None => Vec::new(),
                         };
                         slot.insert(DeviceEntry {
@@ -644,7 +647,7 @@ async fn manager_task<F, Fut, L, S>(
     refresh: RefreshSignal,
     load_config: L,
     save_config: S,
-    store: Option<Arc<dyn state::Store>>,
+    store: Option<state::Store>,
 ) where
     F: Fn() -> Fut + Send + 'static,
     Fut: Future<Output = Vec<BackendSweep>> + Send + 'static,
@@ -736,7 +739,7 @@ where
     Fut: Future<Output = Vec<BackendSweep>>,
 {
     let sweeps = discover.await;
-    let renames = registry.reconcile(sweeps, ctx);
+    let renames = registry.reconcile(sweeps, ctx).await;
     publish(registry, watch_tx);
     renames
 }
@@ -1430,12 +1433,18 @@ mod tests {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
 
-        registry.reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx);
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx)
+            .await;
         let first = live_generation(&registry, &a.id());
         registry.record(&a.id(), first, Some(reading_discharging(80)));
 
-        registry.reconcile(vec![ok_sweep("sysfs", vec![])], &ctx);
-        registry.reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 55)])], &ctx);
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![])], &ctx)
+            .await;
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 55)])], &ctx)
+            .await;
         let second = live_generation(&registry, &a.id());
         assert_ne!(first, second);
 
@@ -1457,10 +1466,14 @@ mod tests {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
 
-        registry.reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx);
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx)
+            .await;
         let generation = live_generation(&registry, &a.id());
         registry.record(&a.id(), generation, Some(reading_discharging(80)));
-        registry.reconcile(vec![ok_sweep("sysfs", vec![])], &ctx);
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![])], &ctx)
+            .await;
 
         registry.record(&a.id(), generation, Some(reading_discharging(79)));
 
@@ -1627,10 +1640,16 @@ mod tests {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
 
-        registry.reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx);
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx)
+            .await;
         let first = live_generation(&registry, &a.id());
-        registry.reconcile(vec![ok_sweep("sysfs", vec![])], &ctx);
-        registry.reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx);
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![])], &ctx)
+            .await;
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx)
+            .await;
         let second = live_generation(&registry, &a.id());
         registry.record(&a.id(), second, Some(reading_discharging(80)));
 
@@ -1642,7 +1661,9 @@ mod tests {
         assert!(!registry.tasks.contains_key(&a.id()));
 
         // The next sweep that finds the device spawns afresh, not via the crash path.
-        registry.reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx);
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![ok_source(&a, 80)])], &ctx)
+            .await;
         assert!(live_generation(&registry, &a.id()) > second);
         assert_eq!(registry.snapshot()[0].presence, Presence::Disconnected);
     }
@@ -1755,21 +1776,25 @@ mod tests {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
 
-        registry.reconcile(
-            vec![ok_sweep(
-                "sysfs",
-                vec![Box::new(OkSource {
-                    info: a.clone(),
-                    reading: reading_discharging(80),
-                })],
-            )],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![ok_sweep(
+                    "sysfs",
+                    vec![Box::new(OkSource {
+                        info: a.clone(),
+                        reading: reading_discharging(80),
+                    })],
+                )],
+                &ctx,
+            )
+            .await;
         record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
         assert!(registry.tasks.contains_key(&a.id()));
 
         // Next discovery sweep succeeds but no longer sees the device.
-        registry.reconcile(vec![ok_sweep("sysfs", vec![])], &ctx);
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![])], &ctx)
+            .await;
 
         assert!(!registry.tasks.contains_key(&a.id()));
         let snapshot = registry.snapshot();
@@ -1813,13 +1838,15 @@ mod tests {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
 
-        registry.reconcile(
-            vec![ok_sweep(
-                "sysfs",
-                vec![Box::new(PanicSource { info: a.clone() })],
-            )],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![ok_sweep(
+                    "sysfs",
+                    vec![Box::new(PanicSource { info: a.clone() })],
+                )],
+                &ctx,
+            )
+            .await;
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }
@@ -1831,16 +1858,18 @@ mod tests {
         assert_eq!(registry.snapshot()[0].presence, Presence::Online);
 
         // Next sweep still sees the device, with a fresh replacement source.
-        registry.reconcile(
-            vec![ok_sweep(
-                "sysfs",
-                vec![Box::new(OkSource {
-                    info: a.clone(),
-                    reading: reading_discharging(55),
-                })],
-            )],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![ok_sweep(
+                    "sysfs",
+                    vec![Box::new(OkSource {
+                        info: a.clone(),
+                        reading: reading_discharging(55),
+                    })],
+                )],
+                &ctx,
+            )
+            .await;
 
         let snapshot = registry.snapshot();
         assert_eq!(snapshot[0].presence, Presence::Unreachable);
@@ -1873,19 +1902,23 @@ mod tests {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
 
-        registry.reconcile(
-            vec![ok_sweep(
-                "sysfs",
-                vec![Box::new(OkSource {
-                    info: a.clone(),
-                    reading: reading_discharging(80),
-                })],
-            )],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![ok_sweep(
+                    "sysfs",
+                    vec![Box::new(OkSource {
+                        info: a.clone(),
+                        reading: reading_discharging(80),
+                    })],
+                )],
+                &ctx,
+            )
+            .await;
         record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
 
-        registry.reconcile(vec![ok_sweep("sysfs", vec![])], &ctx);
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![])], &ctx)
+            .await;
 
         assert!(!registry.tasks.contains_key(&a.id()));
         assert_eq!(registry.snapshot()[0].presence, Presence::Disconnected);
@@ -1899,14 +1932,18 @@ mod tests {
         let a = device("a");
 
         // Never polled successfully before it vanishes — nothing to retain.
-        registry.reconcile(
-            vec![ok_sweep(
-                "sysfs",
-                vec![Box::new(ErrSource { info: a.clone() })],
-            )],
-            &ctx,
-        );
-        registry.reconcile(vec![ok_sweep("sysfs", vec![])], &ctx);
+        registry
+            .reconcile(
+                vec![ok_sweep(
+                    "sysfs",
+                    vec![Box::new(ErrSource { info: a.clone() })],
+                )],
+                &ctx,
+            )
+            .await;
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![])], &ctx)
+            .await;
 
         assert!(registry.snapshot().is_empty());
     }
@@ -1918,32 +1955,38 @@ mod tests {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
 
-        registry.reconcile(
-            vec![ok_sweep(
-                "sysfs",
-                vec![Box::new(OkSource {
-                    info: a.clone(),
-                    reading: reading_discharging(80),
-                })],
-            )],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![ok_sweep(
+                    "sysfs",
+                    vec![Box::new(OkSource {
+                        info: a.clone(),
+                        reading: reading_discharging(80),
+                    })],
+                )],
+                &ctx,
+            )
+            .await;
         record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
 
         // Vanishes, then reappears.
-        registry.reconcile(vec![ok_sweep("sysfs", vec![])], &ctx);
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![])], &ctx)
+            .await;
         assert_eq!(registry.snapshot()[0].presence, Presence::Disconnected);
 
-        registry.reconcile(
-            vec![ok_sweep(
-                "sysfs",
-                vec![Box::new(OkSource {
-                    info: a.clone(),
-                    reading: reading_discharging(80),
-                })],
-            )],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![ok_sweep(
+                    "sysfs",
+                    vec![Box::new(OkSource {
+                        info: a.clone(),
+                        reading: reading_discharging(80),
+                    })],
+                )],
+                &ctx,
+            )
+            .await;
 
         // Same entry reused, not duplicated.
         assert_eq!(registry.snapshot().len(), 1);
@@ -1969,22 +2012,26 @@ mod tests {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
 
-        registry.reconcile(
-            vec![ok_sweep(
-                "bluez",
-                vec![Box::new(OkSource {
-                    info: a.clone(),
-                    reading: reading_discharging(80),
-                })],
-            )],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![ok_sweep(
+                    "bluez",
+                    vec![Box::new(OkSource {
+                        info: a.clone(),
+                        reading: reading_discharging(80),
+                    })],
+                )],
+                &ctx,
+            )
+            .await;
         record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
         assert!(registry.tasks.contains_key(&a.id()));
 
         // Next sweep: the owning backend fails transiently (a bus hiccup),
         // not an honest "found nothing".
-        registry.reconcile(vec![err_sweep("bluez", "GetManagedObjects failed")], &ctx);
+        registry
+            .reconcile(vec![err_sweep("bluez", "GetManagedObjects failed")], &ctx)
+            .await;
 
         assert!(
             registry.tasks.contains_key(&a.id()),
@@ -2010,19 +2057,23 @@ mod tests {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
 
-        registry.reconcile(
-            vec![ok_sweep(
-                "bluez",
-                vec![Box::new(OkSource {
-                    info: a.clone(),
-                    reading: reading_discharging(80),
-                })],
-            )],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![ok_sweep(
+                    "bluez",
+                    vec![Box::new(OkSource {
+                        info: a.clone(),
+                        reading: reading_discharging(80),
+                    })],
+                )],
+                &ctx,
+            )
+            .await;
         record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
 
-        registry.reconcile(vec![ok_sweep("bluez", vec![])], &ctx);
+        registry
+            .reconcile(vec![ok_sweep("bluez", vec![])], &ctx)
+            .await;
 
         assert!(!registry.tasks.contains_key(&a.id()));
         assert_eq!(registry.snapshot()[0].presence, Presence::Disconnected);
@@ -2045,25 +2096,27 @@ mod tests {
         let mut controller = device("ultimate2");
         controller.transport = Transport::Hidraw;
 
-        registry.reconcile(
-            vec![
-                ok_sweep(
-                    "steelseries",
-                    vec![Box::new(OkSource {
-                        info: mouse.clone(),
-                        reading: reading_discharging(80),
-                    })],
-                ),
-                ok_sweep(
-                    "eightbitdo",
-                    vec![Box::new(OkSource {
-                        info: controller.clone(),
-                        reading: reading_discharging(50),
-                    })],
-                ),
-            ],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![
+                    ok_sweep(
+                        "steelseries",
+                        vec![Box::new(OkSource {
+                            info: mouse.clone(),
+                            reading: reading_discharging(80),
+                        })],
+                    ),
+                    ok_sweep(
+                        "eightbitdo",
+                        vec![Box::new(OkSource {
+                            info: controller.clone(),
+                            reading: reading_discharging(50),
+                        })],
+                    ),
+                ],
+                &ctx,
+            )
+            .await;
         record_live(&mut registry, &mouse.id(), Some(reading_discharging(80)));
         record_live(
             &mut registry,
@@ -2072,13 +2125,15 @@ mod tests {
         );
 
         // steelseries fails; eightbitdo succeeds and no longer sees its controller.
-        registry.reconcile(
-            vec![
-                err_sweep("steelseries", "hidraw read error"),
-                ok_sweep("eightbitdo", vec![]),
-            ],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![
+                    err_sweep("steelseries", "hidraw read error"),
+                    ok_sweep("eightbitdo", vec![]),
+                ],
+                &ctx,
+            )
+            .await;
 
         assert!(
             registry.tasks.contains_key(&mouse.id()),
@@ -2231,8 +2286,7 @@ mod tests {
         let (tx, _config_rx) = config_channel(Config::default());
         let mut published = tx.subscribe();
 
-        let saved: Arc<std::sync::Mutex<Option<Config>>> = Arc::new(std::sync::Mutex::new(None));
-        let saved_clone = saved.clone();
+        let (saved_tx, saved) = std::sync::mpsc::channel::<Config>();
 
         let (_rx, _refresh) = Supervisor::spawn_with(
             tx,
@@ -2254,7 +2308,7 @@ mod tests {
                 ..Config::default()
             },
             move |cfg: &Config| {
-                *saved_clone.lock().expect("mutex poisoned") = Some(cfg.clone());
+                saved_tx.send(cfg.clone()).expect("test receiver alive");
                 Ok(())
             },
             None,
@@ -2270,10 +2324,7 @@ mod tests {
         let migrated = published.borrow().clone();
         assert_eq!(migrated.hidden_devices, vec!["b".to_string()]);
         assert!(migrated.shown_devices.is_empty());
-        assert_eq!(
-            saved.lock().expect("mutex poisoned").as_ref(),
-            Some(&migrated)
-        );
+        assert_eq!(saved.try_iter().last().as_ref(), Some(&migrated));
     }
 
     // --- state store wiring (T34) -------------------------------------------
@@ -2303,10 +2354,10 @@ mod tests {
         }
     }
 
-    fn open_scratch_store(test_name: &str) -> (Arc<dyn state::Store>, std::path::PathBuf) {
+    fn open_scratch_store(test_name: &str) -> (state::Store, std::path::PathBuf) {
         let path = scratch_store_path(test_name);
-        let store: Arc<dyn state::Store> =
-            Arc::new(state::SqliteStore::open(&path).expect("opening scratch state store"));
+        let db = state::SqliteStore::open(&path).expect("opening scratch state store");
+        let store = state::Store::start(db).expect("starting the store thread");
         (store, path)
     }
 
@@ -2318,18 +2369,20 @@ mod tests {
         let mut registry = DeviceRegistry::new(Some(store.clone()));
         let a = device("a");
 
-        registry.reconcile(
-            vec![ok_sweep(
-                "sysfs",
-                vec![Box::new(OkSource {
-                    info: a.clone(),
-                    reading: reading_discharging(80),
-                })],
-            )],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![ok_sweep(
+                    "sysfs",
+                    vec![Box::new(OkSource {
+                        info: a.clone(),
+                        reading: reading_discharging(80),
+                    })],
+                )],
+                &ctx,
+            )
+            .await;
 
-        let devices = store.list_devices().expect("listing devices");
+        let devices = store.list_devices().await.expect("listing devices");
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].device, a.id());
 
@@ -2358,34 +2411,38 @@ mod tests {
             ..before.clone()
         };
 
-        let renames = registry.reconcile(
-            vec![ok_sweep(
-                "sysfs",
-                vec![Box::new(OkSource {
-                    info: before.clone(),
-                    reading: reading_discharging(80),
-                })],
-            )],
-            &ctx,
-        );
+        let renames = registry
+            .reconcile(
+                vec![ok_sweep(
+                    "sysfs",
+                    vec![Box::new(OkSource {
+                        info: before.clone(),
+                        reading: reading_discharging(80),
+                    })],
+                )],
+                &ctx,
+            )
+            .await;
         assert!(renames.is_empty());
 
-        let renames = registry.reconcile(
-            vec![ok_sweep(
-                "sysfs",
-                vec![Box::new(OkSource {
-                    info: after.clone(),
-                    reading: reading_discharging(80),
-                })],
-            )],
-            &ctx,
-        );
+        let renames = registry
+            .reconcile(
+                vec![ok_sweep(
+                    "sysfs",
+                    vec![Box::new(OkSource {
+                        info: after.clone(),
+                        reading: reading_discharging(80),
+                    })],
+                )],
+                &ctx,
+            )
+            .await;
 
         assert_eq!(
             renames,
             vec![("MX Anywhere 3".to_string(), "Work mouse".to_string())]
         );
-        let devices = store.list_devices().expect("listing devices");
+        let devices = store.list_devices().await.expect("listing devices");
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].device, after.id());
 
@@ -2402,7 +2459,7 @@ mod tests {
     /// move to the new one and the result is both saved and republished.
     #[test]
     fn apply_renames_moves_settings_and_republishes() {
-        let saved: Arc<std::sync::Mutex<Option<Config>>> = Arc::new(std::sync::Mutex::new(None));
+        let (saved_tx, saved) = std::sync::mpsc::channel::<Config>();
         let on_disk = Config {
             hidden_devices: vec!["MX Anywhere 3".to_string()],
             primary_device: Some("MX Anywhere 3".to_string()),
@@ -2414,12 +2471,9 @@ mod tests {
             let on_disk = on_disk.clone();
             move || on_disk.clone()
         };
-        let save = {
-            let saved = saved.clone();
-            move |cfg: &Config| {
-                *saved.lock().expect("mutex poisoned") = Some(cfg.clone());
-                Ok(())
-            }
+        let save = move |cfg: &Config| {
+            saved_tx.send(cfg.clone()).expect("test receiver alive");
+            Ok(())
         };
 
         apply_renames(
@@ -2432,10 +2486,7 @@ mod tests {
         let published = config_rx.borrow().clone();
         assert_eq!(published.hidden_devices, vec!["Work mouse".to_string()]);
         assert_eq!(published.primary_device, Some("Work mouse".to_string()));
-        assert_eq!(
-            saved.lock().expect("mutex poisoned").as_ref(),
-            Some(&published)
-        );
+        assert_eq!(saved.try_iter().last().as_ref(), Some(&published));
     }
 
     #[tokio::test]
@@ -2446,19 +2497,24 @@ mod tests {
         let mut registry = DeviceRegistry::new(Some(store.clone()));
         let a = device("a");
 
-        registry.reconcile(
-            vec![ok_sweep(
-                "sysfs",
-                vec![Box::new(OkSource {
-                    info: a.clone(),
-                    reading: reading_discharging(80),
-                })],
-            )],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![ok_sweep(
+                    "sysfs",
+                    vec![Box::new(OkSource {
+                        info: a.clone(),
+                        reading: reading_discharging(80),
+                    })],
+                )],
+                &ctx,
+            )
+            .await;
         record_live(&mut registry, &a.id(), Some(reading_discharging(80)));
 
-        let history = store.recent_readings(&a.id(), 10).expect("reading history");
+        let history = store
+            .recent_readings(&a.id(), 10)
+            .await
+            .expect("reading history");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].1, 80);
 
@@ -2478,27 +2534,30 @@ mod tests {
 
         // Pre-populate the store directly, standing in for a previous run
         // that recorded this device's change-point history.
-        store.record_seen(&id, a.kind, 0).expect("record_seen");
+        store
+            .record_seen(&id, a.kind, 0)
+            .await
+            .expect("record_seen");
         for (at, percent) in [(0i64, 80u8), (600, 79), (1200, 78)] {
-            store
-                .record_reading(&id, reading_discharging(percent), at)
-                .expect("record_reading");
+            store.record_reading(&id, reading_discharging(percent), at);
         }
 
         let (_tx, config_rx) = config_channel(Config::default());
         let ctx = source_ctx(config_rx);
         let mut registry = DeviceRegistry::new(Some(store.clone()));
 
-        registry.reconcile(
-            vec![ok_sweep(
-                "sysfs",
-                vec![Box::new(OkSource {
-                    info: a.clone(),
-                    reading: reading_discharging(78),
-                })],
-            )],
-            &ctx,
-        );
+        registry
+            .reconcile(
+                vec![ok_sweep(
+                    "sysfs",
+                    vec![Box::new(OkSource {
+                        info: a.clone(),
+                        reading: reading_discharging(78),
+                    })],
+                )],
+                &ctx,
+            )
+            .await;
 
         let entry = registry.entries.get(&id).expect("device entry present");
         let percents: Vec<u8> = entry.battery_history.iter().map(|&(_, p)| p).collect();

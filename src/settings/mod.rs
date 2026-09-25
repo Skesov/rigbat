@@ -1,4 +1,5 @@
 mod devices;
+mod scan;
 mod widgets;
 
 use std::collections::HashMap;
@@ -86,10 +87,11 @@ enum Tab {
     Devices,
 }
 
-/// One scan's raw result: the current discovery-and-poll pass, plus a fresh
-/// read of the persisted device inventory. `SettingsApp::apply_scan_result`
-/// merges the two into the Devices tab's table rows; `General`'s device list
-/// only needs the discovered half.
+/// One scan's raw result: the running tray's roster (or, with no tray, a
+/// discovery-and-poll pass), plus a fresh read of the persisted device
+/// inventory. `SettingsApp::apply_scan_result` merges the two into the
+/// Devices tab's table rows; `General`'s device list only needs the
+/// discovered half.
 struct ScanResult {
     discovered: Vec<(DeviceInfo, PollOutcome)>,
     records: Vec<state::DeviceRecord>,
@@ -128,7 +130,7 @@ struct SettingsApp {
     /// `None` if the state store failed to open (see `state::open`) — the
     /// Devices tab then shows only what the current scan finds, same as
     /// this window behaved before the inventory existed.
-    store: Option<Arc<dyn state::Store>>,
+    store: Option<state::Store>,
     /// The Devices tab's backing list: every inventory record merged with
     /// the last scan. Search and sort are applied to a copy of this on
     /// render, never in place — `device_rows` itself always holds the full,
@@ -167,21 +169,19 @@ impl SettingsApp {
         }
     }
 
-    /// Spawns one discovery-and-poll pass on `rt` if none is already in
-    /// flight, plus a fresh read of the device inventory, wiring the result
-    /// to a fresh channel and waking `egui_ctx` when it lands so the window
-    /// updates without waiting for the next input event.
+    /// Spawns one scan on `rt` if none is already in flight, plus a fresh
+    /// read of the device inventory, wiring the result to a fresh channel and
+    /// waking `egui_ctx` when it lands so the window updates without waiting
+    /// for the next input event.
     ///
-    /// Polls every discovered device (unlike the pre-T35 discovery-only
-    /// scan) because the Devices tab needs each one's charge; this only
-    /// runs on an explicit Refresh click or window open, not on a timer, so
-    /// the extra device wake-up this costs is the same one-off the user just
-    /// asked for, not the continuous drain `POLL_INTERVAL_RANGE` guards
-    /// against. The inventory read is a direct, synchronous `Store` call
-    /// made from inside this spawned task, never on the UI thread — the
-    /// same "brief, blocking, from an async context" pattern
-    /// `app::supervisor` already uses for `record_seen`/`record_reading`.
-    fn spawn_scan(&mut self, egui_ctx: egui::Context) {
+    /// With a tray running, the scan reads its roster (see `scan`), after
+    /// having it re-poll when `kind` is `Refresh`. Without one it polls every
+    /// discovered device, because the Devices tab needs each one's charge;
+    /// this only runs on an explicit Refresh click or window open, not on a
+    /// timer, so the extra device wake-up this costs is the same one-off the
+    /// user just asked for, not the continuous drain `POLL_INTERVAL_RANGE`
+    /// guards against.
+    fn spawn_scan(&mut self, egui_ctx: egui::Context, kind: scan::Scan) {
         if self.scanning {
             return;
         }
@@ -191,11 +191,13 @@ impl SettingsApp {
         let ctx = Arc::clone(&self.discovery_ctx);
         let store = self.store.clone();
         self.rt.spawn(async move {
-            let sweeps = crate::discovery::discover_all(&ctx).await;
-            let sources = crate::discovery::flatten(sweeps);
-            let discovered = crate::app::poll_once(sources).await;
+            let discovered = scan::scan_devices(kind, || async {
+                let sweeps = crate::discovery::discover_all(&ctx).await;
+                crate::app::poll_once(crate::discovery::flatten(sweeps)).await
+            })
+            .await;
             let records = match &store {
-                Some(store) => store.list_devices().unwrap_or_else(|e| {
+                Some(store) => store.list_devices().await.unwrap_or_else(|e| {
                     tracing::warn!("failed to read device inventory: {e:#}");
                     Vec::new()
                 }),
@@ -246,11 +248,10 @@ impl SettingsApp {
     /// Renders a "Refresh" button, disabled and relabeled while a scan is
     /// already in flight.
     ///
-    /// Named the same as the tray menu's "Refresh" item (T36): the tray's
-    /// item re-triggers a running daemon's discovery-and-poll, this one runs
-    /// a one-shot discovery-and-poll in the settings process, but both mean
-    /// "go look again now" from the user's side, and nothing about the
-    /// difference is visible in this window — so it gets the same name.
+    /// Named the same as the tray menu's "Refresh" item (T36): with a tray
+    /// running it triggers the same re-poll, and without one it runs a
+    /// one-shot discovery-and-poll in the settings process — both mean "go
+    /// look again now" from the user's side.
     fn render_refresh_button(&mut self, ui: &mut egui::Ui) {
         let egui_ctx = ui.ctx().clone();
         let l = loader(self.config.lang());
@@ -261,7 +262,7 @@ impl SettingsApp {
                 fl!(l, "button-refresh")
             };
             if ui.button(label).clicked() {
-                self.spawn_scan(egui_ctx.clone());
+                self.spawn_scan(egui_ctx.clone(), scan::Scan::Refresh);
             }
         });
     }
@@ -651,13 +652,13 @@ impl SettingsApp {
     /// `hidden_devices` entry — nothing left to show it as hidden once it no
     /// longer exists — and its pin on the aggregate icon, which would
     /// otherwise reattach itself the moment a sold device is plugged in
-    /// somewhere else and seen again. Store I/O happens directly on the UI thread,
-    /// the same as `persist`'s config write: a deliberate,
-    /// infrequent, user-confirmed click, not the per-frame inventory read
-    /// `spawn_scan` keeps off the UI thread.
+    /// somewhere else and seen again. The UI thread waits for the store, the
+    /// same as `persist`'s config write: a deliberate, infrequent,
+    /// user-confirmed click, not the per-frame inventory read `spawn_scan`
+    /// keeps off the UI thread.
     fn delete_device(&mut self, store_id: i64, name: &str) {
         if let Some(store) = &self.store
-            && let Err(e) = store.delete_device(store_id)
+            && let Err(e) = store.delete_device_blocking(store_id)
         {
             tracing::error!("failed to delete device {name:?} from inventory: {e}");
             self.delete_state = DeleteState::Idle;
@@ -1317,7 +1318,7 @@ pub fn run() -> anyhow::Result<()> {
                 delete_state: DeleteState::default(),
                 style_previews: None,
             };
-            app.spawn_scan(cc.egui_ctx.clone());
+            app.spawn_scan(cc.egui_ctx.clone(), scan::Scan::Read);
             Ok(Box::new(app))
         }),
     )

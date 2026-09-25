@@ -2,3 +2,11 @@
 # non-test code, enforced by clippy::unwrap_used/expect_used in [lints.clippy].
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
+
+# CLAUDE.md "Key decisions" -> Concurrency: message passing, no Mutex on shared data.
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "message passing, no Mutex on shared data (CLAUDE.md, Concurrency)" },
+    { path = "std::sync::RwLock", reason = "message passing, no RwLock on shared data (CLAUDE.md, Concurrency)" },
+    { path = "tokio::sync::Mutex", reason = "message passing, no Mutex on shared data (CLAUDE.md, Concurrency)" },
+    { path = "tokio::sync::RwLock", reason = "message passing, no RwLock on shared data (CLAUDE.md, Concurrency)" },
+]

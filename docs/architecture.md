@@ -178,6 +178,8 @@ Tray:      main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶
 
 Settings:  tray menu "Settings…" → spawn `rigbat settings` (separate process)
            egui window edits config.json (atomic temp+rename)
+           org.rigbat.Tray1.State() ──JSON Snapshot (shown + hidden)──▶ device list
+             (no tray on the bus: discover_all + poll_once in the settings process)
            state store (SQLite) ──▶ device table rows for devices not currently present
            tray's config file watch reloads ──watch<Config>──▶ live update
 
@@ -194,6 +196,12 @@ its tray icon — the snapshot carries each device already classified by `domain
 and the card draws its glyph with the same `icon::TinySkiaRenderer` the tray uses. It also lists
 devices the tray has dropped after a day of silence, dimmed and last; hidden ones never appear.
 If the tray goes away the window says so, and it reloads when the tray comes back.
+
+The settings window reads the same snapshot, which also lists hidden devices apart
+(`Snapshot::hidden`) and carries each device's locator, so its rows match inventory records. It
+has the tray re-poll on its Refresh button (`Refresh()`, then the next `StateChanged`, bounded at
+3 s, then `State()`), and polls devices itself only when nothing owns `org.rigbat.Tray`: a
+request/response device such as SteelSeries can interleave two processes' exchanges.
 
 The settings window is a separate process on purpose: it owns the winit event loop, and eframe is
 built with `default-features = false` (glow backend). The `accesskit` feature is on: its AT-SPI
@@ -254,7 +262,10 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
 - `state` module (`rusqlite`, bundled SQLite): the device inventory (first seen, last seen,
   transport, kind) and a reading history collapsed to change points (`LAG()` over equal-percent
   runs). Schema version lives in `PRAGMA user_version`; WAL plus `busy_timeout` plus
-  `BEGIN IMMEDIATE` let the tray and the settings process write the same file. The store is
+  `BEGIN IMMEDIATE` let the tray and the settings process write the same file. Inside a process
+  the connection belongs to one dedicated thread (`state::Store`, an actor): callers send a
+  request and await a oneshot reply, and a reading is queued without waiting. A write the other
+  process holds can stall that thread for up to `busy_timeout`, never a tokio worker. The store is
   **optional**: if it cannot be opened, the error is logged and monitoring continues without it —
   history is a convenience, not a prerequisite for reading a battery.
 - What the history is _for_: the time-remaining estimate needs a run of percent changes, and a
