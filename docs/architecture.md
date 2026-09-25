@@ -97,14 +97,19 @@ anyhow::Result<Vec<Box<dyn BatterySource>>>`. Finds devices and constructs sourc
   opened lazily on first use and re-dialled if it has since closed, so a `dbus-daemon` restart
   does not strand the BlueZ backend for the life of the process. A backend that needs no
   infrastructure ignores the parameter.
-- **`IconRenderer`** (`tray`): `render(status, kind, theme, mode) -> Vec<ksni::Icon>`. The tray
-  depends on this trait, not on the renderer. The implementation is `tiny-skia`; an SVG/resvg
-  renderer would be a new implementation behind the same port.
+- **`IconRenderer`** (`icon`): `render(status, kind, theme, mode, stale) -> Vec<ksni::Icon>`. The
+  tray depends on this trait, not on the renderer, and reaches it through `icon::IconCache`, which
+  renders each distinct `IconKey` (those five inputs) once and keeps only the keys an icon shows.
+  The implementation is `tiny-skia`; an SVG/resvg renderer would be a new implementation behind
+  the same port.
 
 ## Concurrency model (tray)
 
 `tokio`, message-passing, **no `Mutex` on shared data**. The `Supervisor` owns all state; data
 flows out through channels.
+
+The runtime is multi-threaded with two workers (`main.rs`): the daemon handles a few events a
+minute, and a worker per core only adds idle wakeups. `TOKIO_WORKER_THREADS` still overrides it.
 
 - Before any of this starts, `run_tray` claims `org.rigbat.Tray` on the session bus
   (`tray::single_instance`, `DoNotQueue`, no `ReplaceExisting`). A second `rigbat tray` (e.g. the
@@ -114,22 +119,30 @@ flows out through channels.
   collides, which is why that duplication otherwise goes unnoticed.
 - `Supervisor::spawn(config_rx)` starts a **manager task** holding a `DeviceRegistry` — the
   device order, infos, readings and per-device task handles, keyed by `DeviceId`. It owns
-  discovery: it runs `discover_all()` at start, every 30 s, and on every refresh request. The
+  discovery: it runs `discover_all()` at start, every 30 s, and on every refresh or rediscover
+  request. The
   30 s cadence is a `tokio::time::interval` created once, not a `sleep` in the `select!` loop: a
   per-iteration sleep restarts on every reading, so with a few devices answering the sweep never
   fired. A refresh-triggered sweep resets the interval.
 - Each discovered device gets its own **source task** that polls on that device's effective
   interval and sends `(DeviceId, reading)` to the manager over an `mpsc` channel. One failing
-  source never affects the others.
-- **Refresh** ("re-poll and re-discover now") is a `RefreshSignal`: a `watch` channel carrying a
+  source never affects the others. A source whose device announces its level
+  (`BatterySource::pushed`, BlueZ `Battery1.Percentage`) hands that reading to its own task, which
+  sends it like a polled one: no other device is polled and no sweep runs.
+- **Refresh** ("re-poll and re-discover now") is a `RefreshSignal`: `watch` channels carrying a
   generation counter, not a `Notify`. `Notify::notify_waiters` wakes only the waiters registered
   at that instant, so a refresh fired while a task sat in `poll().await` or mid-discovery was
-  lost. A `watch` retains the bump, so a busy task observes it on its next wait.
+  lost. A `watch` retains the bump, so a busy task observes it on its next wait. `trigger` wakes
+  the source tasks and the sweep; `rediscover` wakes only the sweep, for a roster change that
+  says nothing about the devices already running.
 - Config reaches the supervisor as a `watch::Receiver<Config>`, not a snapshot. A source task
   re-reads its interval every iteration and wakes on `config_rx.changed()`, so a changed poll
   interval applies without restarting the tray.
-- The manager publishes a `TrayState { devices }` snapshot through a `watch` channel after each
-  reading or discovery change. `TrayState` carries raw observations only — which device is
+- The manager publishes a `TrayState { devices }` snapshot through a `watch` channel when a
+  reading or a sweep changes it (`send_if_modified`); a sweep or a failed poll that changes
+  nothing wakes no consumer. The first sweep is always published: `run_tray` and `--waybar` wait
+  on it. A successful poll always changes `last_seen`, so it is always published. `TrayState`
+  carries raw observations only — which device is
   featured and whether it is low is decided by each consumer against the live config, so there
   is exactly one interpretation path instead of two that can disagree.
 - **Re-discovery / reconcile**: on each discovery sweep the manager diffs the live set against
@@ -191,15 +204,20 @@ Waybar:    main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶
                                                                     │ printed only when the line
                                                                     │ changes, no exit
            session (logind PrepareForSleep) ──RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
-           bluez D-Bus signals (debounced) ────RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
+           bluez Connected / interfaces (debounced) ──rediscover──────▶ Supervisor (re-discover)
+           bluez Battery1.Percentage ──BluezSource::pushed──▶ that device's task (one reading)
            config file watch ──watch<Config>──▶ loop (live primary_device/hidden_devices)
+           AGE_STEP tick (60 s) ──▶ loop re-renders; "(2h ago)" ages with nothing published
 
 Tray:      main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶ tray::manager::run
-                                                                    │ reconciles ksni items,
-                                                                    │ renders icons (IconRenderer)
+                                                                    │ reconciles ksni items, updates
+                                                                    │ only items whose View changed,
+                                                                    │ icons via IconCache
            appearance (xdg portal) ──watch<ColorScheme>────────────┘
+           AGE_STEP tick (60 s) ───────────────────────────────────┘ (text that ages, 24 h cutoff)
            session (logind PrepareForSleep) ──RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
-           bluez D-Bus signals (debounced) ────RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
+           bluez Connected / interfaces (debounced) ──rediscover──────▶ Supervisor (re-discover)
+           bluez Battery1.Percentage ──BluezSource::pushed──▶ that device's task (one reading)
            config file watch ──watch<Config>──▶ manager + notifications (live)
            notifications task ◀── TrayState + Config (edge-triggered low-battery)
 
@@ -213,6 +231,7 @@ Settings:  tray menu "Settings…" → spawn `rigbat settings` (separate process
 Dashboard: tray left click (SNI Activate) → spawn `rigbat dashboard` (separate process)
            org.rigbat.Tray1.State() ──JSON Snapshot──▶ cards
            org.rigbat.Tray1.StateChanged ──▶ re-read, repaint
+             (sent only when the snapshot, ages aside, or a reading's time changed)
            second launch → org.rigbat.Dashboard1.Close() on the open one → exit
 ```
 
@@ -360,21 +379,27 @@ without the device present.
 
 - **appearance** — reads `org.freedesktop.appearance` color-scheme from xdg-desktop-portal and
   publishes light/dark through a `watch` channel; the tray re-renders on change.
+- **tray manager** — computes a `tray::item::View` per icon (title, tooltip, menu rows, `IconKey`)
+  from the state, config, theme and the current time, and calls `ksni` `Handle::update` only for
+  an icon whose view differs from the one it serves. ksni diffs properties itself, but only after
+  calling every getter, including the multi-size pixmap; the view comparison skips that.
 - **session** — listens to logind `PrepareForSleep`; on resume it fires the shared
   `RefreshSignal` so all sources re-poll and the manager re-discovers.
 - **bluez event watcher** — BlueZ is a push interface, so it is not polled for change detection.
   `bluez::watch_events` subscribes to `InterfacesAdded`/`InterfacesRemoved` and to
-  `PropertiesChanged` (`Battery1` always, `Device1` filtered to `Connected` — `Device1` emits
-  constant RSSI noise) and fires the same `RefreshSignal`, debounced to at most one trigger per
-  5 s because a refresh wakes every source task, including the blocking hidraw one. It is an
-  optimisation, never a dependency: the 30 s discovery sweep remains the safety net.
+  `Device1.PropertiesChanged` filtered to `Connected` (`Device1` emits constant RSSI noise) and
+  calls `RefreshSignal::rediscover`, debounced to one sweep per 5 s burst: no device is re-polled.
+  A new `Battery1.Percentage` goes to the one `BluezSource` at that object path, which subscribes
+  to its own path on first use and hands the value to its task as a reading. Both are
+  optimisations, never dependencies: the poll interval and the 30 s discovery sweep remain the
+  safety net.
 - **notifications** — a hand-rolled `zbus` `org.freedesktop.Notifications` proxy; an
   edge-triggered tracker fires once per low-battery crossing, using each device's effective
   threshold, gated by `notifications_enabled`. It re-arms when the device charges, rises back
   above the threshold, or goes offline — so a device hovering at the threshold notifies once,
   not on every poll. A crossing must be confirmed by `LOW_CONFIRMATIONS` (2) _distinct_ readings
-  before it fires — distinctness keyed on `last_seen`, because `TrayState` is republished on every
-  state change, not once per poll. One bad sample from a noisy BLE device therefore costs nothing;
+  before it fires — distinctness keyed on `last_seen`, because a reading is what a poll adds to
+  `TrayState`, and other changes republish it too. One bad sample from a noisy BLE device therefore costs nothing;
   a real low battery is announced one poll interval later than it used to be. The deliberate
   consequence: a device that reports low exactly once and then dies or vanishes is never announced,
   since a non-Online device is skipped and its streak can no longer advance.

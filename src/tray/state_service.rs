@@ -1,12 +1,13 @@
 //! Serves the tray's device state to `rigbat dashboard` as `org.rigbat.Tray1`.
 
 use tokio::sync::watch;
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use zbus::object_server::SignalEmitter;
 
 use super::resolve::featured_id;
 use crate::config::Config;
 use crate::domain::{
-    BootTime, DeviceState, Estimate, TrayMode, TrayState, device_status, is_visible,
+    AGE_STEP, BootTime, DeviceState, Estimate, TrayMode, TrayState, device_status, is_visible,
 };
 use crate::ipc::{DeviceCard, Snapshot, TRAY_PATH};
 use crate::refresh::RefreshSignal;
@@ -57,6 +58,19 @@ pub fn snapshot(state: &TrayState, cfg: &Config, now: BootTime) -> Snapshot {
     }
 }
 
+/// What a `StateChanged` announces: the snapshot without the ages a reader
+/// counts up itself, plus when each reading was taken.
+fn announced(state: &TrayState, cfg: &Config, now: BootTime) -> (Snapshot, Vec<Option<BootTime>>) {
+    let mut snapshot = snapshot(state, cfg, now);
+    for card in snapshot.devices.iter_mut().chain(&mut snapshot.hidden) {
+        card.seen_secs_ago = None;
+    }
+    (
+        snapshot,
+        state.devices.iter().map(|d| d.last_seen).collect(),
+    )
+}
+
 struct StateService {
     rx: watch::Receiver<TrayState>,
     config: watch::Receiver<Config>,
@@ -82,7 +96,7 @@ impl StateService {
     async fn state_changed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
 
-/// Publishes the state on `conn` and signals every change until a channel closes.
+/// Publishes the state on `conn` and signals every change of it until a channel closes.
 pub async fn serve(
     conn: zbus::Connection,
     mut rx: watch::Receiver<TrayState>,
@@ -109,11 +123,28 @@ pub async fn serve(
             return;
         }
     };
+    let current = |rx: &mut watch::Receiver<TrayState>, config: &mut watch::Receiver<Config>| {
+        announced(
+            &rx.borrow_and_update(),
+            &config.borrow_and_update(),
+            crate::clock::now(),
+        )
+    };
+    let mut last = current(&mut rx, &mut config);
+    // `in_tray` follows the 24 h icon cutoff, which moves with time alone.
+    let mut age_tick = interval_at(Instant::now() + AGE_STEP, AGE_STEP);
+    age_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             r = rx.changed() => if r.is_err() { break; },
             r = config.changed() => if r.is_err() { break; },
+            _ = age_tick.tick() => {}
         }
+        let next = current(&mut rx, &mut config);
+        if next == last {
+            continue;
+        }
+        last = next;
         if let Err(e) = StateService::state_changed(iface.signal_emitter()).await {
             tracing::debug!("StateChanged not sent: {e}");
         }
@@ -324,5 +355,56 @@ mod bus_tests {
         timeout(TIMEOUT, refreshed.wait())
             .await
             .expect("Refresh re-polls the devices");
+    }
+
+    /// A republished but unchanged state, or a config edit the snapshot does
+    /// not show, sends no `StateChanged`; the next real change sends one.
+    #[tokio::test]
+    async fn an_unchanged_snapshot_signals_nothing() {
+        if !isolated(module_path!(), "an_unchanged_snapshot_signals_nothing") {
+            return;
+        }
+        let mouse = device("mouse", 80);
+        let (state_tx, state_rx) = watch::channel(TrayState {
+            devices: vec![mouse.clone()],
+        });
+        let (config_tx, config_rx) = watch::channel(Config::default());
+        let conn = zbus::connection::Builder::session()
+            .expect("private bus")
+            .name(TRAY_NAME)
+            .expect("name")
+            .build()
+            .await
+            .expect("claiming the tray name");
+        tokio::spawn(serve(conn, state_rx, config_rx, RefreshSignal::new()));
+
+        let client = zbus::Connection::session().await.expect("private bus");
+        let tray = Tray1Proxy::new(&client).await.expect("Tray1 proxy");
+        let mut changes = tray.receive_state_changed().await.expect("subscribe");
+        eventually(TIMEOUT, || async { tray.state().await.ok() }).await;
+
+        let mut quiet = async || {
+            timeout(Duration::from_millis(300), changes.next())
+                .await
+                .is_err()
+        };
+        state_tx.send_replace(TrayState {
+            devices: vec![mouse.clone()],
+        });
+        assert!(quiet().await, "StateChanged for a republished state");
+        config_tx.send_modify(|c| c.poll_interval_secs += 1);
+        assert!(
+            quiet().await,
+            "StateChanged for a config edit it does not show"
+        );
+
+        state_tx.send_replace(TrayState {
+            devices: vec![device("mouse", 79)],
+        });
+        timeout(TIMEOUT, changes.next())
+            .await
+            .expect("StateChanged after the real change");
+        let json = tray.state().await.expect("State");
+        assert_eq!(cards(&json), [("mouse".to_owned(), Some(79))]);
     }
 }

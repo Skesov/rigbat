@@ -14,7 +14,49 @@ pub trait IconRenderer: Send + Sync {
     ) -> Vec<ksni::Icon>;
 }
 
+/// Everything a rendered icon depends on: equal keys render equal pixmaps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IconKey {
+    pub status: PrimaryStatus,
+    pub kind: Option<DeviceKind>,
+    pub theme: Theme,
+    pub mode: DisplayMode,
+    pub stale: bool,
+}
+
+/// Renders each distinct `IconKey` once and keeps the result while the key is in use.
+pub struct IconCache {
+    renderer: Box<dyn IconRenderer>,
+    icons: Vec<(IconKey, Vec<ksni::Icon>)>,
+}
+
+impl IconCache {
+    pub fn new(renderer: Box<dyn IconRenderer>) -> Self {
+        Self {
+            renderer,
+            icons: Vec::new(),
+        }
+    }
+
+    pub fn icons(&mut self, key: &IconKey) -> Vec<ksni::Icon> {
+        if let Some((_, icons)) = self.icons.iter().find(|(k, _)| k == key) {
+            return icons.clone();
+        }
+        let icons = self
+            .renderer
+            .render(key.status, key.kind, &key.theme, key.mode, key.stale);
+        self.icons.push((*key, icons.clone()));
+        icons
+    }
+
+    /// Forgets every key `keep` rejects, so the cache holds only what is shown.
+    pub fn retain(&mut self, keep: impl Fn(&IconKey) -> bool) {
+        self.icons.retain(|(key, _)| keep(key));
+    }
+}
+
 /// Theme colors in RGBA format (straight alpha).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub normal: [u8; 4],
     pub low: [u8; 4],
@@ -1791,5 +1833,53 @@ mod tests {
                 assert_eq!(icons.len(), 1, "size {size}: {kind:?} did not render");
             }
         }
+    }
+
+    struct CountingRenderer(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl IconRenderer for CountingRenderer {
+        fn render(
+            &self,
+            status: PrimaryStatus,
+            kind: Option<DeviceKind>,
+            theme: &Theme,
+            mode: DisplayMode,
+            stale: bool,
+        ) -> Vec<ksni::Icon> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            TinySkiaRenderer::default().render(status, kind, theme, mode, stale)
+        }
+    }
+
+    #[test]
+    fn the_cache_renders_each_key_once_while_it_is_kept() {
+        let renders = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut cache = IconCache::new(Box::new(CountingRenderer(renders.clone())));
+        let key = |percent| IconKey {
+            status: PrimaryStatus::Ok { percent },
+            kind: Some(DeviceKind::Mouse),
+            theme: Theme::dark(),
+            mode: DisplayMode::PercentInIcon,
+            stale: false,
+        };
+        let count = || renders.load(std::sync::atomic::Ordering::Relaxed);
+
+        let pixels = |icons: Vec<ksni::Icon>| icons.into_iter().map(|i| i.data).collect::<Vec<_>>();
+        let first = pixels(cache.icons(&key(50)));
+        assert_eq!(
+            pixels(cache.icons(&key(50))),
+            first,
+            "a hit returns what was rendered"
+        );
+        assert_eq!(count(), 1);
+
+        cache.icons(&key(49));
+        assert_eq!(count(), 2, "a new key renders");
+
+        cache.retain(|k| *k == key(49));
+        cache.icons(&key(49));
+        assert_eq!(count(), 2, "a kept key stays cached");
+        cache.icons(&key(50));
+        assert_eq!(count(), 3, "a dropped key renders again");
     }
 }

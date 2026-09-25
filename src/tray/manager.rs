@@ -2,13 +2,14 @@ use std::collections::HashMap;
 
 use ksni::TrayMethods;
 use tokio::sync::watch;
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
-use super::item::{RigbatTray, SaveConfig};
+use super::item::{RigbatTray, SaveConfig, View};
 use super::resolve::visible;
 use crate::appearance::ColorScheme;
 use crate::config::Config;
-use crate::domain::{BootTime, DeviceId, TrayMode, TrayState};
-use crate::icon::TinySkiaRenderer;
+use crate::domain::{AGE_STEP, BootTime, DeviceId, TrayMode, TrayState};
+use crate::icon::{IconCache, TinySkiaRenderer};
 use crate::refresh::RefreshSignal;
 
 // ---------------------------------------------------------------------------
@@ -44,67 +45,113 @@ fn shown_ids(state: &TrayState, cfg: &Config, now: BootTime) -> Vec<DeviceId> {
 // reconcile — sync live SNI items against the desired icon set
 // ---------------------------------------------------------------------------
 
+struct Item {
+    handle: ksni::Handle<RigbatTray>,
+    view: View,
+}
+
+struct Items {
+    live: HashMap<Option<DeviceId>, Item>,
+    icons: IconCache,
+}
+
+impl Items {
+    fn new() -> Self {
+        Self {
+            live: HashMap::new(),
+            icons: IconCache::new(Box::new(TinySkiaRenderer::default())),
+        }
+    }
+}
+
+/// Spawns, retires and updates SNI items so they match the current inputs.
+/// An item whose view is unchanged is not touched. Returns how many items
+/// were spawned or updated.
 async fn reconcile(
-    items: &mut HashMap<Option<DeviceId>, ksni::Handle<RigbatTray>>,
+    items: &mut Items,
     rx: &watch::Receiver<TrayState>,
     theme_rx: &watch::Receiver<ColorScheme>,
     config: &watch::Sender<Config>,
     save_config: SaveConfig,
     refresh: &RefreshSignal,
-) {
-    // Compute desired key list without holding any watch::Ref across an await.
-    let desired: Vec<Option<DeviceId>> = {
+) -> usize {
+    let now = crate::clock::now();
+    // Computed without holding any watch::Ref across an await.
+    let desired: Vec<(Option<DeviceId>, View)> = {
         let state = rx.borrow();
         let cfg = config.borrow();
-        desired_keys(cfg.tray_mode, &shown_ids(&state, &cfg, crate::clock::now()))
-    }; // borrows dropped here
+        let scheme = *theme_rx.borrow();
+        desired_keys(cfg.tray_mode, &shown_ids(&state, &cfg, now))
+            .into_iter()
+            .map(|key| {
+                let view = View::new(key.as_ref(), &state, &cfg, scheme, now);
+                (key, view)
+            })
+            .collect()
+    };
 
-    let prev_len = items.len();
+    let prev_len = items.live.len();
 
-    // Retire icons whose keys are no longer desired.
     let to_remove: Vec<Option<DeviceId>> = items
+        .live
         .keys()
-        .filter(|k| !desired.contains(k))
+        .filter(|k| !desired.iter().any(|(key, _)| key == *k))
         .cloned()
         .collect();
     for key in to_remove {
-        if let Some(handle) = items.remove(&key) {
+        if let Some(item) = items.live.remove(&key) {
             // ksni 0.3.4 keeps the SNI item alive on drop; shutdown() unregisters it.
-            handle.shutdown().await;
+            item.handle.shutdown().await;
         }
     }
 
-    // Spawn new icons for keys that just became desired.
-    for key in &desired {
-        if !items.contains_key(key) {
-            let tray = RigbatTray {
-                key: key.clone(),
-                rx: rx.clone(),
-                theme_rx: theme_rx.clone(),
-                config: config.clone(),
-                save_config,
-                renderer: Box::new(TinySkiaRenderer::default()),
-                refresh: refresh.clone(),
-            };
-            match tray.spawn().await {
-                Ok(handle) => {
-                    items.insert(key.clone(), handle);
-                }
-                Err(e) => {
-                    tracing::error!("failed to spawn tray icon for {key:?}: {e}");
+    let mut touched = 0;
+    for (key, view) in desired {
+        match items.live.get_mut(&key) {
+            Some(item) if item.view == view => {}
+            Some(item) => {
+                let icon = items.icons.icons(&view.icon);
+                item.view = view.clone();
+                let _ = item
+                    .handle
+                    .update(move |tray| {
+                        tray.view = view;
+                        tray.icon = icon;
+                    })
+                    .await;
+                touched += 1;
+            }
+            None => {
+                let tray = RigbatTray {
+                    key: key.clone(),
+                    icon: items.icons.icons(&view.icon),
+                    view: view.clone(),
+                    config: config.clone(),
+                    save_config,
+                    refresh: refresh.clone(),
+                };
+                match tray.spawn().await {
+                    Ok(handle) => {
+                        items.live.insert(key, Item { handle, view });
+                        touched += 1;
+                    }
+                    Err(e) => {
+                        tracing::error!("failed to spawn tray icon for {key:?}: {e}");
+                    }
                 }
             }
         }
     }
 
-    // Re-render surviving icons so fresh data is reflected.
-    for handle in items.values() {
-        let _ = handle.update(|_| {}).await;
-    }
+    let live = &items.live;
+    items
+        .icons
+        .retain(|icon| live.values().any(|item| item.view.icon == *icon));
 
-    if items.len() != prev_len {
-        tracing::info!("showing {} tray icon(s)", items.len());
+    if items.live.len() != prev_len {
+        tracing::info!("showing {} tray icon(s)", items.live.len());
     }
+    touched
 }
 
 // ---------------------------------------------------------------------------
@@ -118,8 +165,11 @@ pub async fn run(
     save_config: SaveConfig,
     refresh: RefreshSignal,
 ) {
-    let mut items: HashMap<Option<DeviceId>, ksni::Handle<RigbatTray>> = HashMap::new();
+    let mut items = Items::new();
     let mut config_rx = config.subscribe();
+    // Views change with time alone: text that ages ("2h ago") and the 24 h icon cutoff.
+    let mut age_tick = interval_at(Instant::now() + AGE_STEP, AGE_STEP);
+    age_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         reconcile(&mut items, &rx, &theme_rx, &config, save_config, &refresh).await;
@@ -128,6 +178,7 @@ pub async fn run(
             r = rx.changed() => if r.is_err() { break; },
             r = theme_rx.changed() => if r.is_err() { break; },
             r = config_rx.changed() => if r.is_err() { break; },
+            _ = age_tick.tick() => {}
         }
     }
 }
@@ -204,7 +255,7 @@ mod tests {
 
         use tokio::sync::watch;
 
-        use super::super::run;
+        use super::super::{Items, reconcile, run};
         use super::{Config, Transport, TrayMode, sni_id};
         use crate::appearance::ColorScheme;
         use crate::bus_test::{eventually, isolated};
@@ -451,6 +502,53 @@ mod tests {
             let rows = menu(client, item).await;
             let toggles: Vec<i32> = rows.iter().take(3).map(|(_, _, t)| *t).collect();
             assert_eq!(toggles, [0, 0, 1]);
+        }
+
+        /// A republished but unchanged state touches no item; a change
+        /// updates exactly the items that show it.
+        #[tokio::test]
+        async fn only_items_whose_view_changed_are_updated() {
+            if !isolated(module_path!(), "only_items_whose_view_changed_are_updated") {
+                return;
+            }
+            let _watcher = serve_fake_watcher().await;
+
+            let (mouse, pad) = (make_info("mouse"), make_info("pad"));
+            let state = |mouse_percent| {
+                make_state(vec![
+                    (mouse.clone(), Some(make_reading(mouse_percent))),
+                    (pad.clone(), Some(make_reading(50))),
+                ])
+            };
+            let (state_tx, state_rx) = watch::channel(state(80));
+            let (theme_tx, theme_rx) = watch::channel(ColorScheme::Dark);
+            let (config_tx, _config_rx) = watch::channel(Config {
+                tray_mode: TrayMode::PerDevice,
+                language: Some("en".to_owned()),
+                ..Config::default()
+            });
+            let refresh = RefreshSignal::new();
+            let mut items = Items::new();
+            let mut sync = async || {
+                reconcile(
+                    &mut items, &state_rx, &theme_rx, &config_tx, saved, &refresh,
+                )
+                .await
+            };
+
+            assert_eq!(sync().await, 2, "both icons spawn");
+            assert_eq!(sync().await, 0, "nothing changed");
+
+            // A fresh poll with the same percent: only `last_seen` moves.
+            state_tx.send_replace(state(80));
+            assert_eq!(sync().await, 0, "a new timestamp renders nothing new");
+
+            state_tx.send_replace(state(79));
+            assert_eq!(sync().await, 2, "both menus list the mouse");
+
+            theme_tx.send_replace(ColorScheme::Light);
+            assert_eq!(sync().await, 2);
+            assert_eq!(sync().await, 0);
         }
     }
 }

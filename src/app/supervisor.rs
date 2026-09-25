@@ -101,7 +101,7 @@ impl Supervisor {
 
     /// Injectable discovery, config persistence, and state store for tests.
     /// `discover` is called once at start, then on every discovery tick and
-    /// every `refresh` trigger. `load_config`/`save_config` back the
+    /// every `trigger`/`rediscover`. `load_config`/`save_config` back the
     /// one-time `shown_devices` → `hidden_devices` conversion
     /// (`migrate_shown_devices_once`) — tests must inject fakes here rather
     /// than let it fall through to the real `config::load`/`config::save`,
@@ -692,7 +692,7 @@ async fn manager_task<F, Fut, L, S>(
     S: Fn(&Config) -> anyhow::Result<()> + Send + 'static,
 {
     let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<SourceMsg>(64);
-    let mut waiter = refresh.waiter();
+    let mut waiter = refresh.sweep_waiter();
     let ctx = SourceCtx {
         tx: mpsc_tx,
         config_rx: config_tx.subscribe(),
@@ -701,7 +701,11 @@ async fn manager_task<F, Fut, L, S>(
 
     let mut registry = DeviceRegistry::new(store);
 
-    let renames = rediscover(&mut registry, discover(), &ctx, &watch_tx).await;
+    let renames = registry.reconcile(discover().await, &ctx).await;
+    // Sent even when unchanged: consumers wait on it as "the first sweep is in".
+    watch_tx.send_replace(TrayState {
+        devices: registry.snapshot(),
+    });
     apply_renames(&renames, &config_tx, &load_config, &save_config);
 
     // The conversion needs a roster it can trust, and the first sweep after
@@ -841,8 +845,14 @@ fn spawn_source_task(
         // presence, not diagnostics, and is not visible from here.
         let mut failures_in_a_row: u32 = 0;
 
+        let mut pushed: Option<BatteryReading> = None;
+
         loop {
-            let event = match src.poll().await {
+            let polled = match pushed.take() {
+                Some(r) => Ok(r),
+                None => src.poll().await,
+            };
+            let event = match polled {
                 Ok(r) => {
                     failures_in_a_row = 0;
                     SourceEvent::Polled(Some(r))
@@ -895,20 +905,25 @@ fn spawn_source_task(
                 // A config change wakes the task immediately so a shortened
                 // interval applies at once instead of after the old sleep.
                 _ = config_rx.changed() => {}
+                r = src.pushed() => pushed = Some(r),
             }
         }
     });
     handle.abort_handle()
 }
 
+/// Notifies receivers only when the published state differs from the last.
 fn publish(registry: &DeviceRegistry, watch_tx: &watch::Sender<TrayState>) {
-    let state = TrayState {
-        devices: registry.snapshot(),
-    };
-
-    // Ignore error — receiver closed means the tray exited.
-    let _ = watch_tx.send(state);
+    let devices = registry.snapshot();
+    watch_tx.send_if_modified(|current| {
+        if current.devices == devices {
+            return false;
+        }
+        current.devices = devices;
+        true
+    });
 }
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -2379,5 +2394,131 @@ mod tests {
             4,
             "initial sweep plus one per interval"
         );
+    }
+
+    /// A silent device's polls and every later sweep change nothing a surface
+    /// shows, so none of them wakes a receiver.
+    #[tokio::test(start_paused = true)]
+    async fn unchanged_state_is_not_republished() {
+        let cfg = Config {
+            poll_interval_secs: 5,
+            ..Config::default()
+        };
+        let (tx, _config_rx) = config_channel(cfg);
+        let sweeps = Arc::new(AtomicUsize::new(0));
+        let sweeps_seen = sweeps.clone();
+        let (mut rx, _refresh) = Supervisor::spawn_with(
+            tx,
+            move || {
+                sweeps_seen.fetch_add(1, Ordering::Relaxed);
+                let sources: Vec<Box<dyn BatterySource>> = vec![Box::new(ErrSource {
+                    info: device("mouse"),
+                })];
+                async move { vec![ok_sweep("sysfs", sources)] }
+            },
+            no_migration_load,
+            no_migration_save,
+            None,
+        );
+        rx.changed().await.expect("the first sweep is published");
+        rx.borrow_and_update();
+
+        let mut notifications = 0;
+        let quiet = tokio::time::sleep(DISCOVERY_INTERVAL * 3 + Duration::from_secs(1));
+        tokio::pin!(quiet);
+        loop {
+            tokio::select! {
+                r = rx.changed() => {
+                    r.expect("supervisor alive");
+                    notifications += 1;
+                }
+                () = &mut quiet => break,
+            }
+        }
+
+        assert_eq!(sweeps.load(Ordering::Relaxed), 4);
+        assert_eq!(notifications, 0);
+    }
+
+    struct PushingSource {
+        info: DeviceInfo,
+        polls: Arc<AtomicUsize>,
+        pushes: watch::Receiver<Option<BatteryReading>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BatterySource for PushingSource {
+        fn device(&self) -> &DeviceInfo {
+            &self.info
+        }
+
+        async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
+            self.polls.fetch_add(1, Ordering::Relaxed);
+            Ok(reading_discharging(80))
+        }
+
+        async fn pushed(&mut self) -> BatteryReading {
+            loop {
+                if self.pushes.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+                if let Some(r) = *self.pushes.borrow_and_update() {
+                    return r;
+                }
+            }
+        }
+    }
+
+    /// A pushed reading lands without a poll; `rediscover` sweeps without
+    /// re-polling the devices already running.
+    #[tokio::test(start_paused = true)]
+    async fn a_pushed_reading_and_a_rediscover_poll_nothing() {
+        let (tx, _config_rx) = config_channel(Config::default());
+        let polls = Arc::new(AtomicUsize::new(0));
+        let sweeps = Arc::new(AtomicUsize::new(0));
+        let (push_tx, push_rx) = watch::channel(None);
+        let (polls_seen, sweeps_seen) = (polls.clone(), sweeps.clone());
+        let (mut rx, refresh) = Supervisor::spawn_with(
+            tx,
+            move || {
+                sweeps_seen.fetch_add(1, Ordering::Relaxed);
+                let sources: Vec<Box<dyn BatterySource>> = vec![Box::new(PushingSource {
+                    info: device("mouse"),
+                    polls: polls_seen.clone(),
+                    pushes: push_rx.clone(),
+                })];
+                async move { vec![ok_sweep("sysfs", sources)] }
+            },
+            no_migration_load,
+            no_migration_save,
+            None,
+        );
+        let state = wait_for_connected(&mut rx).await;
+        assert_eq!(state.devices[0].last_reading.map(|r| r.percent), Some(80));
+        assert_eq!(polls.load(Ordering::Relaxed), 1);
+
+        push_tx.send_replace(Some(reading_discharging(42)));
+        timeout(Duration::from_secs(1), async {
+            loop {
+                rx.changed().await.expect("supervisor alive");
+                let percent = rx.borrow_and_update().devices[0]
+                    .last_reading
+                    .map(|r| r.percent);
+                if percent == Some(42) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the pushed reading was published");
+        assert_eq!(polls.load(Ordering::Relaxed), 1, "a push is not a poll");
+
+        let before = sweeps.load(Ordering::Relaxed);
+        refresh.rediscover();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(sweeps.load(Ordering::Relaxed), before + 1);
+        assert_eq!(polls.load(Ordering::Relaxed), 1, "rediscover re-polled");
     }
 }

@@ -134,9 +134,10 @@ own code.
 2. Add a `Transport` variant: `domain/types.rs` (`as_str`) and `transport_from_str` in
    `src/state/store.rs` — the string match has a catch-all, so the compiler does not flag it.
 3. Register the backend in `backends()` and update `backends_contains_all_expected_names`.
-4. If devices appear and vanish without a poll noticing, add a hotplug watcher that bumps the
-   refresh signal, and start it in `spawn_bus_dependent_tasks` (`src/main.rs`), as
-   `bluez::watch_events` does.
+4. If devices appear and vanish without a poll noticing, add a hotplug watcher that calls
+   `RefreshSignal::rediscover`, and start it in `spawn_bus_dependent_tasks` (`src/main.rs`), as
+   `bluez::watch_events` does. If a device announces its level, implement
+   `BatterySource::pushed` instead of re-polling on the announcement.
 5. If access needs a udev rule or a group, add a `rigbat doctor` check for it.
 6. Add the transport to `README.md` ("Supported connection types").
 7. Verify with `cargo test`, `rigbat list --wide`, and `rigbat doctor`.

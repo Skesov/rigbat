@@ -168,10 +168,12 @@ fn main() {
         return;
     }
 
-    let rt = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    // ~20 events a minute need no worker per core; the variable still wins, for measuring.
+    if std::env::var_os("TOKIO_WORKER_THREADS").is_none() {
+        builder.worker_threads(2);
+    }
+    let rt = match builder.enable_all().build() {
         Ok(rt) => rt,
         Err(e) => {
             tracing::error!("failed to start tokio runtime: {e}");

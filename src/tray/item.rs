@@ -3,7 +3,7 @@ use ksni::{MenuItem, ToolTip, Tray};
 use tokio::sync::watch;
 
 use super::launch::launch;
-use super::resolve::{Resolved, featured_id, resolve_for, visible};
+use super::resolve::{featured_id, resolve_for, visible};
 use crate::appearance::ColorScheme;
 use crate::config::Config;
 use crate::domain::{
@@ -11,7 +11,7 @@ use crate::domain::{
     freedesktop_icon_name,
 };
 use crate::i18n::{Lang, fl, loader};
-use crate::icon::{IconRenderer, Theme};
+use crate::icon::{IconKey, Theme};
 use crate::refresh::RefreshSignal;
 
 // ---------------------------------------------------------------------------
@@ -59,18 +59,32 @@ fn id_hash(id: &DeviceId) -> u32 {
 /// Writes `config.json`; a parameter so tests never touch the real file.
 pub type SaveConfig = fn(&Config) -> anyhow::Result<()>;
 
+/// Serves a `View` the manager computed; ksni reads it on every `update`.
 pub struct RigbatTray {
     /// `Some(id)` = per-device icon; `None` = aggregate/primary icon.
     pub key: Option<DeviceId>,
-    pub rx: watch::Receiver<TrayState>,
-    pub theme_rx: watch::Receiver<ColorScheme>,
+    pub view: View,
+    /// `view.icon`, rendered.
+    pub icon: Vec<ksni::Icon>,
     pub config: watch::Sender<Config>,
     pub save_config: SaveConfig,
-    pub renderer: Box<dyn IconRenderer>,
     pub refresh: RefreshSignal,
 }
 
-/// A device row of the menu, read under one pair of borrows.
+/// Everything one icon shows. Text that ages ("2h ago") is part of it, so a
+/// view computed later can differ from an earlier one for the same state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct View {
+    title: String,
+    pub icon: IconKey,
+    tool_tip: String,
+    rows: Vec<MenuRow>,
+    mode: TrayMode,
+    automatic: bool,
+    lang: Lang,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct MenuRow {
     name: String,
     label: String,
@@ -78,16 +92,68 @@ struct MenuRow {
     pinned: bool,
 }
 
-impl RigbatTray {
-    /// Resolves this icon's device. `None` when the icon has nothing to show
-    /// (no devices, or the keyed device disappeared / is hidden).
-    fn resolve(&self) -> Option<Resolved> {
-        let state = self.rx.borrow();
-        let cfg = self.config.borrow();
-        resolve_for(self.key.as_ref(), &state, &cfg, crate::clock::now())
-        // `state` and `cfg` (watch::Ref) are dropped here, before any await.
+impl View {
+    pub fn new(
+        key: Option<&DeviceId>,
+        state: &TrayState,
+        cfg: &Config,
+        scheme: ColorScheme,
+        now: BootTime,
+    ) -> Self {
+        let lang = cfg.lang();
+        let l = loader(lang);
+        // `None` when the icon has nothing to show: no devices, or the keyed one is gone or hidden.
+        let resolved = resolve_for(key, state, cfg, now);
+        let title = match (key, &resolved) {
+            (Some(k), _) => k.name.clone(),
+            (None, Some(r)) => r.state.info.name.clone(),
+            (None, None) => "rigbat".to_owned(),
+        };
+        let tool_tip = match (&resolved, key) {
+            (Some(r), _) => device_line(&r.state, r.status, now, lang),
+            (None, Some(id)) => fl!(l, "entry-offline", name = id.name.as_str()),
+            (None, None) => fl!(l, "tray-no-devices"),
+        };
+        let icon = IconKey {
+            status: resolved
+                .as_ref()
+                .map_or(PrimaryStatus::Offline, |r| r.status),
+            kind: resolved.as_ref().map(|r| r.state.info.kind),
+            theme: match scheme {
+                ColorScheme::Dark => Theme::dark(),
+                ColorScheme::Light => Theme::light(),
+            },
+            mode: cfg.display_mode,
+            stale: resolved.as_ref().is_some_and(|r| r.stale),
+        };
+        let pinned = featured_id(state, cfg, now)
+            .filter(|id| cfg.primary_device.as_deref() == Some(id.name.as_str()));
+        let rows = visible(state, cfg, now)
+            .devices()
+            .iter()
+            .map(|d| {
+                let (status, _) = device_status(d, cfg.effective_low_threshold(&d.info.name));
+                MenuRow {
+                    name: d.info.name.clone(),
+                    label: mnemonic_escape(&device_line(d, status, now, lang)),
+                    icon_name: freedesktop_icon_name(d.info.kind).to_owned(),
+                    pinned: pinned.as_ref() == Some(&d.info.id()),
+                }
+            })
+            .collect();
+        Self {
+            title,
+            icon,
+            tool_tip,
+            rows,
+            mode: cfg.tray_mode,
+            automatic: cfg.primary_device.is_none(),
+            lang,
+        }
     }
+}
 
+impl RigbatTray {
     /// Saves `primary_device` and publishes it on the config channel, whose
     /// change makes the manager loop re-publish every icon: ksni does not
     /// re-publish an icon after a menu event.
@@ -103,28 +169,6 @@ impl RigbatTray {
             }
             Err(e) => tracing::error!("failed to save the tray device choice: {e:#}"),
         }
-    }
-
-    fn menu_rows(&self, now: BootTime) -> (Vec<MenuRow>, TrayMode, bool, Lang) {
-        let state = self.rx.borrow();
-        let cfg = self.config.borrow();
-        let lang = cfg.lang();
-        let pinned = featured_id(&state, &cfg, now)
-            .filter(|id| cfg.primary_device.as_deref() == Some(id.name.as_str()));
-        let rows = visible(&state, &cfg, now)
-            .devices()
-            .iter()
-            .map(|d| {
-                let (status, _) = device_status(d, cfg.effective_low_threshold(&d.info.name));
-                MenuRow {
-                    name: d.info.name.clone(),
-                    label: mnemonic_escape(&device_line(d, status, now, lang)),
-                    icon_name: freedesktop_icon_name(d.info.kind).to_owned(),
-                    pinned: pinned.as_ref() == Some(&d.info.id()),
-                }
-            })
-            .collect();
-        (rows, cfg.tray_mode, cfg.primary_device.is_none(), lang)
     }
 }
 
@@ -151,48 +195,28 @@ impl Tray for RigbatTray {
     /// COSMIC shows no hover tooltip for tray icons, so for the aggregate
     /// icon this is the only textual channel naming the device it stands for.
     fn title(&self) -> String {
-        match &self.key {
-            Some(k) => k.name.clone(),
-            None => self
-                .resolve()
-                .map_or_else(|| "rigbat".to_owned(), |r| r.state.info.name),
-        }
+        self.view.title.clone()
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        let theme = match *self.theme_rx.borrow() {
-            ColorScheme::Dark => Theme::dark(),
-            ColorScheme::Light => Theme::light(),
-        };
-        let mode = self.config.borrow().display_mode;
-
-        let resolved = self.resolve();
-        let status = resolved
-            .as_ref()
-            .map_or(PrimaryStatus::Offline, |r| r.status);
-        let stale = resolved.as_ref().is_some_and(|r| r.stale);
-        let kind = resolved.map(|r| r.state.info.kind);
-        self.renderer.render(status, kind, &theme, mode, stale)
+        self.icon.clone()
     }
 
     fn tool_tip(&self) -> ToolTip {
-        let lang = self.config.borrow().lang();
-        let l = loader(lang);
-        let title = self
-            .resolve()
-            .map(|r| device_line(&r.state, r.status, crate::clock::now(), lang))
-            .unwrap_or_else(|| match &self.key {
-                Some(id) => fl!(l, "entry-offline", name = id.name.as_str()),
-                None => fl!(l, "tray-no-devices"),
-            });
         ToolTip {
-            title,
+            title: self.view.tool_tip.clone(),
             ..ToolTip::default()
         }
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let (rows, mode, automatic, lang) = self.menu_rows(crate::clock::now());
+        let View {
+            rows,
+            mode,
+            automatic,
+            lang,
+            ..
+        } = self.view.clone();
         let l = loader(lang);
 
         let mut items: Vec<MenuItem<Self>> = Vec::new();
@@ -284,14 +308,13 @@ impl Tray for RigbatTray {
 mod tests {
     use std::time::Duration;
 
-    use super::{MenuItem, RigbatTray, SaveConfig, Tray as _, sni_id, watch};
+    use super::{MenuItem, RigbatTray, SaveConfig, Tray as _, View, sni_id, watch};
     use crate::appearance::ColorScheme;
     use crate::config::Config;
     use crate::domain::{
-        BatteryReading, ChargeState, DeviceId, DeviceInfo, DeviceKind, DeviceState, Presence,
-        Transport, TrayMode, TrayState,
+        BatteryReading, BootTime, ChargeState, DeviceId, DeviceInfo, DeviceKind, DeviceState,
+        Presence, Transport, TrayMode, TrayState,
     };
-    use crate::icon::TinySkiaRenderer;
     use crate::refresh::RefreshSignal;
     use crate::tray::fixtures::{
         cfg_with_primary, id, key, make_info, make_reading, make_state, no_access, retained,
@@ -355,14 +378,30 @@ mod tests {
         let mut cfg = cfg;
         cfg.language.get_or_insert_with(|| "en".to_owned());
         RigbatTray {
+            view: View::new(
+                key.as_ref(),
+                &state,
+                &cfg,
+                ColorScheme::Dark,
+                crate::clock::now(),
+            ),
             key,
-            rx: watch::channel(state).1,
-            theme_rx: watch::channel(ColorScheme::Dark).1,
+            icon: Vec::new(),
             config: watch::channel(cfg).0,
             save_config,
-            renderer: Box::new(TinySkiaRenderer::default()),
             refresh: RefreshSignal::new(),
         }
+    }
+
+    /// What the manager does on the config change a click publishes.
+    fn rerender(tray: &mut RigbatTray, state: &TrayState) {
+        tray.view = View::new(
+            tray.key.as_ref(),
+            state,
+            &tray.config.borrow(),
+            ColorScheme::Dark,
+            crate::clock::now(),
+        );
     }
 
     fn tray_for(key: Option<DeviceId>, state: TrayState) -> RigbatTray {
@@ -575,10 +614,12 @@ mod tests {
 
     #[test]
     fn clicking_a_device_pins_it_and_automatic_clears_the_pin() {
-        let mut tray = tray_for(None, every_row_shape());
+        let state = every_row_shape();
+        let mut tray = tray_for(None, state.clone());
 
         click(&mut tray, "Ear: ⚡ 40%");
         assert_eq!(tray.config.borrow().primary_device.as_deref(), Some("Ear"));
+        rerender(&mut tray, &state);
         assert_eq!(tray.title(), "Ear");
 
         click(&mut tray, "MX__Master: 62% · ~3h left");
@@ -612,5 +653,47 @@ mod tests {
             "{:?}",
             describe(&tray)
         );
+    }
+
+    /// Unchanged state still renders new text once an age crosses a unit;
+    /// a live reading's line does not age.
+    #[test]
+    fn a_view_changes_with_time_only_where_text_ages() {
+        let state = TrayState {
+            devices: vec![
+                retained("NuPhy", 88, Duration::from_secs(30 * 60)),
+                device(
+                    "Pad",
+                    DeviceKind::Controller,
+                    make_reading(70),
+                    crate::domain::Estimate::Unknown,
+                ),
+            ],
+        };
+        let cfg = Config {
+            language: Some("en".to_owned()),
+            tray_mode: TrayMode::PerDevice,
+            ..Config::default()
+        };
+        let now = crate::clock::now();
+        let since_boot = now.saturating_duration_since(BootTime::from_boot(Duration::ZERO));
+        let later = BootTime::from_boot(since_boot + Duration::from_secs(3600));
+        let key_of = |name: &str| {
+            state
+                .devices
+                .iter()
+                .find(|d| d.info.name == name)
+                .expect("device")
+                .info
+                .id()
+        };
+        let view =
+            |name: &str, at| View::new(Some(&key_of(name)), &state, &cfg, ColorScheme::Dark, at);
+
+        assert_eq!(view("NuPhy", now), view("NuPhy", now));
+        assert_ne!(view("NuPhy", now), view("NuPhy", later));
+        let (pad_now, pad_later) = (view("Pad", now), view("Pad", later));
+        assert_eq!(pad_now.icon, pad_later.icon);
+        assert_eq!(pad_now.tool_tip, pad_later.tool_tip);
     }
 }

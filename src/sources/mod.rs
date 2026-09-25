@@ -19,6 +19,12 @@ pub trait BatterySource: Send {
     /// (the caller treats this as offline), or, as `AccessDenied`, that this
     /// user may not open it at all.
     async fn poll(&mut self) -> anyhow::Result<BatteryReading>;
+    /// A reading the device reports without being asked. Never resolves for
+    /// a source whose device does not push. Cancel-safe: it runs in a
+    /// `select!` against the poll interval.
+    async fn pushed(&mut self) -> BatteryReading {
+        std::future::pending().await
+    }
 }
 
 /// Reported apart from a silent device: retrying cannot help until access is granted.

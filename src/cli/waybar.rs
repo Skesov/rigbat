@@ -2,9 +2,10 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::watch;
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 use crate::config::Config;
-use crate::domain::{BootTime, DeviceState, PrimaryStatus, Roster, TrayState};
+use crate::domain::{AGE_STEP, BootTime, DeviceState, PrimaryStatus, Roster, TrayState};
 use crate::domain::{device_status, format_device_entry};
 use crate::i18n::Lang;
 
@@ -143,6 +144,9 @@ pub async fn run(mut rx: watch::Receiver<TrayState>, mut cfg_rx: watch::Receiver
     .await;
 
     let mut last_line: Option<String> = None;
+    // The tooltip's "offline (2h ago)" ages with nothing published.
+    let mut age_tick = interval_at(Instant::now() + AGE_STEP, AGE_STEP);
+    age_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         {
@@ -158,6 +162,7 @@ pub async fn run(mut rx: watch::Receiver<TrayState>, mut cfg_rx: watch::Receiver
         tokio::select! {
             r = rx.changed() => if r.is_err() { break; },
             r = cfg_rx.changed() => if r.is_err() { break; },
+            _ = age_tick.tick() => {}
         }
     }
 

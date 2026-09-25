@@ -33,6 +33,9 @@ pub fn state_label(state: ChargeState, lang: Lang) -> String {
 
 /// Formats a duration as a coarse, human-scale age string. Coarse units only
 /// (never raw seconds) — this reads in a tooltip, not a log.
+/// The smallest unit `format_age` shows: text that ages changes at most this often.
+pub const AGE_STEP: Duration = Duration::from_secs(60);
+
 pub fn format_age(age: Duration, lang: Lang) -> String {
     let l = loader(lang);
     // Counts go through locals: `fl!` would parse `count = secs / 60` as `secs / 60.into()`.

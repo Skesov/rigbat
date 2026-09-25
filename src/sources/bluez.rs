@@ -22,12 +22,9 @@ use crate::refresh::RefreshSignal;
 use super::supervise::supervise;
 use super::{BatteryBackend, BatterySource, Context};
 
-/// `refresh.trigger()` wakes every source task, including the SteelSeries
-/// hidraw task, which opens the device and blocks a thread.
-/// BlueZ can emit a burst of signals for one physical event (several
-/// interfaces added at once when a device connects, `Percentage` updates
-/// from several devices in the same second); coalescing avoids hammering
-/// unrelated USB HID devices for a reason that has nothing to do with them.
+/// BlueZ emits a burst of signals for one physical event (several interfaces
+/// added at once when a device connects); coalescing runs one discovery sweep
+/// for the burst instead of one per signal.
 const SIGNAL_DEBOUNCE: Duration = Duration::from_secs(5);
 
 pub struct BluezBackend;
@@ -36,6 +33,8 @@ struct BluezSource {
     info: DeviceInfo,
     path: OwnedObjectPath,
     conn: zbus::Connection,
+    /// `Battery1` changes at `path`, subscribed on the first `pushed` call.
+    changes: Option<zbus::MessageStream>,
 }
 
 /// Selects the device name: Alias → Name → address from the object path.
@@ -135,14 +134,16 @@ async fn discover_inner(ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySour
             info,
             path: path.clone(),
             conn: conn.clone(),
+            changes: None,
         }));
     }
 
     Ok(sources)
 }
 
-/// Subscribes to BlueZ D-Bus signals and triggers `refresh` when a device is
-/// added, removed, or reports a new battery level. Runs under a supervising
+/// Subscribes to BlueZ D-Bus signals and asks `refresh` to re-discover when a
+/// device is added, removed, connects or disconnects. A new battery level is
+/// not handled here: each `BluezSource` receives its own (`pushed`). Runs under a supervising
 /// retry loop with exponential backoff (`sources::supervise`): a lost system
 /// bus, a BlueZ that leaves in a way `NameOwnerChanged` cannot recover from,
 /// or any other stream ending is not fatal — the loop re-dials through
@@ -252,7 +253,7 @@ async fn watch_events_inner(
                 // right at the boundary takes the immediate path, and this arm
                 // then fired a second time for the same burst.
                 if debouncer.should_fire(Instant::now()) {
-                    refresh.trigger();
+                    refresh.rediscover();
                 }
             }
             item = subs.interfaces_added.next() => {
@@ -304,10 +305,9 @@ async fn watch_events_inner(
                             );
                         }
                     }
-                    // Devices may have connected or changed battery level
-                    // while BlueZ was down; the safety net (30s sweep) would
-                    // eventually catch it, but a refresh now closes the gap.
-                    refresh.trigger();
+                    // Devices may have connected while BlueZ was down; the
+                    // 30 s sweep would catch it, a sweep now closes the gap.
+                    refresh.rediscover();
                 } else {
                     tracing::warn!(
                         "BlueZ left the bus; Bluetooth updates fall back to periodic discovery"
@@ -327,7 +327,7 @@ fn fire_or_defer(
     if debouncer.should_fire(now) {
         // Firing now covers whatever the pending sleep was deferring.
         *deferred = None;
-        refresh.trigger();
+        refresh.rediscover();
     } else if deferred.is_none()
         && let Some(deadline) = debouncer.deadline()
     {
@@ -335,17 +335,11 @@ fn fire_or_defer(
     }
 }
 
-/// `org.bluez.Battery1` PropertiesChanged is always battery-relevant (its
-/// only meaningful property is `Percentage`). `org.bluez.Device1` also fires
-/// on `RSSI`, `ServicesResolved`, `TxPower` and other radio-link chatter
-/// that has nothing to do with battery state; only `Connected` (attach or
-/// detach) should trigger a re-poll.
+/// Only `Device1.Connected` (attach or detach) changes the roster. `Device1`
+/// also fires on `RSSI`, `ServicesResolved`, `TxPower` and other radio-link
+/// chatter, and `Battery1` reaches its own source through `pushed`.
 fn is_relevant_properties_change(interface: &str, changed_properties: &[&str]) -> bool {
-    match interface {
-        "org.bluez.Battery1" => true,
-        "org.bluez.Device1" => changed_properties.contains(&"Connected"),
-        _ => false,
-    }
+    interface == DEVICE_IFACE && changed_properties.contains(&"Connected")
 }
 
 /// Coalesces refresh triggers within a fixed window so a burst of D-Bus
@@ -403,9 +397,9 @@ impl BatterySource for BluezSource {
             .await
             .context("building PropertiesProxy for Device1")?;
 
-        let device_iface = zbus::names::InterfaceName::try_from("org.bluez.Device1")
-            .context("invalid interface name")?;
-        let battery_iface = zbus::names::InterfaceName::try_from("org.bluez.Battery1")
+        let device_iface =
+            zbus::names::InterfaceName::try_from(DEVICE_IFACE).context("invalid interface name")?;
+        let battery_iface = zbus::names::InterfaceName::try_from(BATTERY_IFACE)
             .context("invalid interface name")?;
 
         let connected_val = props_device
@@ -426,16 +420,72 @@ impl BatterySource for BluezSource {
             .await
             .context("reading Battery1.Percentage")?;
 
-        let reading = percentage_reading(pct_val)?;
+        let reading = percentage_reading(&pct_val)?;
 
         tracing::debug!(device = %self.info.name, percent = reading.percent, "bluez poll");
         Ok(reading)
     }
+
+    async fn pushed(&mut self) -> BatteryReading {
+        loop {
+            let changes = match &mut self.changes {
+                Some(changes) => changes,
+                None => match battery_changes(&self.conn, &self.path).await {
+                    Ok(changes) => self.changes.insert(changes),
+                    Err(e) => {
+                        tracing::debug!(device = %self.info.name, "no Battery1 signals: {e:#}");
+                        return std::future::pending().await;
+                    }
+                },
+            };
+            let Some(Ok(msg)) = changes.next().await else {
+                // Resubscribed on the next call, after the poll interval.
+                self.changes = None;
+                return std::future::pending().await;
+            };
+            if let Some(reading) = pushed_percentage(&msg) {
+                tracing::debug!(device = %self.info.name, percent = reading.percent, "bluez push");
+                return reading;
+            }
+        }
+    }
+}
+
+const DEVICE_IFACE: &str = "org.bluez.Device1";
+const BATTERY_IFACE: &str = "org.bluez.Battery1";
+
+/// `PropertiesChanged` of `Battery1` at one device's object path.
+async fn battery_changes(
+    conn: &zbus::Connection,
+    path: &OwnedObjectPath,
+) -> anyhow::Result<zbus::MessageStream> {
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender("org.bluez")?
+        .path(path.as_ref())?
+        .interface("org.freedesktop.DBus.Properties")?
+        .member("PropertiesChanged")?
+        .arg(0, BATTERY_IFACE)?
+        .build();
+    zbus::MessageStream::for_match_rule(rule, conn, None)
+        .await
+        .context("subscribing to Battery1 PropertiesChanged")
+}
+
+/// The reading a `Battery1` `PropertiesChanged` carries, if it changed `Percentage`.
+fn pushed_percentage(msg: &zbus::Message) -> Option<BatteryReading> {
+    let signal = zbus::fdo::PropertiesChanged::from_message(msg.clone())?;
+    let args = signal.args().ok()?;
+    if args.interface_name().as_str() != BATTERY_IFACE {
+        return None;
+    }
+    let value = args.changed_properties().get("Percentage")?;
+    percentage_reading(value).ok()
 }
 
 /// `Battery1.Percentage` is a D-Bus byte (`y`); a value of any other type is
 /// rejected, not coerced.
-fn percentage_reading(value: zbus::zvariant::OwnedValue) -> anyhow::Result<BatteryReading> {
+fn percentage_reading(value: &zbus::zvariant::Value<'_>) -> anyhow::Result<BatteryReading> {
     let percent = u8::try_from(value).context("parsing Battery1.Percentage as u8")?;
     Ok(BatteryReading::new(percent, ChargeState::Discharging))
 }
@@ -499,8 +549,8 @@ mod tests {
     }
 
     #[test]
-    fn battery1_change_is_always_relevant() {
-        assert!(is_relevant_properties_change(
+    fn battery1_change_does_not_rediscover() {
+        assert!(!is_relevant_properties_change(
             "org.bluez.Battery1",
             &["Percentage"]
         ));
@@ -574,14 +624,14 @@ mod tests {
         proptest! {
             #[test]
             fn any_byte_reads_in_range(percent in any::<u8>()) {
-                let reading = percentage_reading(OwnedValue::from(percent)).unwrap();
+                let reading = percentage_reading(&OwnedValue::from(percent)).unwrap();
                 prop_assert_eq!(reading.percent, percent.min(100));
                 prop_assert_eq!(reading.state, ChargeState::Discharging);
             }
 
             #[test]
             fn a_value_of_another_type_is_rejected(value in non_byte_value()) {
-                prop_assert!(percentage_reading(value).is_err());
+                prop_assert!(percentage_reading(&value).is_err());
             }
         }
     }
@@ -593,17 +643,19 @@ mod bus_tests {
     use std::time::Duration;
 
     use tokio::time::timeout;
-    use zbus::zvariant::Value;
+    use zbus::zvariant::{OwnedObjectPath, Value};
 
-    use super::watch_events_inner;
+    use super::{BluezSource, watch_events_inner};
     use crate::bus_test::isolated;
+    use crate::domain::{BatteryReading, DeviceInfo, DeviceKind, Transport};
     use crate::refresh::{RefreshSignal, RefreshWaiter};
-    use crate::sources::Context;
+    use crate::sources::{BatterySource as _, Context};
 
     const DEBOUNCE: Duration = Duration::from_millis(300);
     /// Room for a signal to cross the bus and the watcher to act on it.
     const SLACK: Duration = Duration::from_millis(150);
     const DEVICE: &str = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF";
+    const OTHER: &str = "/org/bluez/hci0/dev_11_22_33_44_55_66";
 
     async fn fake_bluez() -> zbus::Connection {
         zbus::connection::Builder::system()
@@ -615,12 +667,18 @@ mod bus_tests {
             .expect("fake BlueZ")
     }
 
-    async fn properties_changed(bluez: &zbus::Connection, interface: &str, property: &str) {
-        let changed = HashMap::from([(property, Value::U8(42))]);
+    async fn properties_changed_at(
+        bluez: &zbus::Connection,
+        path: &str,
+        interface: &str,
+        property: &str,
+        value: u8,
+    ) {
+        let changed = HashMap::from([(property, Value::U8(value))]);
         bluez
             .emit_signal(
                 None::<()>,
-                DEVICE,
+                path,
                 "org.freedesktop.DBus.Properties",
                 "PropertiesChanged",
                 &(interface, changed, Vec::<&str>::new()),
@@ -629,18 +687,26 @@ mod bus_tests {
             .expect("emit PropertiesChanged");
     }
 
+    async fn properties_changed(bluez: &zbus::Connection, interface: &str, property: &str) {
+        properties_changed_at(bluez, DEVICE, interface, property, 42).await;
+    }
+
     async fn fired(refreshed: &mut RefreshWaiter, within: Duration) -> bool {
         timeout(within, refreshed.wait()).await.is_ok()
     }
 
     #[tokio::test]
-    async fn bluez_signals_trigger_a_debounced_refresh() {
-        if !isolated(module_path!(), "bluez_signals_trigger_a_debounced_refresh") {
+    async fn bluez_signals_trigger_a_debounced_rediscover() {
+        if !isolated(
+            module_path!(),
+            "bluez_signals_trigger_a_debounced_rediscover",
+        ) {
             return;
         }
         let bluez = fake_bluez().await;
         let refresh = RefreshSignal::new();
-        let mut refreshed = refresh.waiter();
+        let mut refreshed = refresh.sweep_waiter();
+        let mut polled = refresh.waiter();
         let conn = Context::new()
             .system_bus()
             .await
@@ -652,12 +718,12 @@ mod bus_tests {
         while !fired(&mut refreshed, Duration::from_millis(50)).await {
             attempts += 1;
             assert!(attempts < 100, "the watcher never reacted");
-            properties_changed(&bluez, "org.bluez.Battery1", "Percentage").await;
+            properties_changed(&bluez, "org.bluez.Device1", "Connected").await;
         }
         while fired(&mut refreshed, DEBOUNCE + SLACK).await {}
 
         for _ in 0..5 {
-            properties_changed(&bluez, "org.bluez.Battery1", "Percentage").await;
+            properties_changed(&bluez, "org.bluez.Device1", "Connected").await;
         }
         assert!(
             fired(&mut refreshed, SLACK).await,
@@ -681,6 +747,11 @@ mod bus_tests {
             !fired(&mut refreshed, DEBOUNCE + SLACK).await,
             "RSSI is noise"
         );
+        properties_changed(&bluez, "org.bluez.Battery1", "Percentage").await;
+        assert!(
+            !fired(&mut refreshed, DEBOUNCE + SLACK).await,
+            "a battery level is its own source's business"
+        );
 
         let dbus = zbus::fdo::DBusProxy::new(&bluez).await.expect("DBus proxy");
         dbus.release_name("org.bluez".try_into().expect("name"))
@@ -689,15 +760,94 @@ mod bus_tests {
         let restarted = fake_bluez().await;
         assert!(
             fired(&mut refreshed, DEBOUNCE).await,
-            "a restarted BlueZ re-polls"
+            "a restarted BlueZ re-discovers"
         );
-        properties_changed(&bluez, "org.bluez.Battery1", "Percentage").await;
+        properties_changed(&bluez, "org.bluez.Device1", "Connected").await;
         assert!(
             !fired(&mut refreshed, SLACK).await,
             "the old owner is no longer BlueZ"
         );
-        properties_changed(&restarted, "org.bluez.Battery1", "Percentage").await;
+        properties_changed(&restarted, "org.bluez.Device1", "Connected").await;
         assert!(fired(&mut refreshed, SLACK).await, "the new owner is heard");
+        assert!(
+            !fired(&mut polled, SLACK).await,
+            "no Bluetooth signal re-polls every source"
+        );
         assert!(!watcher.is_finished());
+    }
+
+    fn source(conn: &zbus::Connection, path: &str) -> BluezSource {
+        BluezSource {
+            info: DeviceInfo {
+                name: path.to_owned(),
+                kind: DeviceKind::Mouse,
+                transport: Transport::Bluetooth,
+                locator: None,
+            },
+            path: OwnedObjectPath::try_from(path).expect("object path"),
+            conn: conn.clone(),
+            changes: None,
+        }
+    }
+
+    fn next_push(
+        mut source: BluezSource,
+    ) -> tokio::task::JoinHandle<(BluezSource, BatteryReading)> {
+        tokio::spawn(async move {
+            let reading = source.pushed().await;
+            (source, reading)
+        })
+    }
+
+    /// A `Percentage` change reaches the source at its path, as a reading,
+    /// and nothing else: not another device, not a re-poll, not a sweep.
+    #[tokio::test]
+    async fn a_percentage_signal_updates_only_its_device() {
+        if !isolated(
+            module_path!(),
+            "a_percentage_signal_updates_only_its_device",
+        ) {
+            return;
+        }
+        let bluez = fake_bluez().await;
+        let conn = Context::new()
+            .system_bus()
+            .await
+            .expect("private system bus");
+        let refresh = RefreshSignal::new();
+        let mut swept = refresh.sweep_waiter();
+        let mut polled = refresh.waiter();
+        tokio::spawn(watch_events_inner(refresh, conn.clone(), DEBOUNCE));
+
+        // Subscriptions are made lazily; repeat until the watcher and both sources hear.
+        let mut device = next_push(source(&conn, DEVICE));
+        let mut other = next_push(source(&conn, OTHER));
+        let mut attempts = 0;
+        let mut watcher_heard = false;
+        while !(watcher_heard && device.is_finished() && other.is_finished()) {
+            attempts += 1;
+            assert!(attempts < 100, "the subscriptions never became active");
+            properties_changed_at(&bluez, DEVICE, "org.bluez.Battery1", "Percentage", 50).await;
+            properties_changed_at(&bluez, OTHER, "org.bluez.Battery1", "Percentage", 50).await;
+            properties_changed(&bluez, "org.bluez.Device1", "Connected").await;
+            watcher_heard |= fired(&mut swept, Duration::from_millis(50)).await;
+        }
+        while fired(&mut swept, DEBOUNCE + SLACK).await {}
+        let (device_source, _) = device.await.expect("device task");
+        let (other_source, _) = other.await.expect("other task");
+
+        device = next_push(device_source);
+        other = next_push(other_source);
+        properties_changed_at(&bluez, DEVICE, "org.bluez.Battery1", "Percentage", 42).await;
+
+        let (_, reading) = timeout(SLACK * 4, device)
+            .await
+            .expect("the device heard its Percentage")
+            .expect("device task");
+        assert_eq!(reading.percent, 42);
+        tokio::time::sleep(SLACK).await;
+        assert!(!other.is_finished(), "another device took the reading");
+        assert!(!fired(&mut swept, DEBOUNCE + SLACK).await, "swept");
+        assert!(!fired(&mut polled, SLACK).await, "re-polled");
     }
 }
