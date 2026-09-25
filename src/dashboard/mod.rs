@@ -14,22 +14,16 @@ use futures_util::{Stream, StreamExt as _};
 use zbus::fdo::{DBusProxy, NameOwnerChangedStream};
 
 use crate::config;
-use crate::domain::{
-    BootTime, DeviceKind, Presence, PrimaryStatus, charge_value, roster_order, status_note,
-};
-use crate::gui;
+use crate::domain::{BootTime, Presence, PrimaryStatus, charge_value, roster_order, status_note};
+use crate::gui::{self, GLYPH_COLUMN, GLYPH_SIZE, ROW_HEIGHT, color, kind_glyph, secondary_text};
 use crate::i18n::{Lang, fl, loader};
-use crate::icon::Theme;
 use crate::ipc::single_instance::{SingleInstance, acquire_named};
 use crate::ipc::{DASHBOARD_NAME, DASHBOARD_PATH, DeviceCard, Snapshot, TRAY_NAME};
 use crate::ipc::{Dashboard1Proxy, Tray1Proxy};
 
 const WINDOW_WIDTH: f32 = 380.0;
 const MARGIN: f32 = 12.0;
-const ROW_HEIGHT: f32 = 48.0;
 const ROW_PADDING: f32 = 5.0;
-const GLYPH_COLUMN: f32 = 30.0;
-const GLYPH_SIZE: f32 = 20.0;
 const GAP: f32 = 8.0;
 const NOTE_SIZE: f32 = 12.0;
 const BAR_HEIGHT: f32 = 4.0;
@@ -479,11 +473,7 @@ fn render_row(ui: &mut egui::Ui, card: &DeviceCard, lang: Lang, elapsed: u64) {
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     response.on_hover_text(details(card, lang));
     let visuals = ui.visuals().clone();
-    let theme = if visuals.dark_mode {
-        Theme::dark()
-    } else {
-        Theme::light()
-    };
+    let theme = gui::theme(&visuals);
     let low = matches!(card.status, PrimaryStatus::Low { .. });
     let online = card.presence == Presence::Online;
 
@@ -501,12 +491,7 @@ fn render_row(ui: &mut egui::Ui, card: &DeviceCard, lang: Lang, elapsed: u64) {
     );
     let (top, bottom) = body.split_top_bottom_at_fraction(0.5);
 
-    let value = egui::RichText::new(value_text(card, lang));
-    let value = match (low, online) {
-        (true, _) => value.strong().color(color(theme.low)),
-        (false, true) => value.strong(),
-        (false, false) => value.color(secondary_text(&visuals)),
-    };
+    let value = gui::charge_value_text(&visuals, value_text(card, lang), low, online);
     let value_rect = place(ui, top, egui::Align::Max, egui::Label::new(value));
     let name = egui::Label::new(egui::RichText::new(&card.name).strong()).truncate();
     place(
@@ -576,16 +561,6 @@ fn track_color(visuals: &egui::Visuals, fill: egui::Color32) -> egui::Color32 {
     visuals.extreme_bg_color.lerp_to_gamma(fill, TRACK_TINT)
 }
 
-fn kind_glyph(kind: DeviceKind) -> &'static str {
-    match kind {
-        DeviceKind::Mouse => "\u{1F5B1}",
-        DeviceKind::Keyboard => "\u{2328}",
-        DeviceKind::Headset => "\u{1F3A7}",
-        DeviceKind::Controller => "\u{1F3AE}",
-        DeviceKind::Other => "\u{1F50B}",
-    }
-}
-
 fn value_text(card: &DeviceCard, lang: Lang) -> String {
     charge_value(card.presence, card.percent, card.charge, card.status, lang)
 }
@@ -606,15 +581,6 @@ fn details(card: &DeviceCard, lang: Lang) -> String {
         parts.push(fl!(loader(lang), "dashboard-in-tray"));
     }
     parts.join(" · ")
-}
-
-/// `weak_text_color` misses WCAG 4.5:1 on a dark panel.
-fn secondary_text(visuals: &egui::Visuals) -> egui::Color32 {
-    visuals.text_color()
-}
-
-fn color([r, g, b, a]: [u8; 4]) -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 
 fn open_settings() {
@@ -925,20 +891,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn secondary_text_is_readable_on_the_panel_in_both_themes() {
-        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
-            let text = secondary_text(&visuals);
-            assert_eq!(text.a(), 255, "secondary text must be opaque");
-            let ratio = gui::contrast_ratio(text, visuals.panel_fill);
-            assert!(
-                ratio >= 4.5,
-                "dark_mode={}: secondary text contrast {ratio:.2}:1 is below 4.5:1",
-                visuals.dark_mode
-            );
-        }
-    }
-
     fn start_refresh(d: &mut Dashboard, since: Instant) -> tokio::sync::oneshot::Sender<()> {
         let (failed_tx, failed) = tokio::sync::oneshot::channel();
         d.refreshing = Some(Refreshing { since, failed });
@@ -978,7 +930,8 @@ mod bus_tests {
     use crate::bus_test::isolated;
     use crate::config::Config;
     use crate::domain::{
-        BatteryReading, ChargeState, DeviceInfo, DeviceState, Estimate, Transport, TrayState,
+        BatteryReading, ChargeState, DeviceInfo, DeviceKind, DeviceState, Estimate, Transport,
+        TrayState,
     };
     use crate::refresh::RefreshSignal;
 

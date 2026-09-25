@@ -45,10 +45,6 @@ eframe = { version = "0.34.3", default-features = false, features = [
     "wayland",
     "x11",
 ] }
-# Pinned to exactly eframe's egui version (0.34.3): egui_extras must match
-# eframe's egui build-for-build, or the two link two different, incompatible
-# `egui` crates. `cargo tree -i egui` confirms a single 0.34.3 in the graph.
-egui_extras = { version = "=0.34.3", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 # UI translations (R60): embedded Fluent catalogues from i18n/.

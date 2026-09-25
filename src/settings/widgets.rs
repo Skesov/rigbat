@@ -1,12 +1,22 @@
 //! Preference-page building blocks: a titled boxed list of rows, a row with a
-//! title on the left and its control on the right, a switch, picture tiles,
-//! and underlined tabs.
+//! title on the left and its control on the right, a row that expands in
+//! place, a switch, picture tiles, and underlined tabs.
 
 use eframe::egui;
 
-pub const CONTENT_MAX_WIDTH: f32 = 640.0;
+use crate::gui::{self, GLYPH_COLUMN, GLYPH_SIZE, ROW_HEIGHT};
 
-const ROW_MIN_HEIGHT: f32 = 48.0;
+pub const CONTENT_MAX_WIDTH: f32 = 640.0;
+pub const PANEL_MARGIN: f32 = 16.0;
+pub const TAB_BAR_GAP: f32 = 8.0;
+/// Between a page's toolbar and status line and its first group.
+pub const TOOLBAR_GAP: f32 = 8.0;
+const PAGE_PADDING: f32 = 8.0;
+
+const NESTED_ROW_HEIGHT: f32 = 36.0;
+const CHEVRON_SIZE: f32 = 10.0;
+const CHEVRON_WIDTH: f32 = 1.5;
+const HOVER_TINT: f32 = 0.5;
 const ROW_PADDING_X: f32 = 14.0;
 const ROW_PADDING_Y: f32 = 8.0;
 const ROW_GAP: f32 = 16.0;
@@ -30,8 +40,31 @@ const SELECTED_TILE_STROKE: f32 = 2.0;
 const TAB_PADDING: egui::Vec2 = egui::vec2(12.0, 6.0);
 const TAB_UNDERLINE: f32 = 3.0;
 
+/// A centred column at most `CONTENT_MAX_WIDTH` wide, scrolling as a whole.
+pub fn page(ui: &mut egui::Ui, id_salt: &str, add: impl FnOnce(&mut egui::Ui)) {
+    egui::ScrollArea::vertical()
+        .id_salt(id_salt)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let width = ui.available_width().min(CONTENT_MAX_WIDTH);
+            let margin = (ui.available_width() - width) / 2.0;
+            let spacing = ui.spacing().item_spacing.x;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_space(margin);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.x = spacing;
+                    ui.set_width(width);
+                    ui.add_space(PAGE_PADDING);
+                    add(ui);
+                    ui.add_space(PAGE_PADDING);
+                });
+            });
+        });
+}
+
 /// A strong title above a rounded box whose rows are split by separators, with
-/// optional weak text under the box.
+/// optional secondary text under the box.
 pub fn group(
     ui: &mut egui::Ui,
     title: &str,
@@ -51,7 +84,12 @@ pub fn group(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 0.0;
-            add_rows(&mut Rows { ui, id, count: 0 });
+            add_rows(&mut Rows {
+                ui,
+                id,
+                count: 0,
+                nested: false,
+            });
         });
     if let Some(footer) = footer {
         ui.add_space(FOOTER_GAP);
@@ -79,6 +117,19 @@ pub struct Rows<'a> {
     ui: &'a mut egui::Ui,
     id: egui::Id,
     count: usize,
+    /// Under an expanded row: indented to its title, lower, not separated.
+    nested: bool,
+}
+
+/// The always-visible line of `Rows::expander`.
+pub struct Expander<'a> {
+    pub id: egui::Id,
+    pub glyph: &'a str,
+    pub title: &'a str,
+    pub note: Option<&'a str>,
+    pub value: egui::RichText,
+    pub hover: &'a str,
+    pub expanded: bool,
 }
 
 impl Rows<'_> {
@@ -92,23 +143,133 @@ impl Rows<'_> {
         self.separator();
         let text_id = self.id.with(self.count);
         let width = self.ui.available_width();
+        let (height, inset) = if self.nested {
+            (NESTED_ROW_HEIGHT, ROW_PADDING_X + GLYPH_COLUMN)
+        } else {
+            (ROW_HEIGHT, ROW_PADDING_X)
+        };
         self.ui
             .allocate_ui_with_layout(
-                egui::vec2(width, ROW_MIN_HEIGHT),
+                egui::vec2(width, height),
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
-                    ui.set_min_height(ROW_MIN_HEIGHT);
+                    ui.set_min_height(height);
                     ui.add_space(ROW_PADDING_X);
                     let inner = control(ui);
                     ui.add_space(ROW_GAP);
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                        ui.add_space(ROW_PADDING_X);
-                        ui.vertical(|ui| centred_text(ui, text_id, title, subtitle));
+                        ui.add_space(inset);
+                        ui.vertical(|ui| centred_text(ui, text_id, height, title, subtitle));
                     });
                     inner
                 },
             )
             .inner
+    }
+
+    /// A device-style row: glyph, title and note on the left; value, a
+    /// disclosure chevron and `control` on the right. A click anywhere but on
+    /// `control` lands in the returned response.
+    pub fn expander<R>(
+        &mut self,
+        header: Expander<'_>,
+        control: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> (egui::Response, R) {
+        self.separator();
+        let width = self.ui.available_width();
+        let (rect, _) = self
+            .ui
+            .allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::hover());
+        let response = self
+            .ui
+            .interact(rect, header.id, egui::Sense::click())
+            .on_hover_text(header.hover);
+        let enabled = self.ui.is_enabled();
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::CollapsingHeader,
+                enabled,
+                header.expanded,
+                header.title,
+            )
+        });
+        let visuals = self.ui.visuals().clone();
+        let radius = f32::from(GROUP_RADIUS) - 1.0;
+        if response.hovered() {
+            let fill = visuals
+                .widgets
+                .hovered
+                .weak_bg_fill
+                .gamma_multiply(HOVER_TINT);
+            self.ui
+                .painter()
+                .rect_filled(rect.shrink(1.0), radius, fill);
+        }
+        let inner = rect.shrink2(egui::vec2(ROW_PADDING_X, 0.0));
+        self.ui.painter().text(
+            egui::pos2(inner.left() + GLYPH_COLUMN / 2.0, rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            header.glyph,
+            egui::FontId::proportional(GLYPH_SIZE),
+            visuals.text_color(),
+        );
+
+        let mut right = self.ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        let control = control(&mut right);
+        right.add_space(ROW_GAP / 2.0);
+        let (chevron, _) =
+            right.allocate_exact_size(egui::Vec2::splat(CHEVRON_SIZE), egui::Sense::hover());
+        paint_chevron(&right, chevron, header.expanded);
+        right.add_space(ROW_GAP / 2.0);
+        let value = right
+            .add(egui::Label::new(header.value).selectable(false))
+            .rect;
+
+        let body = egui::FontId::proportional(egui::TextStyle::Body.resolve(self.ui.style()).size);
+        let small = secondary_font(self.ui);
+        let (title_height, note_height) = self
+            .ui
+            .ctx()
+            .fonts_mut(|f| (f.row_height(&body), f.row_height(&small)));
+        let height = title_height + header.note.map_or(0.0, |_| note_height);
+        let text = egui::Rect::from_min_max(
+            egui::pos2(inner.left() + GLYPH_COLUMN, rect.center().y - height / 2.0),
+            egui::pos2(value.left() - ROW_GAP, rect.center().y + height / 2.0),
+        );
+        let mut text_ui = self.ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(text)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        text_ui.spacing_mut().item_spacing.y = 0.0;
+        text_ui.add(egui::Label::new(header.title).truncate().selectable(false));
+        if let Some(note) = header.note {
+            text_ui.add(
+                egui::Label::new(secondary(&text_ui, note))
+                    .truncate()
+                    .selectable(false),
+            );
+        }
+        if response.has_focus() {
+            focus_ring(self.ui, rect.shrink(FOCUS_GAP + FOCUS_WIDTH), radius);
+        }
+        (response, control)
+    }
+
+    /// Rows under an expanded `expander`.
+    pub fn nested(&mut self, add: impl FnOnce(&mut Rows<'_>)) {
+        let id = self.id.with(("nested", self.count));
+        add(&mut Rows {
+            ui: self.ui,
+            id,
+            count: 0,
+            nested: true,
+        });
+        self.ui.add_space(ROW_PADDING_Y);
     }
 
     /// Title on top, `content` below it across the whole row.
@@ -128,7 +289,7 @@ impl Rows<'_> {
     }
 
     fn separator(&mut self) {
-        if self.count > 0 {
+        if self.count > 0 && !self.nested {
             let y = self.ui.cursor().top();
             let x = self.ui.max_rect().x_range();
             let stroke = self.ui.visuals().widgets.noninteractive.bg_stroke;
@@ -146,11 +307,12 @@ impl Rows<'_> {
 fn centred_text(
     ui: &mut egui::Ui,
     id: egui::Id,
+    row_height: f32,
     title: &str,
     subtitle: impl FnOnce(&mut egui::Ui),
 ) {
     let remembered = ui.ctx().data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
-    let padding = ((ROW_MIN_HEIGHT - remembered) / 2.0).max(ROW_PADDING_Y);
+    let padding = ((row_height - remembered) / 2.0).max(ROW_PADDING_Y);
     ui.add_space(padding);
     let top = ui.cursor().top();
     ui.label(title);
@@ -163,13 +325,32 @@ fn centred_text(
     }
 }
 
-/// Secondary text: dimmer and a little smaller than the body.
-pub fn secondary(ui: &egui::Ui, text: &str) -> egui::RichText {
-    let size = egui::TextStyle::Body.resolve(ui.style()).size * SECONDARY_SCALE;
-    egui::RichText::new(text).size(size).weak()
+/// A down chevron, or an up one when `expanded`.
+fn paint_chevron(ui: &egui::Ui, rect: egui::Rect, expanded: bool) {
+    let (half, rise) = (rect.width() / 2.0, rect.height() / 4.0);
+    let tip = if expanded { -rise } else { rise };
+    let c = rect.center();
+    let points = vec![
+        egui::pos2(c.x - half, c.y - tip),
+        egui::pos2(c.x, c.y + tip),
+        egui::pos2(c.x + half, c.y - tip),
+    ];
+    let stroke = egui::Stroke::new(CHEVRON_WIDTH, gui::secondary_text(ui.visuals()));
+    ui.painter().add(egui::Shape::line(points, stroke));
 }
 
-/// A row subtitle: one weak line that wraps when it must.
+fn secondary_font(ui: &egui::Ui) -> egui::FontId {
+    egui::FontId::proportional(egui::TextStyle::Body.resolve(ui.style()).size * SECONDARY_SCALE)
+}
+
+/// Secondary text: a little smaller than the body, as readable.
+pub fn secondary(ui: &egui::Ui, text: &str) -> egui::RichText {
+    egui::RichText::new(text)
+        .font(secondary_font(ui))
+        .color(gui::secondary_text(ui.visuals()))
+}
+
+/// A row subtitle: one secondary line that wraps when it must.
 pub fn subtitle(text: &str) -> impl FnOnce(&mut egui::Ui) + '_ {
     move |ui| {
         ui.label(secondary(ui, text));
@@ -217,14 +398,26 @@ pub fn switch(ui: &mut egui::Ui, id: egui::Id, on: &mut bool, label: &str) -> eg
         painter.circle(
             egui::pos2(x, rect.center().y),
             knob_radius,
-            egui::Color32::WHITE,
-            egui::Stroke::new(0.5_f32, egui::Color32::from_black_alpha(60)),
+            knob_fill(visuals),
+            visuals.widgets.noninteractive.bg_stroke,
         );
         if response.has_focus() {
             focus_ring(ui, rect, radius);
         }
     }
     response
+}
+
+/// The lighter of the theme's field background and strong text: white-ish in
+/// both schemes, as desktop switches are.
+fn knob_fill(visuals: &egui::Visuals) -> egui::Color32 {
+    let (field, strong) = (visuals.extreme_bg_color, visuals.strong_text_color());
+    let white = egui::Color32::WHITE;
+    if gui::contrast_ratio(field, white) <= gui::contrast_ratio(strong, white) {
+        field
+    } else {
+        strong
+    }
 }
 
 /// One of a row of picture choices: `image` above `caption`, outlined with
@@ -389,8 +582,7 @@ pub fn trailing<R>(ui: &mut egui::Ui, width: f32, control: impl FnOnce(&mut egui
 
 /// One weak, centred line: `text` followed by a link.
 pub fn footer(ui: &mut egui::Ui, text: &str, link: &str, url: &str) {
-    let mut font = egui::TextStyle::Body.resolve(ui.style());
-    font.size *= SECONDARY_SCALE;
+    let font = secondary_font(ui);
     let width = text_width(ui, text, &font) + FOOTER_SPACING + text_width(ui, link, &font);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = FOOTER_SPACING;
@@ -420,7 +612,8 @@ fn focus_ring(ui: &egui::Ui, rect: egui::Rect, radius: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::egui_test::{assert_single_lines_without_overlap, fully_painted_text_at};
+    use crate::egui_test::{assert_single_lines_without_overlap, fully_painted_text_at, run_frame};
+    use crate::gui;
 
     const SIZE: [f32; 2] = [CONTENT_MAX_WIDTH, 600.0];
 
@@ -450,6 +643,67 @@ mod tests {
             });
         });
         footer(ui, "rigbat 1.0 ·", "Project page", "https://example.org");
+    }
+
+    fn painted_color(theme: egui::Theme, text: &str, add: impl Fn(&mut egui::Ui)) -> egui::Color32 {
+        let ctx = egui::Context::default();
+        ctx.set_theme(theme);
+        let output = run_frame(&ctx, SIZE, Vec::new(), add);
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape) if shape.galley.text() == text => {
+                    let color = shape.galley.job.sections[0].format.color;
+                    Some(if color == egui::Color32::PLACEHOLDER {
+                        shape.fallback_color
+                    } else {
+                        color
+                    })
+                }
+                _ => None,
+            })
+            .expect("the text was painted")
+    }
+
+    #[test]
+    fn secondary_text_is_readable_in_both_themes() {
+        for (theme, visuals) in [
+            (egui::Theme::Dark, egui::Visuals::dark()),
+            (egui::Theme::Light, egui::Visuals::light()),
+        ] {
+            let color = painted_color(theme, "hint", |ui| {
+                ui.label(secondary(ui, "hint"));
+            });
+            let ratio = gui::contrast_ratio(color, visuals.panel_fill);
+            assert!(ratio >= 4.5, "{theme:?}: {ratio:.2}:1 is below 4.5:1");
+        }
+    }
+
+    #[test]
+    fn a_switch_knob_takes_its_colours_from_the_theme() {
+        let mut visuals = egui::Visuals::light();
+        visuals.extreme_bg_color = egui::Color32::from_rgb(250, 246, 240);
+        visuals.widgets.noninteractive.bg_stroke =
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 110, 100));
+        let ctx = egui::Context::default();
+        ctx.set_theme(egui::Theme::Light);
+        ctx.set_visuals_of(egui::Theme::Light, visuals.clone());
+
+        let output = run_frame(&ctx, SIZE, Vec::new(), |ui| {
+            switch(ui, egui::Id::new("knob"), &mut false, "Knob");
+        });
+
+        let knob = output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Circle(circle) => Some(*circle),
+                _ => None,
+            })
+            .expect("a knob was painted");
+        assert_eq!(knob.fill, visuals.extreme_bg_color);
+        assert_eq!(knob.stroke, visuals.widgets.noninteractive.bg_stroke);
     }
 
     #[test]

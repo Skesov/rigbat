@@ -33,8 +33,7 @@ pub fn fully_painted_text_at(size: [f32; 2], contents: impl FnMut(&mut egui::Ui)
     })
 }
 
-/// Two frames, because `egui_extras`' table sizes itself from the previous
-/// frame. The root clip rectangle is the screen, so text laid out past the
+/// Two frames, because some widgets size themselves from the previous frame. The root clip rectangle is the screen, so text laid out past the
 /// window edge counts as cut.
 fn text_at(
     size: [f32; 2],

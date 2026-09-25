@@ -9,7 +9,7 @@ tray-dashboard = Device overview…
 tray-settings = Settings…
 tray-quit = Quit
 
-## A device's state, as the tray menu, tooltip and settings table read it
+## A device's state, as the tray menu, tooltip and settings window read it
 
 state-charging = charging
 state-discharging = discharging
@@ -51,7 +51,7 @@ tab-general = General
 tab-devices = Devices
 button-refresh = Refresh
 button-refreshing = Refreshing…
-unit-seconds-suffix = { " " }s
+settings-title = rigbat — settings
 
 ## Settings window: General tab
 
@@ -73,7 +73,7 @@ poll-interval-hint = Checking more often drains the device's battery.
 interval-seconds = { $count } s
 interval-minutes = { $count } min
 interval-hours = { $count } h
-defaults-hint = Applies to every device that has no setting of its own. To change one device, select its row on the Devices tab.
+defaults-hint = Applies to every device that has no setting of its own. To change one device, open it on the Devices tab.
 
 notifications-enabled = Low battery notifications
 
@@ -94,35 +94,29 @@ device-search-hint = Search devices…
 devices-empty = No devices recorded yet. Connect a device, then press Refresh.
 devices-no-match = No devices match your search.
 devices-tray-unanswered = The running tray did not answer; showing the devices it listed last.
-
-col-name = Name
-col-type = Type
-col-connection = Connection
-col-charge = Charge
-col-status = Status
-col-first-seen = First seen
-col-last-seen = Last seen
-col-tray-icon = Tray icon
-col-actions = Actions
+devices-connected = Connected now
+devices-seen-before = Seen before
+device-seen-ago = seen { $age }
+device-show-in-tray = Show in tray
 
 presence-online = Online
 presence-unreachable = Unreachable
 presence-disconnected = Disconnected
 presence-no-access = No access
 
-button-delete = Delete
-button-confirm = Yes
-button-cancel = No
-
-detail-use-for-single-icon = Use for the single tray icon
-detail-single-icon-hint = Applies when the tray shows one icon for all devices.
-detail-override-threshold = Override low battery threshold
-detail-default-threshold = Use default ({ $percent }%)
-detail-override-interval = Override poll interval
-detail-default-interval = Use default ({ $secs } s)
+device-pin = Show on the single icon
+device-pin-hint = Applies when the tray shows one icon for all devices.
+device-uses-default = The default for all devices
+device-default-value = Default: { $value }
+device-reset = Use the default
+device-remove-title = Remove from the list
+device-remove-hint = Its history goes too. It returns if it is seen again.
+device-remove = Remove…
+device-remove-confirm = Remove
+button-cancel = Cancel
 
 ## Dashboard (left click on the tray icon)
 
-dashboard-title = rigbat — devices
+dashboard-title = rigbat — device overview
 dashboard-tray-not-running = The rigbat tray is not running.
 dashboard-in-tray = in tray

@@ -9,7 +9,7 @@ tray-dashboard = Обзор устройств…
 tray-settings = Настройки…
 tray-quit = Выход
 
-## A device's state, as the tray menu, tooltip and settings table read it
+## A device's state, as the tray menu, tooltip and settings window read it
 
 state-charging = заряжается
 state-discharging = разряжается
@@ -51,19 +51,19 @@ tab-general = Основное
 tab-devices = Устройства
 button-refresh = Обновить
 button-refreshing = Обновление…
-unit-seconds-suffix = { " " }с
+settings-title = rigbat — настройки
 
 ## Settings window: General tab
 
 group-tray = Трей
 tray-icon-style = Вид значка
-display-icon-only = Только иконка
+display-icon-only = Только значок
 display-percent-only = Проценты текстом
-display-percent-in-icon = Проценты внутри иконки
+display-percent-in-icon = Проценты внутри значка
 tray-per-device = Значок на каждое устройство
 tray-per-device-hint = Какие именно — на вкладке «Устройства».
-tray-primary-hint-pinned = Общая иконка показывает { $name }. Сменить — на вкладке «Устройства».
-tray-primary-hint-auto = Общая иконка показывает подключённое устройство с самым низким зарядом. Закрепить — на вкладке «Устройства».
+tray-primary-hint-pinned = Общий значок показывает { $name }. Сменить — на вкладке «Устройства».
+tray-primary-hint-auto = Общий значок показывает подключённое устройство с самым низким зарядом. Закрепить — на вкладке «Устройства».
 button-clear = Сбросить
 
 group-battery = Батарея
@@ -73,7 +73,7 @@ poll-interval-hint = Более частый опрос сажает батар�
 interval-seconds = { $count } с
 interval-minutes = { $count } мин
 interval-hours = { $count } ч
-defaults-hint = Действует для всех устройств без собственных настроек. Чтобы настроить одно устройство, выберите его на вкладке «Устройства».
+defaults-hint = Действует для всех устройств без собственных настроек. Чтобы настроить одно устройство, откройте его на вкладке «Устройства».
 
 notifications-enabled = Уведомлять о низком заряде
 
@@ -93,35 +93,29 @@ device-search-hint = Поиск устройств…
 devices-empty = Устройств пока нет. Подключите устройство и нажмите «Обновить».
 devices-no-match = Ничего не найдено.
 devices-tray-unanswered = Запущенный трей не ответил; показаны устройства из его последнего ответа.
-
-col-name = Название
-col-type = Тип
-col-connection = Связь
-col-charge = Заряд
-col-status = Состояние
-col-first-seen = Впервые
-col-last-seen = Замечено
-col-tray-icon = В трее
-col-actions = Действия
+devices-connected = Подключены сейчас
+devices-seen-before = Замечены раньше
+device-seen-ago = замечено { $age }
+device-show-in-tray = Показывать в трее
 
 presence-online = На связи
 presence-unreachable = Недоступно
 presence-disconnected = Отключено
 presence-no-access = Нет доступа
 
-button-delete = Удалить
-button-confirm = Да
-button-cancel = Нет
-
-detail-use-for-single-icon = Показывать в общей иконке
-detail-single-icon-hint = Действует, когда в трее одна иконка на все устройства.
-detail-override-threshold = Свой порог заряда
-detail-default-threshold = По умолчанию ({ $percent }%)
-detail-override-interval = Свой интервал опроса
-detail-default-interval = По умолчанию ({ $secs } с)
+device-pin = Показывать на общем значке
+device-pin-hint = Действует, когда в трее один значок на все устройства.
+device-uses-default = Как для всех устройств
+device-default-value = По умолчанию: { $value }
+device-reset = Вернуть по умолчанию
+device-remove-title = Убрать из списка
+device-remove-hint = Вместе с историей. Вернётся, если появится снова.
+device-remove = Удалить…
+device-remove-confirm = Удалить
+button-cancel = Отмена
 
 ## Dashboard (left click on the tray icon)
 
-dashboard-title = rigbat — устройства
+dashboard-title = rigbat — обзор устройств
 dashboard-tray-not-running = Трей rigbat не запущен.
 dashboard-in-tray = в трее

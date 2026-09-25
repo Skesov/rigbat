@@ -94,7 +94,7 @@ rigbat --wide     # one-shot table with transport and locator columns
 rigbat --json     # machine-readable
 rigbat --waybar   # long-lived waybar custom module (see Status bars below)
 rigbat tray       # tray daemon
-rigbat settings   # settings window
+rigbat settings   # settings window (`rigbat settings devices` opens the Devices tab)
 rigbat doctor     # check the setup, print a fix for each problem
 rigbat --help     # show usage (-h)
 rigbat --version  # show the version (-V)
@@ -183,18 +183,18 @@ aggregate icon, the display mode, the default low-battery threshold (5–50%, de
 default poll interval (30 s to 1 h, default 1 min), low-battery notifications, whether rigbat
 starts with the session, and the language (`System` follows `LANG`).
 
-**Devices** — a table of every device rigbat has ever seen on this machine, present or not:
-name, type, connection, charge, status, first seen, last seen, a `Tray icon` checkbox, and a
-delete action. Selecting a row opens that device's own settings under the table: pin it to the
-single tray icon, and override the threshold and the poll interval. Unchecking `Tray icon` hides that one device and touches nothing else, so the setting survives
-reboots, unplugged dongles, and devices that happen to be asleep when the window opens. Delete
-removes a device you no longer own from the table; it comes back if the device is ever seen
-again. Renaming a device — in your Bluetooth settings, for instance — keeps its row, its history
+**Devices** — every device rigbat has ever seen on this machine, in two groups: `Connected now`,
+with its charge and a `Show in tray` switch, and `Seen before`, with when it was last seen. Click
+a row to open that device's own settings in place: pin it to the single tray icon, override the
+threshold and the poll interval (`↺` returns to the default), or remove it. Turning off
+`Show in tray` hides that one device and touches nothing else, so the setting survives reboots,
+unplugged dongles, and devices that happen to be asleep when the window opens. Remove forgets a
+device you no longer own; it comes back if the device is ever seen again. Renaming a device — in your Bluetooth settings, for instance — keeps its row, its history
 and its per-device settings: rigbat recognises the hardware, not the label.
 
 Changes are written immediately and the tray picks them up through a file watch — no restart.
-Escape closes the window; if a search is active or a delete is waiting for confirmation, it
-clears that first.
+Escape closes the window; if a removal is waiting for confirmation, a row is open or a search
+is active, it dismisses that first.
 
 Two files back this:
 

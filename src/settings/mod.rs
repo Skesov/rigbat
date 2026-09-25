@@ -12,22 +12,20 @@ use eframe::egui;
 
 use crate::autostart;
 use crate::config::{self, Config};
+use crate::domain::DeviceId;
 use crate::gui;
-use crate::i18n::{fl, loader};
+use crate::i18n::{Lang, fl, loader};
 use crate::state;
-use devices::{DeleteState, DeviceRow, SortState};
+use devices::{DeleteState, DeviceRow};
 use general_tab::StylePreviews;
 
-/// The window's opening size, and the smallest the user may make it.
-///
-/// The minimum is not a guess: below about 940 px the Devices tab's table
-/// silently drops its two right-hand columns — `Tray icon` and the `Delete`
-/// action — leaving no way to reach either, because the table has no
-/// horizontal scrolling and a settings window should not need any.
-/// `device_table_fits_at_the_minimum_window_width` pins it to that fact, so
-/// adding a column fails a test rather than shrinking the window's promise.
-const WINDOW_DEFAULT_SIZE: [f32; 2] = [980.0, 620.0];
-const WINDOW_MIN_SIZE: [f32; 2] = [940.0, 360.0];
+/// The minimum is where both tabs' column reaches `CONTENT_MAX_WIDTH`; the
+/// tabs' width tests run at it.
+const WINDOW_DEFAULT_SIZE: [f32; 2] = [720.0, 640.0];
+const WINDOW_MIN_SIZE: [f32; 2] = [
+    widgets::CONTENT_MAX_WIDTH + 2.0 * widgets::PANEL_MARGIN,
+    360.0,
+];
 
 /// Global low-battery threshold range, percent. Below 5% the warning fires too
 /// late to matter; above 50% it stops meaning "low".
@@ -40,16 +38,27 @@ const LOW_THRESHOLD_RANGE: std::ops::RangeInclusive<u8> = 5..=50;
 /// two sections is squarely view-switcher territory). Kept open for a third
 /// tab without redesigning navigation — add a variant and a label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tab {
+pub enum Tab {
     General,
     Devices,
+}
+
+impl Tab {
+    /// The tab `rigbat settings <name>` opens on.
+    pub fn from_arg(arg: &str) -> Option<Self> {
+        match arg {
+            "general" => Some(Self::General),
+            "devices" => Some(Self::Devices),
+            _ => None,
+        }
+    }
 }
 
 /// One scan's raw result: the running tray's roster (or, with no tray, a
 /// discovery-and-poll pass; an error when the tray did not answer), plus a
 /// fresh read of the persisted device inventory.
 /// `SettingsApp::apply_scan_result` merges the two into the Devices tab's
-/// table rows.
+/// rows.
 struct ScanResult {
     discovered: anyhow::Result<scan::Discovered>,
     records: Vec<state::DeviceRecord>,
@@ -86,19 +95,16 @@ struct SettingsApp {
     /// this window behaved before the inventory existed.
     store: Option<state::Store>,
     /// The Devices tab's backing list: every inventory record merged with
-    /// the last scan. Search and sort are applied to a copy of this on
-    /// render, never in place — `device_rows` itself always holds the full,
-    /// unfiltered set.
+    /// the last scan. Search is applied to a copy of this on render, never in
+    /// place — `device_rows` itself always holds the full, unfiltered set.
     device_rows: Vec<DeviceRow>,
     device_search: String,
-    device_sort: SortState,
-    /// Device name the override detail panel is showing. Name, not
-    /// `DeviceId`: `device_overrides` is keyed by name (see
-    /// `apply_device_override`), and a name survives the selected device
-    /// dropping out of the current scan.
-    selected_device: Option<String>,
+    /// The one Devices row shown expanded.
+    expanded_device: Option<DeviceId>,
     delete_state: DeleteState,
     style_previews: Option<StylePreviews>,
+    /// The language the window title was last set in.
+    title_lang: Lang,
 }
 
 impl SettingsApp {
@@ -133,8 +139,7 @@ impl SettingsApp {
     /// discovered device, because the Devices tab needs each one's charge;
     /// this only runs on an explicit Refresh click or window open, not on a
     /// timer, so the extra device wake-up this costs is the same one-off the
-    /// user just asked for, not the continuous drain `POLL_INTERVAL_RANGE`
-    /// guards against.
+    /// user just asked for, not the continuous drain of a short poll interval.
     fn spawn_scan(&mut self, egui_ctx: egui::Context, kind: scan::Scan) {
         if self.scanning {
             return;
@@ -183,7 +188,7 @@ impl SettingsApp {
     }
 
     /// Applies a freshly completed scan's result: `self.device_rows` (the
-    /// Devices tab's table) is the fresh inventory merged with the scan, or
+    /// Devices tab's rows) is the fresh inventory merged with the scan, or
     /// with the last scan that answered when this one failed.
     /// `hidden_devices` and `device_overrides` are keyed by device name and
     /// are left exactly as the user set them, whether or not the device set
@@ -207,14 +212,12 @@ impl eframe::App for SettingsApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_scan();
         self.handle_escape(ui);
+        self.follow_language(ui.ctx());
 
-        // Apply a 16 px inner margin on all sides per the design system. We
-        // replace the default CentralPanel frame with one that only changes
-        // inner_margin, keeping all other visual properties from the theme.
-        let frame = egui::Frame::central_panel(ui.style()).inner_margin(16.0);
+        let frame = egui::Frame::central_panel(ui.style()).inner_margin(widgets::PANEL_MARGIN);
         frame.show(ui, |ui| {
             self.render_tab_bar(ui);
-            ui.add_space(8.0);
+            ui.add_space(widgets::TAB_BAR_GAP);
             match self.tab {
                 Tab::General => self.render_general_tab(ui),
                 Tab::Devices => self.render_devices_tab(ui),
@@ -224,6 +227,14 @@ impl eframe::App for SettingsApp {
 }
 
 impl SettingsApp {
+    fn follow_language(&mut self, ctx: &egui::Context) {
+        let lang = self.config.lang();
+        if lang != self.title_lang {
+            self.title_lang = lang;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title(lang)));
+        }
+    }
+
     fn render_tab_bar(&mut self, ui: &mut egui::Ui) {
         let l = loader(self.config.lang());
         let tabs = [Tab::General, Tab::Devices];
@@ -233,6 +244,10 @@ impl SettingsApp {
             self.tab = *tab;
         }
     }
+}
+
+fn title(lang: Lang) -> String {
+    fl!(loader(lang), "settings-title")
 }
 
 /// Re-reads the on-disk config via `load_config`, applies `edit` — the one
@@ -294,8 +309,9 @@ fn start() -> anyhow::Result<Background> {
     Ok((rt, appearance))
 }
 
-pub fn run() -> anyhow::Result<()> {
+pub fn run(tab: Tab) -> anyhow::Result<()> {
     let config = config::load();
+    let title_lang = config.lang();
     // A second connection to the same database the tray writes through —
     // safe since the schema migration takes BEGIN IMMEDIATE plus
     // CREATE TABLE IF NOT EXISTS. `None` (no state directory, a corrupt
@@ -307,11 +323,9 @@ pub fn run() -> anyhow::Result<()> {
     let text_scale = appearance.borrow().text_scale;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            // Sizes live next to the table they are derived from — see
-            // `WINDOW_MIN_SIZE`.
             .with_inner_size(gui::scaled(WINDOW_DEFAULT_SIZE, text_scale))
             .with_min_inner_size(gui::scaled(WINDOW_MIN_SIZE, text_scale))
-            .with_title("rigbat")
+            .with_title(title(title_lang))
             .with_app_id("rigbat"),
         ..Default::default()
     };
@@ -332,14 +346,14 @@ pub fn run() -> anyhow::Result<()> {
                 discovery_ctx,
                 scan_rx: None,
                 scanning: false,
-                tab: Tab::General,
+                tab,
                 store,
                 device_rows: Vec::new(),
                 device_search: String::new(),
-                device_sort: SortState::default(),
-                selected_device: None,
+                expanded_device: None,
                 delete_state: DeleteState::default(),
                 style_previews: None,
+                title_lang,
             };
             app.spawn_scan(cc.egui_ctx.clone(), scan::Scan::Read);
             Ok(Box::new(app))
@@ -371,6 +385,7 @@ mod tests {
     pub(super) fn settings_app_with(mut config: Config) -> SettingsApp {
         // Tests assert English text unless they pick a language; LANG must not decide.
         config.language.get_or_insert_with(|| "en".to_owned());
+        let title_lang = config.lang();
         SettingsApp {
             config,
             config_path: None,
@@ -390,10 +405,10 @@ mod tests {
             store: None,
             device_rows: Vec::new(),
             device_search: String::new(),
-            device_sort: SortState::default(),
-            selected_device: None,
+            expanded_device: None,
             delete_state: DeleteState::default(),
             style_previews: None,
+            title_lang,
         }
     }
 
@@ -424,6 +439,16 @@ mod tests {
     /// touch `~/.config/rigbat/config.json`.
     pub(super) fn scratch_config_path(test_name: &str) -> PathBuf {
         scratch_dir(test_name).join("config.json")
+    }
+
+    /// A fresh settings window over a scratch config file, so a click saves
+    /// somewhere other than `~/.config/rigbat/config.json`.
+    pub(super) fn app_saving_to(test_name: &str, config: Config) -> (SettingsApp, PathBuf) {
+        let path = scratch_config_path(test_name);
+        config::save_to(&path, &config).unwrap();
+        let mut app = settings_app_with(config::load_from(&path));
+        app.config_path = Some(path.clone());
+        (app, path)
     }
 
     #[test]

@@ -1,39 +1,29 @@
 use std::collections::HashMap;
 
 use eframe::egui;
-use egui_extras::{Column, Size, StripBuilder, TableBuilder};
 
-use super::devices::{self, DeleteState, DeviceRow, SortColumn, SortState};
-use super::{LOW_THRESHOLD_RANGE, SettingsApp, Tab, scan};
+use super::devices::{self, DeleteCell, DeleteState, DeviceRow, Dismissible, EscapeAction};
+use super::general_tab::{interval_combo, interval_label, threshold_slider};
+use super::{SettingsApp, Tab, scan, widgets};
 use crate::config::DeviceSettings;
-use crate::domain::{Presence, TrayMode};
+use crate::domain::{
+    DeviceId, Presence, PrimaryStatus, TrayMode, charge_value, classify, status_note,
+};
+use crate::gui;
 use crate::i18n::{Lang, fl, loader};
 use crate::state;
 
-/// Height reserved under the Devices tab table for the selected device's
-/// settings, and only while one is selected.
-///
-/// Below the table rather than beside it: a side panel charges its width to
-/// every frame, including the ones where nothing is selected, and the table is
-/// nine columns wide already. It is a panel rather than an expanding row
-/// because `TableBody::rows` renders homogeneous row heights for its
-/// virtualisation to stay simple; the selection survives sort and filter
-/// because it is keyed by device name, not by row index.
-const DEVICE_DETAIL_HEIGHT: f32 = 104.0;
+/// Above this many devices the tab offers a search field.
+const SEARCH_MIN_DEVICES: usize = 8;
+const SEARCH_WIDTH: f32 = 220.0;
+const RESET: &str = "\u{21BA}";
 
-/// Row and header heights for the Devices tab table.
-const TABLE_ROW_HEIGHT: f32 = 22.0;
-const TABLE_HEADER_HEIGHT: f32 = 24.0;
-
-/// Width of the separator column between `Tray icon` (a checkbox that only
-/// hides an icon) and `Actions` (`Delete`, which destroys the inventory
-/// record): visible space plus a vertical rule so the two controls do not
-/// read as one action a stray click could confuse (T36).
-const TOGGLE_ACTIONS_GAP_WIDTH: f32 = 20.0;
-
-/// Global poll interval range, seconds. The lower bound guards against waking
-/// a HID device every second, which drains the battery it is meant to monitor.
-const POLL_INTERVAL_RANGE: std::ops::RangeInclusive<u64> = 10..=3600;
+/// What the Remove row's buttons asked for this frame.
+enum RemoveStep {
+    Arm,
+    Confirm,
+    Cancel,
+}
 
 impl SettingsApp {
     /// Renders a "Refresh" button, disabled and relabeled while a scan is
@@ -58,107 +48,288 @@ impl SettingsApp {
         });
     }
 
-    /// Renders the threshold/interval override controls for one device, by
-    /// name, in the Devices tab's detail panel. Persists only on release
-    /// (`drag_stopped`/`lost_focus`) or checkbox toggle, never on every
-    /// dragged pixel — same rule the pre-T35 collapsing-header version
-    /// followed, this is that same body applied to one selected device
-    /// instead of looped over every discovered one.
-    ///
-    /// Unchecked, each checkbox's own label states the effective (global)
-    /// value it falls back to — e.g. "Use default (20%)" (T36) — so the
-    /// relationship to the General tab's sliders is visible in the control
-    /// itself, not only in a separate line of helper text.
-    /// The aggregate icon's device picker (R27): `primary_device` steered the
-    /// single-icon mode since M2 but became unreachable when T22 removed the
-    /// tray-menu control that wrote it, leaving it editable only by hand in
-    /// `config.json`.
-    ///
-    /// It lives here rather than as a table column because it is an action on
-    /// one device, not a property of every row — a tenth column for a setting
-    /// that applies to exactly one device at a time would cost every row width
-    /// to show a value that is empty in all but one of them. The General tab
-    /// names the current choice and points here, so the setting is discoverable
-    /// from the section whose behaviour it changes without duplicating the
-    /// control.
-    fn render_primary_control(&mut self, ui: &mut egui::Ui, name: &str) {
+    /// The Devices tab: every device `apply_scan_result` merged into
+    /// `self.device_rows` — the inventory and the current scan, so a device
+    /// the scan did not find still shows — as expander rows in two groups.
+    pub(super) fn render_devices_tab(&mut self, ui: &mut egui::Ui) {
+        widgets::page(ui, "devices-tab", |ui| self.render_device_groups(ui));
+    }
+
+    fn render_device_groups(&mut self, ui: &mut egui::Ui) {
         let l = loader(self.config.lang());
-        let mut is_primary = self.config.primary_device.as_deref() == Some(name);
-        if ui
-            .checkbox(&mut is_primary, fl!(l, "detail-use-for-single-icon"))
-            .changed()
-        {
-            let name = name.to_string();
-            self.persist(move |target| {
-                toggle_primary(&mut target.primary_device, &name, is_primary);
+        let searchable = self.device_rows.len() > SEARCH_MIN_DEVICES;
+        ui.horizontal(|ui| {
+            if searchable {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.device_search)
+                        .hint_text(fl!(l, "device-search-hint"))
+                        .desired_width(SEARCH_WIDTH),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.render_refresh_button(ui);
+            });
+        });
+        if self.tray_unanswered {
+            let warn = ui.visuals().warn_fg_color;
+            ui.label(egui::RichText::new(fl!(l, "devices-tray-unanswered")).color(warn));
+        }
+        ui.add_space(widgets::TOOLBAR_GAP);
+
+        let query = if searchable {
+            self.device_search.as_str()
+        } else {
+            ""
+        };
+        let mut rows = devices::filter_rows(&self.device_rows, query);
+        if rows.is_empty() {
+            let message = if self.device_rows.is_empty() {
+                fl!(l, "devices-empty")
+            } else {
+                fl!(l, "devices-no-match")
+            };
+            ui.label(widgets::secondary(ui, &message));
+            return;
+        }
+        devices::order_rows(&mut rows);
+        let (connected, seen): (Vec<_>, Vec<_>) = rows
+            .into_iter()
+            .partition(|row| row.presence != Presence::Disconnected);
+        let visuals = ui.visuals().clone();
+        let now = state::now_unix();
+        for (title, group) in [
+            (fl!(l, "devices-connected"), connected),
+            (fl!(l, "devices-seen-before"), seen),
+        ] {
+            if group.is_empty() {
+                continue;
+            }
+            widgets::group(ui, &title, None, |rows| {
+                for row in &group {
+                    self.render_device(rows, row, &visuals, now);
+                }
             });
         }
-        if self.config.tray_mode == TrayMode::PerDevice {
-            ui.label(egui::RichText::new(fl!(l, "detail-single-icon-hint")).weak());
+    }
+
+    /// One device: the expander line, and its settings while expanded.
+    fn render_device(
+        &mut self,
+        rows: &mut widgets::Rows<'_>,
+        row: &DeviceRow,
+        visuals: &egui::Visuals,
+        now: i64,
+    ) {
+        let lang = self.config.lang();
+        let l = loader(lang);
+        let name = row.device.name.as_str();
+        let connected = row.presence != Presence::Disconnected;
+        let (value, note) = self.device_value(row, visuals, now);
+        let mut hover = format!(
+            "{} · {}",
+            row.kind.label(lang),
+            row.device.transport.as_str()
+        );
+        if let (false, Some(at)) = (connected, row.last_seen) {
+            hover.push_str(&format!(" · {}", devices::absolute_date_label(at)));
+        }
+        let header = widgets::Expander {
+            id: egui::Id::new(("device-row", &row.device)),
+            glyph: gui::kind_glyph(row.kind),
+            title: name,
+            note: note.as_deref(),
+            value,
+            hover: &hover,
+            expanded: self.expanded_device.as_ref() == Some(&row.device),
+        };
+        let label = fl!(l, "device-show-in-tray");
+        let (response, shown) = rows.expander(header, |ui| {
+            let mut shown = self.config.is_shown(name);
+            (connected
+                && widgets::switch(
+                    ui,
+                    device_switch_id("shown", &row.device),
+                    &mut shown,
+                    &label,
+                )
+                .changed())
+            .then_some(shown)
+        });
+        if let Some(shown) = shown {
+            let name = name.to_owned();
+            self.persist(move |target| toggle_hidden(&mut target.hidden_devices, &name, shown));
+        }
+        if response.clicked() {
+            self.toggle_expanded(&row.device);
+        }
+        if self.expanded_device.as_ref() == Some(&row.device) {
+            rows.nested(|rows| self.render_device_settings(rows, row));
         }
     }
 
-    /// The selected device's low-battery threshold: a checkbox that reads
-    /// `Use default (20%)` until it is ticked, then the override's slider.
-    /// Split from the poll-interval control so the two can sit side by side in
-    /// the detail band; both write through `apply_device_override`, which
-    /// drops an override equal to the current default rather than storing a
-    /// value that only looks like a decision.
-    fn render_threshold_override(&mut self, ui: &mut egui::Ui, name: &str) {
-        let default_threshold = self.config.low_threshold;
-        let existing = self.config.device_overrides.get(name).cloned();
-        let mut on = existing.as_ref().is_some_and(|d| d.low_threshold.is_some());
-        let mut value = existing
-            .as_ref()
-            .and_then(|d| d.low_threshold)
-            .unwrap_or(default_threshold);
-
-        let l = loader(self.config.lang());
-        let label = if on {
-            fl!(l, "detail-override-threshold")
-        } else {
-            fl!(l, "detail-default-threshold", percent = default_threshold)
-        };
-        let mut save = ui.checkbox(&mut on, label).changed();
-        if on {
-            let resp = ui.add(egui::Slider::new(&mut value, LOW_THRESHOLD_RANGE).suffix("%"));
-            save |= resp.drag_stopped() || resp.lost_focus();
-        }
-
-        if save {
-            self.save_threshold_override(name, on.then_some(value));
-        }
-    }
-
-    /// The selected device's poll interval; the threshold control's twin.
-    fn render_interval_override(&mut self, ui: &mut egui::Ui, name: &str) {
-        let default_interval = self.config.poll_interval_secs;
-        let existing = self.config.device_overrides.get(name).cloned();
-        let mut on = existing
-            .as_ref()
-            .is_some_and(|d| d.poll_interval_secs.is_some());
-        let mut value = existing
-            .as_ref()
-            .and_then(|d| d.poll_interval_secs)
-            .unwrap_or(default_interval);
-
-        let l = loader(self.config.lang());
-        let label = if on {
-            fl!(l, "detail-override-interval")
-        } else {
-            fl!(l, "detail-default-interval", secs = default_interval)
-        };
-        let mut save = ui.checkbox(&mut on, label).changed();
-        if on {
-            let resp = ui.add(
-                egui::Slider::new(&mut value, POLL_INTERVAL_RANGE)
-                    .suffix(fl!(l, "unit-seconds-suffix")),
+    /// The collapsed row's value and note: the dashboard's words for a
+    /// connected device, when it was last seen for any other.
+    fn device_value(
+        &self,
+        row: &DeviceRow,
+        visuals: &egui::Visuals,
+        now: i64,
+    ) -> (egui::RichText, Option<String>) {
+        let lang = self.config.lang();
+        if row.presence == Presence::Disconnected {
+            let seen = row.last_seen.map_or_else(
+                || "—".to_owned(),
+                |at| {
+                    let age = devices::relative_label(now, at, lang);
+                    fl!(loader(lang), "device-seen-ago", age = age.as_str())
+                },
             );
-            save |= resp.drag_stopped() || resp.lost_focus();
+            return (gui::charge_value_text(visuals, seen, false, false), None);
+        }
+        let threshold = self
+            .config
+            .device_overrides
+            .get(&row.device.name)
+            .and_then(|d| d.low_threshold)
+            .unwrap_or(self.config.low_threshold);
+        let status = classify(row.charge, threshold);
+        let text = charge_value(
+            row.presence,
+            row.charge.map(|r| r.percent),
+            row.charge.map(|r| r.state),
+            status,
+            lang,
+        );
+        let low = matches!(status, PrimaryStatus::Low { .. });
+        let online = row.presence == Presence::Online;
+        let note = status_note(row.presence, None, None, lang);
+        (gui::charge_value_text(visuals, text, low, online), note)
+    }
+
+    /// One row open at a time; an armed Remove does not survive the move.
+    fn toggle_expanded(&mut self, device: &DeviceId) {
+        self.expanded_device = if self.expanded_device.as_ref() == Some(device) {
+            None
+        } else {
+            Some(device.clone())
+        };
+        self.delete_state = DeleteState::Idle;
+    }
+
+    fn render_device_settings(&mut self, rows: &mut widgets::Rows<'_>, row: &DeviceRow) {
+        let lang = self.config.lang();
+        let l = loader(lang);
+        let name = row.device.name.as_str();
+
+        let title = fl!(l, "device-pin");
+        let hint =
+            (self.config.tray_mode == TrayMode::PerDevice).then(|| fl!(l, "device-pin-hint"));
+        let mut pinned = self.config.primary_device.as_deref() == Some(name);
+        let toggled = rows.row(
+            &title,
+            |ui| {
+                if let Some(hint) = &hint {
+                    ui.label(widgets::secondary(ui, hint));
+                }
+            },
+            |ui| {
+                widgets::switch(
+                    ui,
+                    device_switch_id("pin", &row.device),
+                    &mut pinned,
+                    &title,
+                )
+                .changed()
+            },
+        );
+        if toggled {
+            let name = name.to_owned();
+            self.persist(move |target| toggle_primary(&mut target.primary_device, &name, pinned));
         }
 
-        if save {
-            self.save_interval_override(name, on.then_some(value));
+        let own = self
+            .config
+            .device_overrides
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let default_threshold = self.config.low_threshold;
+        let mut threshold = own.low_threshold.unwrap_or(default_threshold);
+        let mut reset = false;
+        let committed = rows.row(
+            &fl!(l, "default-low-threshold"),
+            |ui| {
+                reset = default_subtitle(
+                    ui,
+                    own.low_threshold.is_some(),
+                    &format!("{default_threshold}%"),
+                    lang,
+                )
+            },
+            |ui| threshold_slider(ui, &mut threshold),
+        );
+        if reset {
+            self.save_threshold_override(name, None);
+        } else if committed {
+            self.save_threshold_override(name, Some(threshold));
+        }
+
+        let default_interval = self.config.poll_interval_secs;
+        let current = own.poll_interval_secs.unwrap_or(default_interval);
+        let mut reset = false;
+        let chosen = rows.row(
+            &fl!(l, "default-poll-interval"),
+            |ui| {
+                let default = interval_label(default_interval, lang);
+                reset = default_subtitle(ui, own.poll_interval_secs.is_some(), &default, lang);
+            },
+            |ui| interval_combo(ui, ("device-interval", &row.device), current, lang),
+        );
+        if reset {
+            self.save_interval_override(name, None);
+        } else if let Some(interval) = chosen {
+            self.save_interval_override(name, Some(interval));
+        }
+
+        self.render_remove_row(rows, row);
+    }
+
+    /// `Remove…` arms, then `Remove` deletes (T35: never on the first click).
+    /// A device the inventory has not recorded yet has nothing to remove.
+    fn render_remove_row(&mut self, rows: &mut widgets::Rows<'_>, row: &DeviceRow) {
+        let Some(store_id) = row.store_id else {
+            return;
+        };
+        let cell = devices::delete_cell(self.delete_state, row.store_id);
+        let l = loader(self.config.lang());
+        let hint = fl!(l, "device-remove-hint");
+        let step = rows.row(
+            &fl!(l, "device-remove-title"),
+            widgets::subtitle(&hint),
+            |ui| match cell {
+                DeleteCell::Unavailable => None,
+                DeleteCell::Arm => ui
+                    .button(fl!(l, "device-remove"))
+                    .clicked()
+                    .then_some(RemoveStep::Arm),
+                DeleteCell::Confirm => {
+                    let error = ui.visuals().error_fg_color;
+                    let confirm = egui::RichText::new(fl!(l, "device-remove-confirm")).color(error);
+                    let confirmed = ui.button(confirm).clicked();
+                    let cancelled = ui.button(fl!(l, "button-cancel")).clicked();
+                    if confirmed {
+                        Some(RemoveStep::Confirm)
+                    } else {
+                        cancelled.then_some(RemoveStep::Cancel)
+                    }
+                }
+            },
+        );
+        match step {
+            Some(RemoveStep::Arm) => self.delete_state = DeleteState::Confirming(store_id),
+            Some(RemoveStep::Confirm) => self.delete_device(store_id, &row.device),
+            Some(RemoveStep::Cancel) => self.delete_state = DeleteState::Idle,
+            None => {}
         }
     }
 
@@ -211,238 +382,6 @@ impl SettingsApp {
         });
     }
 
-    /// The Devices tab: search box, Refresh, then the inventory table beside
-    /// the selected device's override panel. Source is the union
-    /// `apply_scan_result` already merged into `self.device_rows` — union,
-    /// not `self.devices` alone, is the whole point of T35: a device the
-    /// inventory remembers but the current scan did not find must still
-    /// show up here.
-    pub(super) fn render_devices_tab(&mut self, ui: &mut egui::Ui) {
-        let lang = self.config.lang();
-        let l = loader(lang);
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.device_search)
-                    .hint_text(fl!(l, "device-search-hint"))
-                    .desired_width(220.0),
-            );
-            self.render_refresh_button(ui);
-        });
-        if self.tray_unanswered {
-            let warn = ui.visuals().warn_fg_color;
-            ui.label(egui::RichText::new(fl!(l, "devices-tray-unanswered")).color(warn));
-        }
-        ui.add_space(8.0);
-
-        let filtered = devices::filter_rows(&self.device_rows, &self.device_search);
-        if filtered.is_empty() {
-            let message = if self.device_rows.is_empty() {
-                fl!(l, "devices-empty")
-            } else {
-                fl!(l, "devices-no-match")
-            };
-            ui.label(egui::RichText::new(message).weak());
-            return;
-        }
-
-        let mut rows = filtered;
-        devices::sort_rows(&mut rows, self.device_sort, lang);
-        let now = state::now_unix();
-
-        // The detail band claims no height at all while nothing is selected,
-        // so an unselected table is not paying for a panel showing a sentence
-        // about what selecting would do.
-        let detail_height = if self.selected_device.is_some() {
-            DEVICE_DETAIL_HEIGHT
-        } else {
-            0.0
-        };
-        StripBuilder::new(ui)
-            .size(Size::remainder().at_least(120.0))
-            .size(Size::exact(detail_height))
-            .vertical(|mut strip| {
-                strip.cell(|ui| self.render_device_table(ui, &rows, now));
-                strip.cell(|ui| self.render_device_detail(ui));
-            });
-    }
-
-    /// The inventory table itself: sticky header with click-to-sort columns,
-    /// a virtualised body (`TableBody::rows` — the inventory grows without
-    /// bound, so only visible rows are built), resizable columns.
-    fn render_device_table(&mut self, ui: &mut egui::Ui, rows: &[DeviceRow], now: i64) {
-        let l = loader(self.config.lang());
-        let sort = self.device_sort;
-        let mut clicked_sort: Option<SortColumn> = None;
-
-        TableBuilder::new(ui)
-            .id_salt("devices_table")
-            .striped(true)
-            .resizable(true)
-            .column(Column::initial(190.0).at_least(110.0).resizable(true))
-            .column(Column::initial(76.0).at_least(60.0).resizable(true))
-            .column(Column::initial(86.0).at_least(70.0).resizable(true))
-            .column(Column::initial(116.0).at_least(90.0).resizable(true))
-            .column(Column::initial(92.0).at_least(70.0).resizable(true))
-            .column(Column::initial(82.0).at_least(70.0).resizable(true))
-            .column(Column::initial(82.0).at_least(70.0).resizable(true))
-            .column(Column::initial(62.0).at_least(56.0).resizable(false))
-            .column(Column::exact(TOGGLE_ACTIONS_GAP_WIDTH).resizable(false))
-            .column(Column::initial(76.0).at_least(70.0).resizable(false))
-            .header(TABLE_HEADER_HEIGHT, |mut header| {
-                let columns: [(String, Option<SortColumn>); 10] = [
-                    (fl!(l, "col-name"), Some(SortColumn::Name)),
-                    (fl!(l, "col-type"), Some(SortColumn::Type)),
-                    (fl!(l, "col-connection"), Some(SortColumn::Transport)),
-                    (fl!(l, "col-charge"), Some(SortColumn::Charge)),
-                    (fl!(l, "col-status"), Some(SortColumn::Presence)),
-                    (fl!(l, "col-first-seen"), Some(SortColumn::FirstSeen)),
-                    (fl!(l, "col-last-seen"), Some(SortColumn::LastSeen)),
-                    (fl!(l, "col-tray-icon"), None),
-                    (String::new(), None),
-                    (fl!(l, "col-actions"), None),
-                ];
-                for (label, sort_column) in columns {
-                    header.col(|ui| match sort_column {
-                        Some(column) => {
-                            if ui.button(header_label(&label, column, sort)).clicked() {
-                                clicked_sort = Some(column);
-                            }
-                        }
-                        None => {
-                            ui.label(label);
-                        }
-                    });
-                }
-            })
-            .body(|body| {
-                body.rows(TABLE_ROW_HEIGHT, rows.len(), |mut table_row| {
-                    let index = table_row.index();
-                    if let Some(row) = rows.get(index) {
-                        self.render_device_row(&mut table_row, row, now);
-                    }
-                });
-            });
-
-        if let Some(column) = clicked_sort {
-            self.device_sort = self.device_sort.clicked(column);
-        }
-    }
-
-    /// Renders one table row's ten cells, in the same order as
-    /// `render_device_table`'s header.
-    fn render_device_row(
-        &mut self,
-        table_row: &mut egui_extras::TableRow<'_, '_>,
-        row: &DeviceRow,
-        now: i64,
-    ) {
-        let lang = self.config.lang();
-        let l = loader(lang);
-        table_row.col(|ui| {
-            let is_selected = self.selected_device.as_deref() == Some(row.device.name.as_str());
-            // An empty selectable button covering the cell carries the row's
-            // selection background, hover feedback and click; the name is then
-            // drawn inside it. `add_sized` is what makes it cover the cell —
-            // a button whose text is empty is otherwise a few pixels wide, and
-            // the name drawn into that rect truncates away to nothing.
-            let resp = ui
-                .add_sized(
-                    ui.available_size(),
-                    egui::Button::selectable(is_selected, ""),
-                )
-                .on_hover_text(&row.device.name);
-            // Left-aligned like every other column, which `Ui::put` would not
-            // be: it centres what it places. Truncated, not wrapped, because
-            // the row height is fixed and a second line spills into the row
-            // below.
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(resp.rect.shrink2(egui::vec2(6.0, 0.0)))
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                |ui| {
-                    ui.add(
-                        egui::Label::new(&row.device.name)
-                            .truncate()
-                            .selectable(false),
-                    );
-                },
-            );
-            if resp.clicked() {
-                self.selected_device = Some(row.device.name.clone());
-            }
-        });
-        table_row.col(|ui| {
-            ui.label(row.kind.label(lang));
-        });
-        table_row.col(|ui| {
-            ui.label(row.device.transport.as_str());
-        });
-        table_row.col(|ui| {
-            ui.label(devices::charge_cell_text(row.charge, lang));
-        });
-        table_row.col(|ui| {
-            let (label, weak) = match row.presence {
-                Presence::Online => (fl!(l, "presence-online"), false),
-                Presence::Unreachable => (fl!(l, "presence-unreachable"), false),
-                Presence::NoAccess => (fl!(l, "presence-no-access"), false),
-                Presence::Disconnected => (fl!(l, "presence-disconnected"), true),
-            };
-            let text = egui::RichText::new(label);
-            ui.label(if weak { text.weak() } else { text });
-        });
-        table_row.col(|ui| render_seen_cell(ui, row.first_seen, now, lang));
-        table_row.col(|ui| render_seen_cell(ui, row.last_seen, now, lang));
-        table_row.col(|ui| {
-            let mut shown = self.config.is_shown(&row.device.name);
-            if ui.checkbox(&mut shown, "").changed() {
-                let name = row.device.name.clone();
-                self.persist(move |target| {
-                    toggle_hidden(&mut target.hidden_devices, &name, shown);
-                });
-            }
-        });
-        // Separator column (T36): visible space plus a rule between the
-        // Tray icon toggle and Delete so the two never read as one action.
-        table_row.col(|ui| {
-            ui.add(egui::Separator::default().vertical());
-        });
-        table_row.col(|ui| self.render_delete_cell(ui, row));
-    }
-
-    /// Delete needs a deliberate second click: the first arms
-    /// `self.delete_state` and swaps the cell to Yes/No in place,
-    /// per T35 ("do not delete on first click"). A row the scan discovered
-    /// but the inventory has not persisted yet (`store_id: None`) has
-    /// nothing to delete.
-    ///
-    /// Only the armed `Confirm` is tinted: a red `Delete` on every row turns
-    /// the column into a wall of warnings for an action nobody asked for yet.
-    fn render_delete_cell(&mut self, ui: &mut egui::Ui, row: &DeviceRow) {
-        let l = loader(self.config.lang());
-        match devices::delete_cell(self.delete_state, row.store_id) {
-            devices::DeleteCell::Unavailable => {
-                ui.label("—");
-            }
-            devices::DeleteCell::Confirm => {
-                let Some(store_id) = row.store_id else { return };
-                ui.horizontal(|ui| {
-                    if destructive_small_button(ui, &fl!(l, "button-confirm")).clicked() {
-                        self.delete_device(store_id, &row.device.name);
-                    }
-                    if ui.small_button(fl!(l, "button-cancel")).clicked() {
-                        self.delete_state = DeleteState::Idle;
-                    }
-                });
-            }
-            devices::DeleteCell::Arm => {
-                let Some(store_id) = row.store_id else { return };
-                if neutral_small_button(ui, &fl!(l, "button-delete")).clicked() {
-                    self.delete_state = DeleteState::Confirming(store_id);
-                }
-            }
-        }
-    }
-
     /// Forgets a device (T34): deletes its inventory row and readings, its
     /// `hidden_devices` entry — nothing left to show it as hidden once it no
     /// longer exists — and its pin on the aggregate icon, which would
@@ -451,7 +390,8 @@ impl SettingsApp {
     /// same as `persist`'s config write: a deliberate, infrequent,
     /// user-confirmed click, not the per-frame inventory read `spawn_scan`
     /// keeps off the UI thread.
-    fn delete_device(&mut self, store_id: i64, name: &str) {
+    fn delete_device(&mut self, store_id: i64, device: &DeviceId) {
+        let name = device.name.as_str();
         if let Some(store) = &self.store
             && let Err(e) = store.delete_device_blocking(store_id)
         {
@@ -466,14 +406,15 @@ impl SettingsApp {
             toggle_primary(&mut target.primary_device, &forgotten, false);
         });
         devices::remove_row(&mut self.device_rows, store_id);
-        if self.selected_device.as_deref() == Some(name) {
-            self.selected_device = None;
+        if self.expanded_device.as_ref() == Some(device) {
+            self.expanded_device = None;
         }
         self.delete_state = DeleteState::Idle;
     }
 
-    /// Escape, resolved by `devices::escape_action`: dismiss the armed delete
-    /// confirmation, else clear the device search, else close the window.
+    /// Escape, resolved by `devices::escape_action`: dismiss the armed
+    /// removal, else collapse the open row, else clear the device search,
+    /// else close the window.
     ///
     /// The escalation matters more than the closing does — a window that
     /// closed on the first Escape would discard an armed confirmation by
@@ -482,87 +423,45 @@ impl SettingsApp {
         if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             return;
         }
-        let search_active = self.tab == Tab::Devices && !self.device_search.is_empty();
-        match devices::escape_action(self.delete_state != DeleteState::Idle, search_active) {
-            devices::EscapeAction::CancelDelete => self.delete_state = DeleteState::Idle,
-            devices::EscapeAction::ClearSearch => self.device_search.clear(),
-            devices::EscapeAction::CloseWindow => {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close)
-            }
-        }
-    }
-
-    /// The band under the table: the selected device's name, its tray-icon
-    /// pin, and its threshold/interval overrides. Renders nothing at all when
-    /// no row is selected — see `DEVICE_DETAIL_HEIGHT` for why it sits here
-    /// rather than beside the table.
-    fn render_device_detail(&mut self, ui: &mut egui::Ui) {
-        let Some(name) = self.selected_device.clone() else {
-            return;
+        let on_devices = self.tab == Tab::Devices;
+        let open = Dismissible {
+            delete_armed: self.delete_state != DeleteState::Idle,
+            expanded: on_devices && self.expanded_device.is_some(),
+            search_active: on_devices && !self.device_search.is_empty(),
         };
-        ui.add_space(8.0);
-        // Framed: an unframed block of controls under a table reads as content
-        // belonging to the window rather than to the row that is selected.
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.strong(&name);
-                ui.add_space(12.0);
-                self.render_primary_control(ui, &name);
-            });
-            ui.add_space(4.0);
-            ui.columns(2, |columns| {
-                self.render_threshold_override(&mut columns[0], &name);
-                self.render_interval_override(&mut columns[1], &name);
-            });
-        });
-    }
-}
-
-/// Header cell text for a sortable column: the plain label, plus a direction
-/// arrow when `column` is the active sort column. GNOME HIG: ascending shows
-/// the arrow pointing down, descending flips it to pointing up.
-fn header_label(label: &str, column: SortColumn, sort: SortState) -> String {
-    if sort.column != column {
-        return label.to_string();
-    }
-    let arrow = match sort.direction {
-        devices::SortDirection::Ascending => "\u{23f7}",
-        devices::SortDirection::Descending => "\u{23f6}",
-    };
-    format!("{label} {arrow}")
-}
-
-/// A `small_button` tinted with the theme's error colour (T36): reinforces —
-/// does not replace — the two-step confirm that already marks the action as
-/// destructive.
-///
-/// Only the armed step is tinted. A red `Delete` on every row turns the whole
-/// column into a wall of warnings for an action nobody has asked for yet.
-fn destructive_small_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    let color = ui.visuals().error_fg_color;
-    ui.add(egui::Button::new(egui::RichText::new(label).color(color)).small())
-}
-
-fn neutral_small_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.add(egui::Button::new(label).small())
-}
-
-/// Renders a First-seen/Last-seen cell: the relative age, with the absolute
-/// UTC date as a hover tooltip (judgement call, not GNOME-sourced — see
-/// T35's spec). A missing timestamp (a discovered-but-not-yet-recorded
-/// device) renders as a plain dash.
-fn render_seen_cell(ui: &mut egui::Ui, at: Option<i64>, now: i64, lang: Lang) {
-    match at {
-        Some(at) => {
-            let relative = devices::relative_label(now, at, lang);
-            let absolute = devices::absolute_date_label(at);
-            ui.label(relative).on_hover_text(absolute);
-        }
-        None => {
-            ui.label("—");
+        match devices::escape_action(open) {
+            EscapeAction::CancelDelete => self.delete_state = DeleteState::Idle,
+            EscapeAction::Collapse => self.expanded_device = None,
+            EscapeAction::ClearSearch => self.device_search.clear(),
+            EscapeAction::CloseWindow => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
         }
     }
+}
+
+/// "The default for all devices", or the default's value and a reset button
+/// once the device has its own; true when the reset was clicked.
+fn default_subtitle(ui: &mut egui::Ui, overridden: bool, default: &str, lang: Lang) -> bool {
+    let l = loader(lang);
+    if !overridden {
+        ui.label(widgets::secondary(ui, &fl!(l, "device-uses-default")));
+        return false;
+    }
+    ui.horizontal_wrapped(|ui| {
+        let text = fl!(l, "device-default-value", value = default);
+        ui.label(widgets::secondary(ui, &text));
+        let reset = fl!(l, "device-reset");
+        let response = ui.small_button(RESET).on_hover_text(&reset);
+        let enabled = ui.is_enabled();
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &reset));
+        response.clicked()
+    })
+    .inner
+}
+
+/// Global so a test can find the switch it clicks.
+fn device_switch_id(purpose: &str, device: &DeviceId) -> egui::Id {
+    egui::Id::new(("device-switch", purpose, device))
 }
 
 /// Applies a device's desired threshold/interval override to `overrides`.
@@ -627,176 +526,488 @@ fn toggle_primary(primary_device: &mut Option<String>, name: &str, make_primary:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::domain::PollOutcome;
-    use crate::egui_test::{
-        assert_single_lines_without_overlap, fully_painted_text_at, painted_text_at,
+    use crate::config::{self, Config};
+    use crate::domain::{
+        BatteryReading, CHARGING_SIGN, ChargeState, DeviceKind, LOW_SIGN, Transport, state_label,
     };
-    use crate::settings::tests::{device, settings_app_with};
-    use crate::settings::{WINDOW_DEFAULT_SIZE, WINDOW_MIN_SIZE};
+    use crate::egui_test::{
+        assert_no_overlap, click_at, fully_painted_text_at, painted_text_at, run_frame,
+    };
+    use crate::settings::WINDOW_MIN_SIZE;
+    use crate::settings::tests::{app_saving_to, settings_app_with};
 
-    fn painted_text(contents: impl FnMut(&mut egui::Ui)) -> Vec<String> {
-        painted_text_at(WINDOW_DEFAULT_SIZE, contents)
+    /// The narrowest the window gets, tall enough that nothing scrolls.
+    const TEST_SIZE: [f32; 2] = [WINDOW_MIN_SIZE[0], 1400.0];
+    const DAY: i64 = 86_400;
+
+    fn device_row(
+        name: &str,
+        kind: DeviceKind,
+        presence: Presence,
+        charge: Option<(u8, ChargeState)>,
+        store_id: Option<i64>,
+    ) -> DeviceRow {
+        DeviceRow {
+            store_id,
+            device: DeviceId {
+                name: name.to_owned(),
+                transport: Transport::Hidraw,
+                locator: None,
+            },
+            kind,
+            charge: charge.map(|(percent, state)| BatteryReading::new(percent, state)),
+            presence,
+            first_seen: store_id.map(|_| state::now_unix() - 30 * DAY),
+            last_seen: store_id.map(|_| state::now_unix() - 2 * DAY),
+        }
     }
 
-    fn rows_for(names: &[&str]) -> Vec<devices::DeviceRow> {
-        devices::merge_devices(
-            Vec::new(),
-            names
-                .iter()
-                .map(|n| (device(n), PollOutcome::Failed))
-                .collect(),
+    fn keyboard() -> DeviceRow {
+        let charge = Some((39, ChargeState::Discharging));
+        device_row(
+            "NuPhy Air75 V2",
+            DeviceKind::Keyboard,
+            Presence::Online,
+            charge,
+            Some(1),
         )
     }
 
-    /// The regression R45 left in the shipped build: the name cell drew its
-    /// selectable button, then the name into that button's rect — which was
-    /// only as wide as the button's padding, so nothing was left to read.
-    #[test]
-    fn device_table_paints_every_device_name() {
-        let mut app = settings_app_with(Config::default());
-        let rows = rows_for(&["MX Anywhere 3", "NuPhy Air75"]);
-
-        let painted = painted_text(|ui| app.render_device_table(ui, &rows, 1_700_000_000));
-
-        for name in ["MX Anywhere 3", "NuPhy Air75"] {
-            assert!(
-                painted.iter().any(|t| t == name),
-                "{name:?} was not painted; got {painted:?}"
-            );
-        }
+    fn earbuds() -> DeviceRow {
+        let charge = None;
+        device_row(
+            "Nothing Ear (2)",
+            DeviceKind::Headset,
+            Presence::Disconnected,
+            charge,
+            Some(7),
+        )
     }
 
-    /// The window promises a minimum size; at that size the table must still
-    /// show the two columns that carry its only actions. Below roughly 940 px
-    /// `Tray icon` and `Actions` fall off the right edge, and the table has no
-    /// horizontal scrolling to reach them with — measured, not assumed: at
-    /// 720 px (the previous minimum) both headers are gone, along with
-    /// `Last seen`.
-    #[test]
-    fn device_table_fits_at_the_minimum_window_width() {
-        let mut app = settings_app_with(Config::default());
-        let rows = rows_for(&["SteelSeries Arctis Nova Pro Wireless Headset"]);
+    /// One row per state the tab distinguishes.
+    fn every_state() -> Vec<DeviceRow> {
+        use ChargeState::{Charging, Discharging, Full};
+        vec![
+            keyboard(),
+            device_row(
+                "Aerox 5 Wireless",
+                DeviceKind::Mouse,
+                Presence::Online,
+                Some((15, Discharging)),
+                Some(2),
+            ),
+            device_row(
+                "Arctis Nova 7",
+                DeviceKind::Headset,
+                Presence::Online,
+                Some((40, Charging)),
+                None,
+            ),
+            device_row(
+                "8BitDo Ultimate 2C",
+                DeviceKind::Controller,
+                Presence::Online,
+                Some((100, Full)),
+                Some(3),
+            ),
+            device_row(
+                "Aerox 3",
+                DeviceKind::Mouse,
+                Presence::NoAccess,
+                None,
+                Some(4),
+            ),
+            device_row(
+                "MX Anywhere 3",
+                DeviceKind::Mouse,
+                Presence::Unreachable,
+                None,
+                Some(5),
+            ),
+            earbuds(),
+        ]
+    }
 
-        let painted = painted_text_at(WINDOW_MIN_SIZE, |ui| {
-            app.render_device_table(ui, &rows, 1_700_000_000)
+    fn app_in(lang: Lang, config: Config) -> SettingsApp {
+        let mut app = settings_app_with(Config {
+            language: Some(lang.tag().to_owned()),
+            ..config
         });
-
-        for header in ["Name ⏷", "Charge", "Last seen", "Tray icon", "Actions"] {
-            assert!(
-                painted.iter().any(|t| t == header),
-                "{header:?} is not visible at the minimum window width; got {painted:?}"
-            );
-        }
+        app.tab = Tab::Devices;
+        app.device_rows = every_state();
+        app
     }
 
-    /// Russian runs 20–35% longer than English. Columns do not clip, so too long
-    /// a label wraps onto extra lines, runs into its neighbour, or pushes a column
-    /// off the window's right edge.
+    fn assert_whole_on_one_line(
+        painted: &[crate::egui_test::Painted],
+        expected: &[String],
+        lang: Lang,
+    ) {
+        for text in expected {
+            let lines = painted.iter().find(|p| &p.text == text).map(|p| p.lines);
+            assert_eq!(
+                lines,
+                Some(1),
+                "{lang:?}: {text:?} is cut off, missing or wrapped: {painted:?}"
+            );
+        }
+        assert_no_overlap(painted);
+    }
+
+    fn seen_ago(lang: Lang) -> String {
+        let age = devices::relative_label(state::now_unix(), state::now_unix() - 2 * DAY, lang);
+        fl!(loader(lang), "device-seen-ago", age = age.as_str())
+    }
+
     #[test]
-    fn device_table_text_is_not_clipped_in_any_language() {
-        let mut row = rows_for(&["MX Anywhere 3"]).remove(0);
-        row.store_id = Some(1);
-        row.presence = Presence::Disconnected;
-        row.charge = Some(crate::domain::BatteryReading::new(
-            90,
-            crate::domain::ChargeState::Discharging,
-        ));
-        row.first_seen = Some(1_700_000_000 - 3 * 86_400);
-        row.last_seen = Some(1_700_000_000 - 50 * 60);
-        let mut armed = row.clone();
-        armed.store_id = Some(2);
-        armed.device.name = "NuPhy Air75".to_string();
-        let mut denied = row.clone();
-        denied.store_id = Some(3);
-        denied.device.name = "Aerox 5".to_string();
-        denied.presence = Presence::NoAccess;
-        let rows = vec![row, armed, denied];
-
+    fn device_rows_are_whole_on_one_line_in_every_language() {
         for lang in Lang::ALL {
-            let mut app = settings_app_with(Config {
-                language: Some(lang.tag().to_owned()),
-                ..Config::default()
-            });
-            app.delete_state = DeleteState::Confirming(2);
+            let mut app = app_in(lang, Config::default());
 
-            let painted = fully_painted_text_at(WINDOW_MIN_SIZE, |ui| {
-                app.render_device_table(ui, &rows, 1_700_000_000)
-            });
+            let painted = fully_painted_text_at(TEST_SIZE, |ui| app.render_devices_tab(ui));
 
             let l = loader(lang);
-            let mut expected = vec![format!("{} \u{23f7}", l.get("col-name"))];
-            for id in [
-                "col-type",
-                "col-connection",
-                "col-charge",
-                "col-status",
-                "col-first-seen",
-                "col-last-seen",
-                "col-tray-icon",
-                "col-actions",
-                "presence-disconnected",
+            let mut expected: Vec<String> = [
+                "devices-connected",
+                "devices-seen-before",
+                "button-refresh",
                 "presence-no-access",
-                "button-delete",
-                "button-confirm",
-                "button-cancel",
-            ] {
-                expected.push(l.get(id));
-            }
-            expected.push(crate::domain::DeviceKind::Mouse.label(lang));
-            expected.push(devices::charge_cell_text(rows[0].charge, lang));
-            expected.push(devices::relative_label(
-                1_700_000_000,
-                1_700_000_000 - 3 * 86_400,
-                lang,
-            ));
-            expected.push(devices::relative_label(
-                1_700_000_000,
-                1_700_000_000 - 50 * 60,
-                lang,
-            ));
-            for text in expected {
-                assert!(
-                    painted.iter().any(|p| p.text == text),
-                    "{lang:?}: {text:?} is cut off or missing; fully painted: {painted:?}"
+                "presence-unreachable",
+                "note-no-access",
+            ]
+            .map(|id| l.get(id))
+            .into();
+            expected.extend(every_state().into_iter().map(|row| row.device.name));
+            expected.extend([
+                "39%".to_owned(),
+                format!("{LOW_SIGN} 15%"),
+                format!("{CHARGING_SIGN} 40%"),
+                format!("100% · {}", state_label(ChargeState::Full, lang)),
+                seen_ago(lang),
+            ]);
+            expected.extend(
+                every_state()
+                    .into_iter()
+                    .map(|row| gui::kind_glyph(row.kind).to_owned()),
+            );
+            assert_whole_on_one_line(&painted, &expected, lang);
+        }
+    }
+
+    #[test]
+    fn an_expanded_row_paints_its_settings_in_every_language() {
+        for lang in Lang::ALL {
+            for armed in [false, true] {
+                let mut overrides = HashMap::new();
+                overrides.insert(
+                    keyboard().device.name,
+                    DeviceSettings {
+                        poll_interval_secs: Some(300),
+                        low_threshold: Some(10),
+                    },
                 );
+                let mut app = app_in(
+                    lang,
+                    Config {
+                        tray_mode: TrayMode::PerDevice,
+                        device_overrides: overrides,
+                        ..Config::default()
+                    },
+                );
+                app.expanded_device = Some(keyboard().device);
+                if armed {
+                    app.delete_state = DeleteState::Confirming(1);
+                }
+
+                let painted = fully_painted_text_at(TEST_SIZE, |ui| app.render_devices_tab(ui));
+
+                let l = loader(lang);
+                let mut expected: Vec<String> = [
+                    "device-pin",
+                    "default-low-threshold",
+                    "default-poll-interval",
+                    "device-remove-title",
+                ]
+                .map(|id| l.get(id))
+                .into();
+                if armed {
+                    expected.extend(["device-remove-confirm", "button-cancel"].map(|id| l.get(id)));
+                } else {
+                    expected.push(l.get("device-remove"));
+                }
+                let default_interval = interval_label(60, lang);
+                expected.extend([
+                    fl!(l, "device-default-value", value = "20%"),
+                    fl!(l, "device-default-value", value = default_interval.as_str()),
+                    interval_label(300, lang),
+                    RESET.to_owned(),
+                    "10".to_owned(),
+                    "%".to_owned(),
+                ]);
+                assert_whole_on_one_line(&painted, &expected, lang);
+                for hint in ["device-pin-hint", "device-remove-hint"] {
+                    let hint = l.get(hint);
+                    assert!(
+                        painted.iter().any(|p| p.text == hint),
+                        "{lang:?}: {hint:?} missing"
+                    );
+                }
             }
-            assert_single_lines_without_overlap(&painted);
+        }
+    }
+
+    fn header(ctx: &egui::Context, row: &DeviceRow) -> egui::Response {
+        ctx.read_response(egui::Id::new(("device-row", &row.device)))
+            .expect("the row was laid out")
+    }
+
+    fn escape() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
         }
     }
 
     #[test]
-    fn device_table_renders_in_russian() {
-        let mut app = settings_app_with(Config {
-            language: Some("ru".to_owned()),
-            ..Config::default()
-        });
-        let rows = rows_for(&["MX Anywhere 3"]);
+    fn a_click_expands_one_row_at_a_time_and_escape_collapses_it() {
+        let mut app = app_in(Lang::En, Config::default());
+        let ctx = egui::Context::default();
+        let frame = |app: &mut SettingsApp, ui: &mut egui::Ui| {
+            app.handle_escape(ui);
+            app.render_devices_tab(ui);
+        };
+        run_frame(&ctx, TEST_SIZE, Vec::new(), |ui| frame(&mut app, ui));
 
-        let painted = painted_text_at(WINDOW_MIN_SIZE, |ui| {
-            app.render_device_table(ui, &rows, 1_700_000_000)
-        });
+        let first = header(&ctx, &keyboard()).rect.center();
+        click_at(&ctx, TEST_SIZE, first, |ui| frame(&mut app, ui));
+        assert_eq!(app.expanded_device, Some(keyboard().device));
+        let pin = fl!(loader(Lang::En), "device-pin");
+        let painted = painted_text_at(TEST_SIZE, |ui| frame(&mut app, ui));
+        assert_eq!(
+            painted.iter().filter(|t| **t == pin).count(),
+            1,
+            "{painted:?}"
+        );
 
-        for text in ["Название ⏷", "Заряд", "Замечено", "Действия", "мышь"]
-        {
-            assert!(painted.iter().any(|t| t == text), "{text:?}: {painted:?}");
-        }
+        run_frame(&ctx, TEST_SIZE, Vec::new(), |ui| frame(&mut app, ui));
+        let second = header(&ctx, &earbuds()).rect.center();
+        click_at(&ctx, TEST_SIZE, second, |ui| frame(&mut app, ui));
+        assert_eq!(app.expanded_device, Some(earbuds().device));
+
+        let output = run_frame(&ctx, TEST_SIZE, vec![escape()], |ui| frame(&mut app, ui));
+        assert_eq!(app.expanded_device, None);
+        assert!(
+            !output
+                .viewport_output
+                .values()
+                .any(|v| v.commands.contains(&egui::ViewportCommand::Close)),
+            "Escape closed the window instead of collapsing the row"
+        );
     }
 
     #[test]
-    fn an_unanswered_tray_is_shown_above_the_table_in_every_language() {
-        for (lang, text) in [
-            ("en", "The running tray did not answer"),
-            ("ru", "Запущенный трей не ответил"),
-        ] {
-            let mut app = settings_app_with(Config {
-                language: Some(lang.to_owned()),
+    fn the_tray_switch_edits_hidden_devices_without_expanding_the_row() {
+        let (mut app, path) = app_saving_to("device-shown-switch", Config::default());
+        app.tab = Tab::Devices;
+        app.device_rows = every_state();
+        let ctx = egui::Context::default();
+        run_frame(&ctx, TEST_SIZE, Vec::new(), |ui| app.render_devices_tab(ui));
+        let switch = ctx
+            .read_response(device_switch_id("shown", &keyboard().device))
+            .expect("the switch was laid out");
+
+        click_at(&ctx, TEST_SIZE, switch.rect.center(), |ui| {
+            app.render_devices_tab(ui)
+        });
+
+        assert_eq!(
+            config::load_from(&path).hidden_devices,
+            [keyboard().device.name]
+        );
+        assert_eq!(app.expanded_device, None);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// Where `text` was painted this frame, top to bottom.
+    fn text_rects(output: &egui::FullOutput, text: &str) -> Vec<egui::Rect> {
+        fn walk(shape: &egui::Shape, text: &str, out: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Text(t) if t.galley.text() == text => {
+                    out.push(t.galley.rect.translate(t.pos.to_vec2()));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, text, out)),
+                _ => {}
+            }
+        }
+        let mut rects = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, text, &mut rects);
+        }
+        rects.sort_by(|a, b| a.top().total_cmp(&b.top()));
+        rects
+    }
+
+    #[test]
+    fn pin_interval_and_reset_edit_the_config() {
+        let name = keyboard().device.name;
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            name.clone(),
+            DeviceSettings {
+                poll_interval_secs: None,
+                low_threshold: Some(10),
+            },
+        );
+        let (mut app, path) = app_saving_to(
+            "device-settings",
+            Config {
+                device_overrides: overrides,
                 ..Config::default()
-            });
-            app.device_rows = rows_for(&["MX Anywhere 3"]);
+            },
+        );
+        app.tab = Tab::Devices;
+        app.device_rows = every_state();
+        app.expanded_device = Some(keyboard().device);
+        let ctx = egui::Context::default();
+        let size = TEST_SIZE;
+        run_frame(&ctx, size, Vec::new(), |ui| app.render_devices_tab(ui));
+
+        let pin = ctx
+            .read_response(device_switch_id("pin", &keyboard().device))
+            .expect("the pin switch was laid out");
+        click_at(&ctx, size, pin.rect.center(), |ui| {
+            app.render_devices_tab(ui)
+        });
+        assert_eq!(config::load_from(&path).primary_device, Some(name.clone()));
+
+        let output = run_frame(&ctx, size, Vec::new(), |ui| app.render_devices_tab(ui));
+        let combo = text_rects(&output, &interval_label(60, Lang::En))[0];
+        click_at(&ctx, size, combo.center(), |ui| app.render_devices_tab(ui));
+        let output = run_frame(&ctx, size, Vec::new(), |ui| app.render_devices_tab(ui));
+        let choice = *text_rects(&output, "5 min")
+            .last()
+            .expect("the list opened");
+        click_at(&ctx, size, choice.center(), |ui| app.render_devices_tab(ui));
+        let saved = config::load_from(&path).device_overrides;
+        assert_eq!(
+            saved.get(&name),
+            Some(&DeviceSettings {
+                poll_interval_secs: Some(300),
+                low_threshold: Some(10),
+            })
+        );
+
+        let output = run_frame(&ctx, size, Vec::new(), |ui| app.render_devices_tab(ui));
+        let resets = text_rects(&output, RESET);
+        assert_eq!(resets.len(), 2, "both settings are the device's own");
+        click_at(&ctx, size, resets[0].center(), |ui| {
+            app.render_devices_tab(ui)
+        });
+        let saved = config::load_from(&path).device_overrides;
+        assert_eq!(
+            saved.get(&name),
+            Some(&DeviceSettings {
+                poll_interval_secs: Some(300),
+                low_threshold: None,
+            })
+        );
+
+        let output = run_frame(&ctx, size, Vec::new(), |ui| app.render_devices_tab(ui));
+        let reset = text_rects(&output, RESET)[0];
+        click_at(&ctx, size, reset.center(), |ui| app.render_devices_tab(ui));
+        assert!(config::load_from(&path).device_overrides.is_empty());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_seen_before_row_shows_its_age_and_offers_remove_but_no_switch() {
+        let (mut app, path) = app_saving_to("device-remove", Config::default());
+        app.tab = Tab::Devices;
+        app.device_rows = every_state();
+        let ctx = egui::Context::default();
+        let output = run_frame(&ctx, TEST_SIZE, Vec::new(), |ui| app.render_devices_tab(ui));
+
+        assert_eq!(text_rects(&output, &seen_ago(Lang::En)).len(), 1);
+        assert!(
+            ctx.read_response(device_switch_id("shown", &earbuds().device))
+                .is_none()
+        );
+        assert!(
+            ctx.read_response(device_switch_id("shown", &keyboard().device))
+                .is_some()
+        );
+
+        app.expanded_device = Some(earbuds().device);
+        run_frame(&ctx, TEST_SIZE, Vec::new(), |ui| app.render_devices_tab(ui));
+        let output = run_frame(&ctx, TEST_SIZE, Vec::new(), |ui| app.render_devices_tab(ui));
+        let remove = text_rects(&output, "Remove…")[0];
+        click_at(&ctx, TEST_SIZE, remove.center(), |ui| {
+            app.render_devices_tab(ui)
+        });
+        assert_eq!(app.delete_state, DeleteState::Confirming(7));
+        assert!(app.device_rows.iter().any(|r| r.device == earbuds().device));
+
+        let output = run_frame(&ctx, TEST_SIZE, Vec::new(), |ui| app.render_devices_tab(ui));
+        let confirm = text_rects(&output, "Remove")[0];
+        click_at(&ctx, TEST_SIZE, confirm.center(), |ui| {
+            app.render_devices_tab(ui)
+        });
+        assert!(!app.device_rows.iter().any(|r| r.device == earbuds().device));
+        assert_eq!(app.expanded_device, None);
+        assert_eq!(app.delete_state, DeleteState::Idle);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_search_field_appears_only_for_a_long_list() {
+        let hint = fl!(loader(Lang::En), "device-search-hint");
+        let mut app = app_in(Lang::En, Config::default());
+        for count in [SEARCH_MIN_DEVICES, SEARCH_MIN_DEVICES + 1] {
+            app.device_rows = (0..count)
+                .map(|i| {
+                    device_row(
+                        &format!("Mouse {i}"),
+                        DeviceKind::Mouse,
+                        Presence::Online,
+                        None,
+                        None,
+                    )
+                })
+                .collect();
+            let painted = painted_text_at(TEST_SIZE, |ui| app.render_devices_tab(ui));
+            assert_eq!(
+                painted.contains(&hint),
+                count > SEARCH_MIN_DEVICES,
+                "{count}: {painted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_no_devices_the_tab_says_so() {
+        let mut app = app_in(Lang::En, Config::default());
+        app.device_rows.clear();
+        let painted = painted_text_at(TEST_SIZE, |ui| app.render_devices_tab(ui));
+        assert!(
+            painted.contains(&fl!(loader(Lang::En), "devices-empty")),
+            "{painted:?}"
+        );
+        assert!(!painted.contains(&fl!(loader(Lang::En), "devices-connected")));
+    }
+
+    #[test]
+    fn an_unanswered_tray_is_shown_above_the_groups_in_every_language() {
+        for (lang, text) in [
+            (Lang::En, "The running tray did not answer"),
+            (Lang::Ru, "Запущенный трей не ответил"),
+        ] {
+            let mut app = app_in(lang, Config::default());
             app.tray_unanswered = true;
 
-            let painted = painted_text(|ui| app.render_devices_tab(ui));
+            let painted = painted_text_at(TEST_SIZE, |ui| app.render_devices_tab(ui));
 
             assert!(
                 painted.iter().any(|t| t.starts_with(text)),
@@ -806,36 +1017,12 @@ mod tests {
         }
     }
 
-    /// The band under the table draws nothing at all until a row is selected
-    /// — not a placeholder explaining that selecting a row would fill it.
     #[test]
-    fn device_detail_paints_nothing_until_a_row_is_selected() {
-        let mut app = settings_app_with(Config::default());
-
-        let painted = painted_text(|ui| app.render_device_detail(ui));
-
-        assert!(
-            painted.is_empty(),
-            "expected nothing painted, got {painted:?}"
-        );
-    }
-
-    #[test]
-    fn device_detail_paints_the_selected_device_and_its_controls() {
-        let mut app = settings_app_with(Config::default());
-        app.selected_device = Some("MX Anywhere 3".to_string());
-
-        let painted = painted_text(|ui| app.render_device_detail(ui));
-
-        assert!(painted.iter().any(|t| t == "MX Anywhere 3"), "{painted:?}");
-        assert!(
-            painted.iter().any(|t| t == "Use for the single tray icon"),
-            "{painted:?}"
-        );
-        assert!(
-            painted.iter().any(|t| t.starts_with("Use default (20%")),
-            "{painted:?}"
-        );
+    fn the_reset_glyph_is_in_the_bundled_fonts() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let font = egui::TextStyle::Button.resolve(&ctx.global_style());
+        ctx.fonts_mut(|fonts| assert!(fonts.has_glyphs(&font, RESET)));
     }
 
     #[test]

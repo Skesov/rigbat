@@ -6,7 +6,7 @@ use crate::domain::{DisplayMode, PrimaryStatus, TrayMode};
 use crate::i18n::{self, Lang, fl, loader};
 use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
 
-/// The General tab's poll-interval choices, seconds.
+/// Every poll-interval choice, default and per device, seconds.
 const POLL_INTERVAL_PRESETS: [u64; 7] = [30, 60, 120, 300, 900, 1800, 3600];
 
 /// Edge of an icon-style preview, points.
@@ -32,30 +32,18 @@ pub(super) struct StylePreviews {
 impl SettingsApp {
     /// A centred column of preference groups, scrolling as a whole.
     pub(super) fn render_general_tab(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let width = ui.available_width().min(widgets::CONTENT_MAX_WIDTH);
-                let margin = (ui.available_width() - width) / 2.0 - ui.spacing().item_spacing.x;
-                ui.horizontal(|ui| {
-                    ui.add_space(margin.max(0.0));
-                    ui.vertical(|ui| {
-                        ui.set_width(width);
-                        ui.add_space(8.0);
-                        self.render_tray_group(ui);
-                        self.render_battery_group(ui);
-                        self.render_system_group(ui);
-                        let l = loader(self.config.lang());
-                        widgets::footer(
-                            ui,
-                            &format!("rigbat {} ·", env!("CARGO_PKG_VERSION")),
-                            &fl!(l, "about-project-page"),
-                            env!("CARGO_PKG_REPOSITORY"),
-                        );
-                        ui.add_space(8.0);
-                    });
-                });
-            });
+        widgets::page(ui, "general-tab", |ui| {
+            self.render_tray_group(ui);
+            self.render_battery_group(ui);
+            self.render_system_group(ui);
+            let l = loader(self.config.lang());
+            widgets::footer(
+                ui,
+                &format!("rigbat {} ·", env!("CARGO_PKG_VERSION")),
+                &fl!(l, "about-project-page"),
+                env!("CARGO_PKG_REPOSITORY"),
+            );
+        });
     }
 
     fn render_tray_group(&mut self, ui: &mut egui::Ui) {
@@ -169,41 +157,20 @@ impl SettingsApp {
             Some(&fl!(l, "defaults-hint")),
             |rows| {
                 let mut threshold = self.config.low_threshold;
-                let resp = rows.row(&fl!(l, "default-low-threshold"), widgets::none, |ui| {
-                    widgets::trailing(ui, THRESHOLD_CONTROL_WIDTH, |ui| {
-                        ui.spacing_mut().slider_width = THRESHOLD_SLIDER_WIDTH;
-                        ui.add(egui::Slider::new(&mut threshold, LOW_THRESHOLD_RANGE).suffix("%"))
-                    })
+                let committed = rows.row(&fl!(l, "default-low-threshold"), widgets::none, |ui| {
+                    threshold_slider(ui, &mut threshold)
                 });
-                if resp.drag_stopped() || resp.lost_focus() {
+                if committed {
                     self.persist(move |target| target.low_threshold = threshold);
                 }
 
-                let current = self.config.poll_interval_secs;
-                let mut interval = current;
                 let hint = fl!(l, "poll-interval-hint");
-                let changed = rows.row(
+                let chosen = rows.row(
                     &fl!(l, "default-poll-interval"),
                     widgets::subtitle(&hint),
-                    |ui| {
-                        let mut changed = false;
-                        egui::ComboBox::from_id_salt("poll-interval")
-                            .selected_text(interval_label(current, lang))
-                            .show_ui(ui, |ui| {
-                                for secs in interval_choices(current) {
-                                    changed |= ui
-                                        .selectable_value(
-                                            &mut interval,
-                                            secs,
-                                            interval_label(secs, lang),
-                                        )
-                                        .changed();
-                                }
-                            });
-                        changed
-                    },
+                    |ui| interval_combo(ui, "poll-interval", self.config.poll_interval_secs, lang),
                 );
-                if changed && interval != current {
+                if let Some(interval) = chosen {
                     self.persist(move |target| target.poll_interval_secs = interval);
                 }
 
@@ -302,6 +269,33 @@ impl SettingsApp {
     }
 }
 
+/// A low-battery threshold slider; true once a drag or an edit is committed.
+pub(super) fn threshold_slider(ui: &mut egui::Ui, value: &mut u8) -> bool {
+    widgets::trailing(ui, THRESHOLD_CONTROL_WIDTH, |ui| {
+        ui.spacing_mut().slider_width = THRESHOLD_SLIDER_WIDTH;
+        let resp = ui.add(egui::Slider::new(value, LOW_THRESHOLD_RANGE).suffix("%"));
+        resp.drag_stopped() || resp.lost_focus()
+    })
+}
+
+/// A poll-interval combo box showing `current`; the newly chosen value, if any.
+pub(super) fn interval_combo(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    current: u64,
+    lang: Lang,
+) -> Option<u64> {
+    let mut interval = current;
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(interval_label(current, lang))
+        .show_ui(ui, |ui| {
+            for secs in interval_choices(current) {
+                ui.selectable_value(&mut interval, secs, interval_label(secs, lang));
+            }
+        });
+    (interval != current).then_some(interval)
+}
+
 /// Global so a test can find the switch it clicks.
 fn switch_id(key: &str) -> egui::Id {
     egui::Id::new(("settings-switch", key))
@@ -348,7 +342,7 @@ fn render_style_previews(
 
 /// A poll interval as the General tab names it: whole hours, whole minutes,
 /// else seconds.
-fn interval_label(secs: u64, lang: Lang) -> String {
+pub(super) fn interval_label(secs: u64, lang: Lang) -> String {
     let l = loader(lang);
     let (hours, minutes) = (secs / 3600, secs / 60);
     if hours > 0 && secs.is_multiple_of(3600) {
@@ -370,6 +364,7 @@ fn interval_choices(current: u64) -> Vec<u64> {
     }
     choices
 }
+
 /// What the General tab says the single tray icon will show. Names the pinned
 /// device when there is one, so the user can see the setting's current value
 /// without opening the tab that owns the control.
@@ -383,15 +378,13 @@ fn aggregate_icon_hint(primary_device: Option<&str>, lang: Lang) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
     use crate::config::{self, Config};
     use crate::egui_test::{
         assert_no_overlap, click_at, fully_painted_text_at, painted_text_at, run_frame,
     };
     use crate::settings::WINDOW_MIN_SIZE;
-    use crate::settings::tests::{scratch_config_path, settings_app_with};
+    use crate::settings::tests::{app_saving_to, settings_app_with};
 
     /// The narrowest the window gets, tall enough that the General tab's
     /// column does not scroll: its rows are checked, not the scroll area.
@@ -500,16 +493,6 @@ mod tests {
             "{:?}",
             value.rect
         );
-    }
-
-    /// A fresh settings window over a scratch config file, so a click saves
-    /// somewhere other than `~/.config/rigbat/config.json`.
-    fn app_saving_to(test_name: &str, config: Config) -> (SettingsApp, PathBuf) {
-        let path = scratch_config_path(test_name);
-        config::save_to(&path, &config).unwrap();
-        let mut app = settings_app_with(config::load_from(&path));
-        app.config_path = Some(path.clone());
-        (app, path)
     }
 
     #[test]

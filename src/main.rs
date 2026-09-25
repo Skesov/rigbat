@@ -32,7 +32,8 @@ Usage:
   rigbat --json            Print battery data as JSON
   rigbat --waybar          Stream waybar custom-module JSON lines (featured device)
   rigbat tray              Run the system tray daemon
-  rigbat settings          Open the settings window
+  rigbat settings [general|devices]
+                           Open the settings window, on that tab
   rigbat dashboard         Open the device overview (the tray icon's left click)
   rigbat doctor            Check the setup and print how to fix each problem
 
@@ -50,7 +51,7 @@ enum Invocation {
     Json,
     Waybar,
     Tray,
-    Settings,
+    Settings(settings::Tab),
     Dashboard,
     Doctor,
     Help,
@@ -87,8 +88,8 @@ fn parse_args(args: &[String]) -> Invocation {
         return Invocation::Unknown(unknown_flag.to_string());
     }
 
-    let positional = args.iter().find(|a| !a.starts_with('-'));
-    let mode = match positional {
+    let mut positionals = args.iter().filter(|a| !a.starts_with('-'));
+    let mode = match positionals.next() {
         None => "list",
         Some(tok) => tok.as_str(),
     };
@@ -110,7 +111,11 @@ fn parse_args(args: &[String]) -> Invocation {
     match mode {
         "list" => Invocation::List { wide },
         "tray" => Invocation::Tray,
-        "settings" => Invocation::Settings,
+        "settings" => match positionals.next().map(String::as_str) {
+            None => Invocation::Settings(settings::Tab::General),
+            Some(tab) => settings::Tab::from_arg(tab)
+                .map_or_else(|| Invocation::Unknown(tab.to_owned()), Invocation::Settings),
+        },
         "dashboard" => Invocation::Dashboard,
         "doctor" => Invocation::Doctor,
         other => Invocation::Unknown(other.to_string()),
@@ -153,8 +158,8 @@ fn main() {
 
     init_logging(&invocation);
 
-    if invocation == Invocation::Settings {
-        if let Err(e) = settings::run() {
+    if let Invocation::Settings(tab) = invocation {
+        if let Err(e) = settings::run(tab) {
             tracing::error!("settings window failed to start: {e}");
             std::process::exit(1);
         }
@@ -230,7 +235,7 @@ impl From<&Invocation> for LogProfile {
     fn from(invocation: &Invocation) -> Self {
         match invocation {
             Invocation::Tray
-            | Invocation::Settings
+            | Invocation::Settings(_)
             | Invocation::Dashboard
             | Invocation::Waybar => LogProfile::Daemon,
             Invocation::List { .. }
@@ -565,7 +570,22 @@ mod tests {
 
     #[test]
     fn mode_settings() {
-        assert_eq!(parse_args(&s(&["settings"])), Invocation::Settings);
+        assert_eq!(
+            parse_args(&s(&["settings"])),
+            Invocation::Settings(settings::Tab::General)
+        );
+        assert_eq!(
+            parse_args(&s(&["settings", "devices"])),
+            Invocation::Settings(settings::Tab::Devices)
+        );
+        assert_eq!(
+            parse_args(&s(&["settings", "general"])),
+            Invocation::Settings(settings::Tab::General)
+        );
+        assert_eq!(
+            parse_args(&s(&["settings", "power"])),
+            Invocation::Unknown("power".to_string())
+        );
         assert_eq!(parse_args(&s(&["dashboard"])), Invocation::Dashboard);
         assert_eq!(parse_args(&s(&["doctor"])), Invocation::Doctor);
     }
@@ -590,7 +610,9 @@ mod tests {
     #[test]
     fn default_filter_level_settings_is_info() {
         assert_eq!(
-            default_filter_level(LogProfile::from(&Invocation::Settings)),
+            default_filter_level(LogProfile::from(&Invocation::Settings(
+                settings::Tab::General
+            ))),
             "info"
         );
     }

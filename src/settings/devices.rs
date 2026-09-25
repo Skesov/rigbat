@@ -1,19 +1,16 @@
-//! State machine behind the Devices tab's inventory table (T35): merges the
-//! persisted device inventory (`state::Store::list_devices`) with the
-//! current discovery scan into one row per device, plus the pure
-//! filter/sort/delete-confirmation logic the table renders from. Kept
-//! independent of `egui` so it is unit-testable — the table widget itself is
-//! not (see `settings::tests`).
+//! State behind the Devices tab (T35): merges the persisted device inventory
+//! (`state::Store::list_devices`) with the current discovery scan into one
+//! row per device, plus the pure filter/order/delete-confirmation/escape
+//! logic the tab renders from, independent of `egui`.
 
-use std::cmp::Ordering;
 use std::time::Duration;
 
 use crate::domain::{BatteryReading, DeviceId, DeviceInfo, DeviceKind, PollOutcome, Presence};
-use crate::domain::{format_age, state_label};
+use crate::domain::{format_age, roster_order};
 use crate::i18n::Lang;
 use crate::state::DeviceRecord;
 
-/// One row of the Devices tab table: the union of a device's persisted
+/// One row of the Devices tab: the union of a device's persisted
 /// inventory record (if any) and its status in the most recent discovery
 /// scan (if any). Either half can be missing — freshly discovered and not
 /// yet recorded (`store_id: None`), or recorded but not currently
@@ -21,7 +18,7 @@ use crate::state::DeviceRecord;
 /// since a device with neither would not be a row at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceRow {
-    /// The inventory row's SQLite id — `Delete`'s handle. `None` for a
+    /// The inventory row's SQLite id — `Remove`'s handle. `None` for a
     /// device this scan found that `record_seen` has not persisted yet.
     pub store_id: Option<i64>,
     pub device: DeviceId,
@@ -92,160 +89,24 @@ pub fn filter_rows(rows: &[DeviceRow], query: &str) -> Vec<DeviceRow> {
         .collect()
 }
 
-/// The table's sortable columns. `Shown` and `Delete` are actions, not data
-/// the row is ordered by, so they have no variant here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortColumn {
-    Name,
-    Type,
-    Transport,
-    Charge,
-    Presence,
-    FirstSeen,
-    LastSeen,
+/// Online first, then by name, ignoring case — the roster order of every
+/// surface. Stable, so same-named devices keep the merge order.
+pub fn order_rows(rows: &mut [DeviceRow]) {
+    rows.sort_by_cached_key(|r| roster_order(&r.device.name, r.presence));
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortDirection {
-    Ascending,
-    Descending,
-}
-
-impl SortDirection {
-    fn flipped(self) -> Self {
-        match self {
-            SortDirection::Ascending => SortDirection::Descending,
-            SortDirection::Descending => SortDirection::Ascending,
-        }
-    }
-
-    fn apply(self, ord: Ordering) -> Ordering {
-        match self {
-            SortDirection::Ascending => ord,
-            SortDirection::Descending => ord.reverse(),
-        }
-    }
-}
-
-/// `(column, direction)` — kept in `SettingsApp` and applied to the backing
-/// `Vec` before it is handed to `TableBuilder`, since `egui_extras` has no
-/// sort support of its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SortState {
-    pub column: SortColumn,
-    pub direction: SortDirection,
-}
-
-impl Default for SortState {
-    /// Name, ascending — the order `list_devices` already returns, so the
-    /// table looks sorted before the user has clicked anything.
-    fn default() -> Self {
-        Self {
-            column: SortColumn::Name,
-            direction: SortDirection::Ascending,
-        }
-    }
-}
-
-impl SortState {
-    /// GNOME HIG: the first click on a column header sorts ascending; a
-    /// second click on the *same* column reverses it. Clicking a different
-    /// column starts that column over at ascending.
-    pub fn clicked(self, column: SortColumn) -> Self {
-        if self.column == column {
-            Self {
-                column,
-                direction: self.direction.flipped(),
-            }
-        } else {
-            Self {
-                column,
-                direction: SortDirection::Ascending,
-            }
-        }
-    }
-}
-
-/// Sorts `rows` in place by `sort.column`/`sort.direction`. A row with no
-/// charge, first-seen, or last-seen value sorts after every row that has
-/// one, in both directions — an unknown value is neither smaller nor larger
-/// than a known one, so direction cannot move it. Ties (e.g. two devices
-/// sharing a name over different transports) break on the full device
-/// identity, so the order is deterministic run to run.
-pub fn sort_rows(rows: &mut [DeviceRow], sort: SortState, lang: Lang) {
-    rows.sort_by(|a, b| {
-        let primary = match sort.column {
-            SortColumn::Name => sort.direction.apply(
-                a.device
-                    .name
-                    .to_lowercase()
-                    .cmp(&b.device.name.to_lowercase()),
-            ),
-            // By the label on screen, not by the English wire value.
-            SortColumn::Type => sort
-                .direction
-                .apply(a.kind.label(lang).cmp(&b.kind.label(lang))),
-            SortColumn::Transport => sort
-                .direction
-                .apply(a.device.transport.as_str().cmp(b.device.transport.as_str())),
-            SortColumn::Presence => sort
-                .direction
-                .apply(presence_rank(a.presence).cmp(&presence_rank(b.presence))),
-            SortColumn::Charge => cmp_missing_last(
-                a.charge.map(|r| r.percent),
-                b.charge.map(|r| r.percent),
-                sort.direction,
-            ),
-            SortColumn::FirstSeen => cmp_missing_last(a.first_seen, b.first_seen, sort.direction),
-            SortColumn::LastSeen => cmp_missing_last(a.last_seen, b.last_seen, sort.direction),
-        };
-        primary.then_with(|| tie_break(a, b))
-    });
-}
-
-fn presence_rank(p: Presence) -> u8 {
-    match p {
-        Presence::Online => 0,
-        Presence::NoAccess => 1,
-        Presence::Unreachable => 2,
-        Presence::Disconnected => 3,
-    }
-}
-
-fn cmp_missing_last<T: Ord>(a: Option<T>, b: Option<T>, direction: SortDirection) -> Ordering {
-    match (a, b) {
-        (Some(a), Some(b)) => direction.apply(a.cmp(&b)),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
-}
-
-fn tie_break(a: &DeviceRow, b: &DeviceRow) -> Ordering {
-    (
-        a.device.name.as_str(),
-        a.device.transport.as_str(),
-        a.device.locator.as_deref(),
-    )
-        .cmp(&(
-            b.device.name.as_str(),
-            b.device.transport.as_str(),
-            b.device.locator.as_deref(),
-        ))
-}
-
-/// What the `Actions` cell offers for one row.
+/// What an expanded row offers for removing its device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteCell {
     /// The row exists only in this scan; the inventory has no row to delete.
     Unavailable,
-    /// The neutral `Delete` button, which arms the confirmation and nothing else.
+    /// `Remove…`, which arms the confirmation and nothing else.
     Arm,
-    /// `Confirm` / `Cancel`: this row, and only this row, is armed.
+    /// `Remove` / `Cancel`: this row, and only this row, is armed.
     Confirm,
 }
 
-/// Decides which of the three states the cell is in. Extracted from the
+/// Decides which of the three states the row is in. Extracted from the
 /// rendering so the "never delete on the first click" rule is testable: the
 /// test that used to carry that name asserted `DeleteState::Confirming(7)`
 /// equals itself and would have passed with the confirmation removed.
@@ -261,34 +122,42 @@ pub fn delete_cell(state: DeleteState, store_id: Option<i64>) -> DeleteCell {
 ///
 /// Escape dismisses the most transient thing first and only closes the window
 /// when there is nothing left to dismiss — the behaviour every desktop toolkit
-/// implements for a preferences window, and the reason an armed "Delete"
+/// implements for a preferences window, and the reason an armed "Remove"
 /// confirmation cannot be escaped into a closed window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscapeAction {
     CancelDelete,
+    Collapse,
     ClearSearch,
     CloseWindow,
 }
 
-/// `delete_armed` is whether a row's delete is waiting for confirmation;
-/// `search_active` is whether the Devices tab's search box holds text (it is
-/// false on any other tab, where clearing it would dismiss something the user
-/// cannot see).
-pub fn escape_action(delete_armed: bool, search_active: bool) -> EscapeAction {
-    if delete_armed {
+/// What the window has open that Escape can dismiss. `expanded` and
+/// `search_active` are false on any tab but Devices, where dismissing them
+/// would act on something the user cannot see.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Dismissible {
+    pub delete_armed: bool,
+    pub expanded: bool,
+    pub search_active: bool,
+}
+
+pub fn escape_action(open: Dismissible) -> EscapeAction {
+    if open.delete_armed {
         EscapeAction::CancelDelete
-    } else if search_active {
+    } else if open.expanded {
+        EscapeAction::Collapse
+    } else if open.search_active {
         EscapeAction::ClearSearch
     } else {
         EscapeAction::CloseWindow
     }
 }
 
-/// Explicit confirm-before-delete state for the table's Delete cell: a
-/// destructive, irreversible action needs a deliberate second step, not a
-/// first click. One shared slot rather than a per-row flag — only one row's
-/// Delete cell can be mid-confirmation at a time; clicking Delete on a
-/// different row just moves it there.
+/// Explicit confirm-before-delete state for `Remove…`: a destructive,
+/// irreversible action needs a deliberate second step, not a first click.
+/// One shared slot rather than a per-row flag — only one row can be
+/// mid-confirmation at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeleteState {
     #[default]
@@ -296,31 +165,20 @@ pub enum DeleteState {
     Confirming(i64),
 }
 
-/// Removes the inventory row `store_id` from the table's backing list. The
+/// Removes the inventory row `store_id` from the tab's backing list. The
 /// caller runs this only after `state::Store::delete_device` (and the
 /// matching `hidden_devices` cleanup) has already succeeded.
 pub fn remove_row(rows: &mut Vec<DeviceRow>, store_id: i64) {
     rows.retain(|r| r.store_id != Some(store_id));
 }
 
-/// Formats a unix-seconds timestamp as a relative age ("3d ago") for the
-/// table cell, relative to `now` (also unix seconds). Reuses
+/// Formats a unix-seconds timestamp as a relative age ("3d ago"), relative
+/// to `now` (also unix seconds). Reuses
 /// `domain::format_age`, which already renders this exact vocabulary for
 /// retained readings, instead of a second implementation.
 pub fn relative_label(now: i64, at: i64, lang: Lang) -> String {
     let age = Duration::from_secs(now.saturating_sub(at).max(0).unsigned_abs());
     format_age(age, lang)
-}
-
-/// Formats the `Charge` cell: percentage plus charge state (T36), e.g.
-/// `"90%  discharging"`. Reuses `domain::state_str` so a device never reads
-/// two ways in two places — the tray menu and this table spell the same
-/// state identically. A device with no reading keeps the existing dash.
-pub fn charge_cell_text(charge: Option<BatteryReading>, lang: Lang) -> String {
-    match charge {
-        Some(r) => format!("{}%  {}", r.percent, state_label(r.state, lang)),
-        None => "—".to_string(),
-    }
 }
 
 /// Formats a unix-seconds timestamp as an absolute UTC date ("2026-09-20")
@@ -352,22 +210,50 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod escape_tests {
     use super::*;
 
+    fn open(delete_armed: bool, expanded: bool, search_active: bool) -> Dismissible {
+        Dismissible {
+            delete_armed,
+            expanded,
+            search_active,
+        }
+    }
+
     #[test]
     fn escape_closes_when_nothing_is_open() {
-        assert_eq!(escape_action(false, false), EscapeAction::CloseWindow);
+        assert_eq!(
+            escape_action(open(false, false, false)),
+            EscapeAction::CloseWindow
+        );
     }
 
     #[test]
     fn escape_clears_the_search_before_closing() {
-        assert_eq!(escape_action(false, true), EscapeAction::ClearSearch);
+        assert_eq!(
+            escape_action(open(false, false, true)),
+            EscapeAction::ClearSearch
+        );
     }
 
-    /// An armed delete outranks the search box: Escape must not close the
+    #[test]
+    fn escape_collapses_a_row_before_clearing_the_search() {
+        assert_eq!(
+            escape_action(open(false, true, true)),
+            EscapeAction::Collapse
+        );
+    }
+
+    /// An armed delete outranks everything else: Escape must not close the
     /// window while a confirmation is waiting.
     #[test]
     fn escape_cancels_an_armed_delete_first() {
-        assert_eq!(escape_action(true, true), EscapeAction::CancelDelete);
-        assert_eq!(escape_action(true, false), EscapeAction::CancelDelete);
+        assert_eq!(
+            escape_action(open(true, true, true)),
+            EscapeAction::CancelDelete
+        );
+        assert_eq!(
+            escape_action(open(true, false, false)),
+            EscapeAction::CancelDelete
+        );
     }
 }
 
@@ -545,252 +431,18 @@ mod tests {
         assert!(filter_rows(&rows, "headset").is_empty());
     }
 
-    // --- sort_rows ---------------------------------------------------------
-
-    fn names(rows: &[DeviceRow]) -> Vec<&str> {
-        rows.iter().map(|r| r.device.name.as_str()).collect()
-    }
-
     #[test]
-    fn sort_rows_by_name_both_directions() {
-        let mut rows = vec![
-            row("zebra", Transport::Sysfs, None),
-            row("alpha", Transport::Sysfs, None),
-        ];
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::Name,
-                direction: SortDirection::Ascending,
-            },
-            Lang::En,
-        );
-        assert_eq!(names(&rows), vec!["alpha", "zebra"]);
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::Name,
-                direction: SortDirection::Descending,
-            },
-            Lang::En,
-        );
-        assert_eq!(names(&rows), vec!["zebra", "alpha"]);
-    }
-
-    #[test]
-    fn sort_rows_by_type_both_directions() {
-        let mut a = row("a", Transport::Sysfs, None);
-        a.kind = DeviceKind::Mouse;
-        let mut b = row("b", Transport::Sysfs, None);
-        b.kind = DeviceKind::Keyboard;
-        let mut rows = vec![a, b];
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::Type,
-                direction: SortDirection::Ascending,
-            },
-            Lang::En,
-        );
-        assert_eq!(rows[0].kind, DeviceKind::Keyboard);
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::Type,
-                direction: SortDirection::Descending,
-            },
-            Lang::En,
-        );
-        assert_eq!(rows[0].kind, DeviceKind::Mouse);
-    }
-
-    #[test]
-    fn sort_rows_by_transport_both_directions() {
-        let mut rows = vec![
-            row("a", Transport::Sysfs, None),
-            row("b", Transport::Bluetooth, None),
-        ];
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::Transport,
-                direction: SortDirection::Ascending,
-            },
-            Lang::En,
-        );
-        assert_eq!(rows[0].device.transport, Transport::Bluetooth);
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::Transport,
-                direction: SortDirection::Descending,
-            },
-            Lang::En,
-        );
-        assert_eq!(rows[0].device.transport, Transport::Sysfs);
-    }
-
-    #[test]
-    fn sort_rows_by_presence_both_directions() {
-        let mut online = row("a", Transport::Sysfs, None);
-        online.presence = Presence::Online;
-        let mut gone = row("b", Transport::Sysfs, None);
+    fn online_rows_come_first_then_by_name_ignoring_case() {
+        let mut gone = row("alpha", Transport::Sysfs, None);
         gone.presence = Presence::Disconnected;
-        let mut rows = vec![gone, online];
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::Presence,
-                direction: SortDirection::Ascending,
-            },
-            Lang::En,
-        );
-        assert_eq!(rows[0].presence, Presence::Online);
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::Presence,
-                direction: SortDirection::Descending,
-            },
-            Lang::En,
-        );
-        assert_eq!(rows[0].presence, Presence::Disconnected);
-    }
-
-    #[test]
-    fn sort_rows_by_charge_missing_value_sorts_last_both_directions() {
-        let mut has_charge = row("a", Transport::Sysfs, None);
-        has_charge.charge = Some(reading(50));
-        let mut no_charge = row("b", Transport::Sysfs, None);
-        no_charge.charge = None;
-        let mut rows = vec![no_charge, has_charge];
-
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::Charge,
-                direction: SortDirection::Ascending,
-            },
-            Lang::En,
-        );
-        assert_eq!(rows[0].device.name, "a");
-        assert_eq!(
-            rows[1].device.name, "b",
-            "missing charge sorts last ascending"
-        );
-
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::Charge,
-                direction: SortDirection::Descending,
-            },
-            Lang::En,
-        );
-        assert_eq!(rows[0].device.name, "a");
-        assert_eq!(
-            rows[1].device.name, "b",
-            "missing charge sorts last descending too"
-        );
-    }
-
-    #[test]
-    fn sort_rows_by_first_seen_both_directions() {
-        let mut old = row("old", Transport::Sysfs, None);
-        old.first_seen = Some(100);
-        let mut new = row("new", Transport::Sysfs, None);
-        new.first_seen = Some(200);
-        let mut rows = vec![new, old];
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::FirstSeen,
-                direction: SortDirection::Ascending,
-            },
-            Lang::En,
-        );
-        assert_eq!(names(&rows), vec!["old", "new"]);
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::FirstSeen,
-                direction: SortDirection::Descending,
-            },
-            Lang::En,
-        );
-        assert_eq!(names(&rows), vec!["new", "old"]);
-    }
-
-    #[test]
-    fn sort_rows_by_last_seen_both_directions() {
-        let mut old = row("old", Transport::Sysfs, None);
-        old.last_seen = Some(100);
-        let mut new = row("new", Transport::Sysfs, None);
-        new.last_seen = Some(200);
-        let mut rows = vec![old, new];
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::LastSeen,
-                direction: SortDirection::Descending,
-            },
-            Lang::En,
-        );
-        assert_eq!(names(&rows), vec!["new", "old"]);
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::LastSeen,
-                direction: SortDirection::Ascending,
-            },
-            Lang::En,
-        );
-        assert_eq!(names(&rows), vec!["old", "new"]);
-    }
-
-    #[test]
-    fn sort_rows_ties_break_on_locator_without_panicking() {
-        // Two devices named "mouse" over the same transport, one with no
-        // locator — the tie-break must handle the missing locator, not
-        // panic on it.
         let mut rows = vec![
-            row("mouse", Transport::Sysfs, Some("b")),
-            row("mouse", Transport::Sysfs, None),
+            gone,
+            row("zebra", Transport::Sysfs, None),
+            row("Mouse", Transport::Sysfs, None),
         ];
-        sort_rows(
-            &mut rows,
-            SortState {
-                column: SortColumn::Name,
-                direction: SortDirection::Ascending,
-            },
-            Lang::En,
-        );
-        assert_eq!(
-            rows[0].device.locator, None,
-            "None sorts before Some(\"b\")"
-        );
-        assert_eq!(rows[1].device.locator, Some("b".to_string()));
-    }
-
-    #[test]
-    fn sort_state_clicked_same_column_flips_direction() {
-        let sort = SortState::default();
-        assert_eq!(sort.direction, SortDirection::Ascending);
-        let sort = sort.clicked(SortColumn::Name);
-        assert_eq!(sort.direction, SortDirection::Descending);
-        let sort = sort.clicked(SortColumn::Name);
-        assert_eq!(sort.direction, SortDirection::Ascending);
-    }
-
-    #[test]
-    fn sort_state_clicked_different_column_resets_to_ascending() {
-        let sort = SortState {
-            column: SortColumn::Name,
-            direction: SortDirection::Descending,
-        };
-        let sort = sort.clicked(SortColumn::Charge);
-        assert_eq!(sort.column, SortColumn::Charge);
-        assert_eq!(sort.direction, SortDirection::Ascending);
+        order_rows(&mut rows);
+        let names: Vec<&str> = rows.iter().map(|r| r.device.name.as_str()).collect();
+        assert_eq!(names, ["Mouse", "zebra", "alpha"]);
     }
 
     // --- delete confirmation + removal --------------------------------------
@@ -868,80 +520,6 @@ mod tests {
         rows[0].store_id = Some(1);
         remove_row(&mut rows, 999);
         assert_eq!(rows.len(), 1);
-    }
-
-    // --- charge_cell_text ----------------------------------------------------
-
-    #[test]
-    fn charge_cell_text_discharging() {
-        assert_eq!(
-            charge_cell_text(
-                Some(BatteryReading::new(
-                    90,
-                    crate::domain::ChargeState::Discharging
-                )),
-                Lang::En
-            ),
-            "90%  discharging"
-        );
-    }
-
-    #[test]
-    fn charge_cell_text_charging() {
-        assert_eq!(
-            charge_cell_text(
-                Some(BatteryReading::new(
-                    42,
-                    crate::domain::ChargeState::Charging
-                )),
-                Lang::En
-            ),
-            "42%  charging"
-        );
-    }
-
-    #[test]
-    fn charge_cell_text_full() {
-        assert_eq!(
-            charge_cell_text(
-                Some(BatteryReading::new(100, crate::domain::ChargeState::Full)),
-                Lang::En
-            ),
-            "100%  full"
-        );
-    }
-
-    #[test]
-    fn charge_cell_text_missing_reading_is_dash() {
-        assert_eq!(charge_cell_text(None, Lang::En), "—");
-    }
-
-    #[test]
-    fn charge_cell_text_in_russian() {
-        let reading = BatteryReading::new(90, crate::domain::ChargeState::Discharging);
-        assert_eq!(
-            charge_cell_text(Some(reading), Lang::Ru),
-            "90%  разряжается"
-        );
-    }
-
-    #[test]
-    fn type_column_sorts_by_the_translated_label() {
-        let mut headset = row("a", Transport::Sysfs, None);
-        headset.kind = DeviceKind::Headset;
-        let mut controller = row("b", Transport::Sysfs, None);
-        controller.kind = DeviceKind::Controller;
-        let ascending = SortState {
-            column: SortColumn::Type,
-            direction: SortDirection::Ascending,
-        };
-
-        let mut rows = vec![headset.clone(), controller.clone()];
-        sort_rows(&mut rows, ascending, Lang::En);
-        assert_eq!(names(&rows), vec!["b", "a"], "controller < headset");
-
-        sort_rows(&mut rows, ascending, Lang::Ru);
-        assert_eq!(names(&rows), vec!["a", "b"], "гарнитура < геймпад");
     }
 
     // --- relative_label / absolute_date_label -------------------------------

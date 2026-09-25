@@ -4,6 +4,13 @@ use eframe::egui;
 use tokio::sync::watch;
 
 use crate::appearance::{Appearance, ColorScheme};
+use crate::domain::DeviceKind;
+use crate::icon::Theme;
+
+/// A device row in either window, and the least height of a settings row.
+pub const ROW_HEIGHT: f32 = 48.0;
+pub const GLYPH_COLUMN: f32 = 30.0;
+pub const GLYPH_SIZE: f32 = 20.0;
 
 /// Accent goes into both styles so a scheme switch keeps it.
 pub fn apply(ctx: &egui::Context, appearance: &Appearance) {
@@ -58,6 +65,49 @@ fn readable_on(fill: egui::Color32) -> egui::Color32 {
     } else {
         egui::Color32::WHITE
     }
+}
+
+pub fn kind_glyph(kind: DeviceKind) -> &'static str {
+    match kind {
+        DeviceKind::Mouse => "\u{1F5B1}",
+        DeviceKind::Keyboard => "\u{2328}",
+        DeviceKind::Headset => "\u{1F3A7}",
+        DeviceKind::Controller => "\u{1F3AE}",
+        DeviceKind::Other => "\u{1F50B}",
+    }
+}
+
+/// Hints, notes and subtitles. `weak_text_color` misses WCAG 4.5:1 on a dark panel.
+pub fn secondary_text(visuals: &egui::Visuals) -> egui::Color32 {
+    visuals.text_color()
+}
+
+/// A charge value: in the low colour when low, strong when live, else secondary.
+pub fn charge_value_text(
+    visuals: &egui::Visuals,
+    text: String,
+    low: bool,
+    online: bool,
+) -> egui::RichText {
+    let text = egui::RichText::new(text);
+    match (low, online) {
+        (true, _) => text.strong().color(color(theme(visuals).low)),
+        (false, true) => text.strong(),
+        (false, false) => text.color(secondary_text(visuals)),
+    }
+}
+
+/// The status colours of the tray icon, for this window's scheme.
+pub fn theme(visuals: &egui::Visuals) -> Theme {
+    if visuals.dark_mode {
+        Theme::dark()
+    } else {
+        Theme::light()
+    }
+}
+
+pub fn color([r, g, b, a]: [u8; 4]) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 
 /// WCAG 2.1 contrast ratio between two opaque colors.
@@ -135,6 +185,23 @@ mod tests {
             ctx.style_of(egui::Theme::Light).visuals.selection,
             egui::Visuals::light().selection
         );
+    }
+
+    #[test]
+    fn secondary_text_is_readable_in_both_themes() {
+        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
+            let text = secondary_text(&visuals);
+            assert_eq!(text.a(), 255, "secondary text must be opaque");
+            let group = visuals.panel_fill.blend(visuals.faint_bg_color);
+            for (surface, fill) in [("panel", visuals.panel_fill), ("group", group)] {
+                let ratio = contrast_ratio(text, fill);
+                assert!(
+                    ratio >= 4.5,
+                    "dark_mode={}: {ratio:.2}:1 on the {surface} is below 4.5:1",
+                    visuals.dark_mode
+                );
+            }
+        }
     }
 
     #[test]

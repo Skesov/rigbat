@@ -77,6 +77,6 @@ mod tests {
             DisplayMode::PercentInIcon.label(Lang::En),
             "Percentage inside icon"
         );
-        assert_eq!(DisplayMode::IconOnly.label(Lang::Ru), "Только иконка");
+        assert_eq!(DisplayMode::IconOnly.label(Lang::Ru), "Только значок");
     }
 }

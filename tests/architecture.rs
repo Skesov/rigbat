@@ -69,7 +69,6 @@ const INFRA_CRATES: &[&str] = &[
     "directories",
     "eframe",
     "egui",
-    "egui_extras",
     "ksni",
     "nix",
     "notify",

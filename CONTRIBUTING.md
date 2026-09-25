@@ -203,8 +203,9 @@ Fluent catalogues in `i18n/<lang>/rigbat.ftl`; the CLI stays English.
 2. Add the language to `Lang` in `src/i18n/mod.rs` (`ALL`, `tag`, `native_name`, `from_tag`,
    `id`, `loader`).
 3. Run `cargo test`. `i18n::tests` fails on a missing or extra message, and
-   `settings::tests::device_table_text_is_not_clipped_in_any_language` fails on a column header
-   too wide for its column — shorten the text rather than widening the column.
+   `settings::devices_tab::tests::device_rows_are_whole_on_one_line_in_every_language` (with the
+   other `*_in_every_language` window tests) fails on a string cut off or wrapped at the narrowest
+   window — shorten the text rather than widening the layout.
 
 UI wording, width rules and components for any UI change: [docs/ui-design.md](docs/ui-design.md).
 
