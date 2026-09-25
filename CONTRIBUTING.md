@@ -206,6 +206,8 @@ Fluent catalogues in `i18n/<lang>/rigbat.ftl`; the CLI stays English.
    `settings::tests::device_table_text_is_not_clipped_in_any_language` fails on a column header
    too wide for its column — shorten the text rather than widening the column.
 
+UI wording, width rules and components for any UI change: [docs/ui-design.md](docs/ui-design.md).
+
 ## Figuring out the protocol
 
 See [docs/adding-a-device.md](docs/adding-a-device.md) for how to discover where a

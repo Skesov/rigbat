@@ -156,6 +156,7 @@ which fails on any other edge and on any cycle.
   and returns what was painted, whole or cut, and how many lines it wrapped to, so a widget drawn
   into a few pixels or a label that wraps fails the test instead of shipping. Assert against what
   is painted, never only that the code ran.
+- UI conventions (principles, tokens, components, wording, UI tests): [`docs/ui-design.md`](docs/ui-design.md).
 - D-Bus loops are tested on a private bus (`bus_test`: its own `dbus-daemon`, the test re-run in a
   child process pointed at it). zbus spawns tasks with `tokio::spawn` when an object server starts
   and when a proxy or signal stream is dropped, so both must happen inside the runtime — a window
