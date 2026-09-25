@@ -16,11 +16,11 @@ use futures_util::StreamExt as _;
 use tokio::time::Instant;
 use zbus::zvariant::OwnedObjectPath;
 
-use crate::app::refresh::RefreshSignal;
-use crate::discovery::{Context, backoff};
 use crate::domain::{BatteryReading, ChargeState, DeviceInfo, Transport, guess_kind};
+use crate::refresh::RefreshSignal;
 
-use super::{BatteryBackend, BatterySource};
+use super::supervise::supervise;
+use super::{BatteryBackend, BatterySource, Context};
 
 /// `refresh.trigger()` wakes every source task, including the SteelSeries
 /// hidraw task, which opens the device and blocks a thread.
@@ -143,46 +143,15 @@ async fn discover_inner(ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySour
 
 /// Subscribes to BlueZ D-Bus signals and triggers `refresh` when a device is
 /// added, removed, or reports a new battery level. Runs under a supervising
-/// retry loop with exponential backoff (`discovery::backoff`): a lost system
+/// retry loop with exponential backoff (`sources::supervise`): a lost system
 /// bus, a BlueZ that leaves in a way `NameOwnerChanged` cannot recover from,
 /// or any other stream ending is not fatal — the loop re-dials through
 /// `ctx.system_bus()` (which re-connects a closed one) and resubscribes.
 /// Still an optimisation, never a dependency: the supervisor's periodic
 /// discovery sweep is the safety net while a watcher is down.
 pub fn watch_events(refresh: RefreshSignal, ctx: Arc<Context>) {
-    tokio::spawn(async move {
-        let mut delay = backoff::INITIAL_DELAY;
-        let mut consecutive_failures: u32 = 0;
-        loop {
-            let attempt_start = Instant::now();
-            let result: anyhow::Result<()> = async {
-                let conn = ctx.system_bus().await?;
-                watch_events_inner(refresh.clone(), conn, SIGNAL_DEBOUNCE).await
-            }
-            .await;
-
-            if backoff::is_healthy_run(attempt_start.elapsed()) {
-                delay = backoff::INITIAL_DELAY;
-                consecutive_failures = 0;
-            }
-
-            let detail = match &result {
-                Ok(()) => "stream ended".to_owned(),
-                Err(e) => format!("{e:#}"),
-            };
-            if consecutive_failures == 0 {
-                tracing::warn!("bluez event watcher stopped: {detail}");
-            } else {
-                tracing::debug!(
-                    failures = consecutive_failures,
-                    "bluez event watcher stopped: {detail}"
-                );
-            }
-            consecutive_failures = consecutive_failures.saturating_add(1);
-
-            tokio::time::sleep(delay).await;
-            delay = backoff::next_delay(delay);
-        }
+    supervise("bluez event watcher", ctx, move |conn| {
+        watch_events_inner(refresh.clone(), conn, SIGNAL_DEBOUNCE)
     });
 }
 
@@ -627,9 +596,9 @@ mod bus_tests {
     use zbus::zvariant::Value;
 
     use super::watch_events_inner;
-    use crate::app::refresh::{RefreshSignal, RefreshWaiter};
     use crate::bus_test::isolated;
-    use crate::discovery::Context;
+    use crate::refresh::{RefreshSignal, RefreshWaiter};
+    use crate::sources::Context;
 
     const DEBOUNCE: Duration = Duration::from_millis(300);
     /// Room for a signal to cross the bus and the watcher to act on it.

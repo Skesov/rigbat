@@ -3,19 +3,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::i18n::{self, Lang, fl, loader};
+use crate::domain::{DisplayMode, TrayMode};
+use crate::i18n::{self, Lang};
 
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_LOW_THRESHOLD: u8 = 20;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DisplayMode {
-    #[default]
-    IconOnly,
-    PercentOnly,
-    PercentInIcon,
-}
 
 /// Per-device poll interval and low-threshold overrides.
 /// Missing fields fall back to the global `Config` values.
@@ -24,14 +16,6 @@ pub enum DisplayMode {
 pub struct DeviceSettings {
     pub poll_interval_secs: Option<u64>,
     pub low_threshold: Option<u8>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrayMode {
-    #[default]
-    PrimaryOnly, // one aggregate icon (default)
-    PerDevice, // one icon per shown device
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,25 +109,6 @@ impl Default for Config {
             low_threshold: DEFAULT_LOW_THRESHOLD,
             device_overrides: HashMap::new(),
             language: None,
-        }
-    }
-}
-
-impl DisplayMode {
-    /// All display modes in display order, used to build the Settings menu.
-    pub const ALL: [DisplayMode; 3] = [
-        DisplayMode::IconOnly,
-        DisplayMode::PercentOnly,
-        DisplayMode::PercentInIcon,
-    ];
-
-    /// Human-readable label used in the settings window radio group.
-    pub fn label(self, lang: Lang) -> String {
-        let l = loader(lang);
-        match self {
-            DisplayMode::IconOnly => fl!(l, "display-icon-only"),
-            DisplayMode::PercentOnly => fl!(l, "display-percent-only"),
-            DisplayMode::PercentInIcon => fl!(l, "display-percent-in-icon"),
         }
     }
 }
@@ -634,44 +599,6 @@ mod tests {
         assert_eq!(cfg.shown_devices, vec!["mouse".to_string()]);
         assert!(cfg.hidden_devices.is_empty());
         std::fs::remove_file(&path).unwrap();
-    }
-
-    #[test]
-    fn display_mode_all_has_three_variants() {
-        assert_eq!(DisplayMode::ALL.len(), 3);
-    }
-
-    #[test]
-    fn display_mode_all_contains_each_variant() {
-        assert!(DisplayMode::ALL.contains(&DisplayMode::IconOnly));
-        assert!(DisplayMode::ALL.contains(&DisplayMode::PercentOnly));
-        assert!(DisplayMode::ALL.contains(&DisplayMode::PercentInIcon));
-    }
-
-    #[test]
-    fn display_mode_label_non_empty() {
-        for lang in Lang::ALL {
-            for mode in DisplayMode::ALL {
-                assert!(
-                    !mode.label(lang).is_empty(),
-                    "label for {mode:?} is empty in {lang:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn display_mode_label_values() {
-        assert_eq!(DisplayMode::IconOnly.label(Lang::En), "Battery icon only");
-        assert_eq!(
-            DisplayMode::PercentOnly.label(Lang::En),
-            "Percentage as text"
-        );
-        assert_eq!(
-            DisplayMode::PercentInIcon.label(Lang::En),
-            "Percentage inside icon"
-        );
-        assert_eq!(DisplayMode::IconOnly.label(Lang::Ru), "Только иконка");
     }
 
     #[test]

@@ -72,7 +72,7 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
 
 ## Key decisions
 
-- **Concurrency:** `tokio`, message-passing, no `Mutex` on shared data (`disallowed-types` in `clippy.toml`). Supervisor owns state; data flows through `mpsc` (readings) and `watch` (to tray, and for the refresh signal — a generation counter, `app::refresh::RefreshSignal`, not `Notify`, whose `notify_waiters()` drops triggers fired mid-poll). Each source is a separate task with its own interval; a panicking source is detected on the next discovery sweep (`is_finished()`) and respawned, not left silently dead.
+- **Concurrency:** `tokio`, message-passing, no `Mutex` on shared data (`disallowed-types` in `clippy.toml`). Supervisor owns state; data flows through `mpsc` (readings) and `watch` (to tray, and for the refresh signal — a generation counter, `refresh::RefreshSignal`, not `Notify`, whose `notify_waiters()` drops triggers fired mid-poll). Each source is a separate task with its own interval; a panicking source is detected on the next discovery sweep (`is_finished()`) and respawned, not left silently dead.
 - **Source port:** `trait BatterySource { async fn poll(&mut self) -> Result<BatteryReading> }`. Handle policy is not universal — it follows how the device talks, which is the vendor's choice, not rigbat's: a **request/response** device (write a query, read the echo — SteelSeries) holds its handle for the source's whole lifetime, because reopening per poll can deadlock it mid-exchange; a **stream-only** device (pushes input reports unprompted — 8BitDo in DInput at 1000 Hz) opens per poll and closes, because holding the handle open just queues reports into the kernel's ring for the whole interval between polls, almost all discarded, and there is nothing to deadlock since nothing is written. A new backend establishes which kind it faces — read the report descriptor, watch whether the device sends anything unprompted — before picking a policy; neither is the default.
 - **Tray:** `ksni`, SNI-only. XEmbed is not embedded — closed by external `snixembed`. No GTK dependency.
 - **Icon:** render behind the `IconRenderer -> Vec<ksni::Icon>` port (multiple sizes for HiDPI). Implementation in `tiny-skia`; migration to SVG/resvg is a new implementation behind the same port.
@@ -95,12 +95,16 @@ Full rationale, data flow, and contracts: [`docs/architecture.md`](docs/architec
 ```text
 src/
 ├── domain/        # types, classify, guess_kind, freedesktop_icon_name, estimate,
-│                 # roster policy, device text (state_str/format_age/entry line)
-├── sources/       # BatterySource + BatteryBackend; sysfs/bluez/steelseries/eightbitdo
-├── discovery/     # discover_all + registry::backends() + Context (shared system bus) + backoff
+│                 # roster policy, device text (state_str/format_age/entry line),
+│                 # TrayState, DisplayMode/TrayMode
+├── refresh.rs     # RefreshSignal: "re-poll and re-discover now" generation counter
+├── sources/       # BatterySource + BatteryBackend + Context (shared system bus) +
+│                 # supervise (bus-watcher retry); sysfs/bluez/steelseries/eightbitdo
+├── discovery/     # discover_all + registry::backends()
 ├── cli/           # output adapter: table / --json / --wide / --waybar
 ├── tray/          # ksni items + state service for the dashboard
 ├── icon/          # IconRenderer (tiny-skia) + device-type corner glyph, shared by tray/dashboard
+├── gui/           # shared egui theme for dashboard and settings
 ├── dashboard/     # eframe device overview (separate process, left click)
 ├── ipc/           # session-bus names, Snapshot contract, proxies, single-instance claim
 ├── appearance/    # theme from xdg-portal (light/dark)
@@ -110,14 +114,19 @@ src/
 ├── autostart/     # ~/.config/autostart/rigbat.desktop + systemd user unit state
 ├── doctor/        # `rigbat doctor`: setup checks with a fix per problem
 ├── i18n/          # Lang, per-language Fluent loaders, locale detection (catalogues in /i18n)
-├── app/           # poll_once + Supervisor (owns discovery) + refresh signal + wiring
+├── app/           # poll_once + Supervisor (owns discovery) + wiring
 ├── state/         # SQLite device inventory + reading history (XDG_STATE_HOME)
 └── config/        # XDG ~/.config/rigbat/config.json
 ```
 
-Dependencies point inward: `domain` does not import `zbus`/`tiny-skia`/`nix`, and no adapter
-imports another adapter — text or policy that `cli`, `tray` and `settings` all render lives in
-`domain`, not in whichever surface happened to need it first.
+Dependencies point inward: `domain` imports only `i18n` and no infrastructure crate
+(`zbus`/`tiny-skia`/`nix`/…), and no adapter imports another adapter — text or policy that
+`cli`, `tray` and `settings` all render lives in `domain`, not in whichever surface happened to
+need it first. Adapters may use `domain`, `refresh`, `config` and the shared ports (`i18n`,
+`icon`, `ipc`, `gui`, `appearance`), which themselves never import `config`; `main.rs`, `app`
+and `doctor` are the composition roots. The few allowed sideways edges (`discovery → sources`,
+`session → sources`, `settings` wiring its own process) are listed in `tests/architecture.rs`,
+which fails on any other edge and on any cycle.
 
 ## Conventions
 

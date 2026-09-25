@@ -1,12 +1,8 @@
-pub mod backoff;
-pub mod context;
 pub mod registry;
-
-pub use context::Context;
 
 use futures_util::future::join_all;
 
-use crate::sources::BatterySource;
+use crate::sources::{BatterySource, Context};
 
 /// One backend's outcome for a single discovery sweep: the sources it found,
 /// or the error that stopped it from finding anything this round. Kept

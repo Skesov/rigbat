@@ -7,13 +7,15 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::AbortHandle;
 use tokio::time::sleep;
 
-use crate::app::refresh::RefreshSignal;
 use crate::config::Config;
-use crate::discovery::{BackendSweep, Context};
+use crate::discovery::BackendSweep;
 use crate::domain::estimate::estimate as estimate_remaining;
-use crate::domain::{BatteryReading, DeviceId, DeviceInfo, DeviceState, Estimate, Presence};
+use crate::domain::{
+    BatteryReading, DeviceId, DeviceInfo, DeviceState, Estimate, Presence, TrayState,
+};
+use crate::refresh::RefreshSignal;
 use crate::sources::hidraw::NodeReassigned;
-use crate::sources::{AccessDenied, BatterySource};
+use crate::sources::{AccessDenied, BatterySource, Context};
 use crate::state;
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
@@ -39,11 +41,6 @@ const DISCONNECTED_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 /// Persisting it would mean writing a data file and reasoning about clock
 /// jumps across reboots, disproportionate to a tooltip hint.
 const HISTORY_CAP: usize = 20;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrayState {
-    pub devices: Vec<DeviceState>,
-}
 
 pub struct Supervisor;
 

@@ -3,9 +3,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
-use crate::app::supervisor::TrayState;
 use crate::config::Config;
-use crate::domain::{DeviceId, Presence, PrimaryStatus, classify};
+use crate::domain::{DeviceId, Presence, PrimaryStatus, TrayState, classify};
 use crate::i18n::{fl, loader};
 
 /// Upper bound on a single `notify` call. The D-Bus default reply timeout is
@@ -281,11 +280,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{LowTracker, NOTIFY_TIMEOUT, compute_pending};
-    use crate::app::supervisor::TrayState;
     use crate::config::Config;
     use crate::domain::{
         BatteryReading, ChargeState, DeviceId, DeviceInfo, DeviceKind, DeviceState, Presence,
-        Transport,
+        Transport, TrayState,
     };
 
     #[test]

@@ -1,5 +1,4 @@
-use crate::config::DisplayMode;
-use crate::domain::{DeviceKind, PrimaryStatus};
+use crate::domain::{DeviceKind, DisplayMode, PrimaryStatus};
 use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform,
 };
@@ -711,7 +710,7 @@ mod tests {
     /// modes; this asserts no digit pixel is lost at any published size.
     #[test]
     fn kind_glyph_never_erases_a_digit() {
-        use crate::config::DisplayMode;
+        use crate::domain::DisplayMode;
 
         let theme = Theme::dark();
         let color = {
@@ -754,7 +753,7 @@ mod tests {
         }
     }
     use super::*;
-    use crate::config::DisplayMode;
+    use crate::domain::DisplayMode;
 
     fn default_sizes() -> Vec<u32> {
         TinySkiaRenderer::default().sizes.clone()

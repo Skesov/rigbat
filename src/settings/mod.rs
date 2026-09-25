@@ -11,8 +11,8 @@ use eframe::egui;
 use egui_extras::{Column, Size, StripBuilder, TableBuilder};
 
 use crate::autostart;
-use crate::config::{self, Config, DeviceSettings, DisplayMode, TrayMode};
-use crate::domain::{DeviceInfo, PollOutcome, Presence, PrimaryStatus};
+use crate::config::{self, Config, DeviceSettings};
+use crate::domain::{DeviceInfo, DisplayMode, PollOutcome, Presence, PrimaryStatus, TrayMode};
 use crate::gui;
 use crate::i18n::{self, Lang, fl, loader};
 use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
@@ -120,7 +120,7 @@ struct SettingsApp {
     /// entered blockingly from `ui()`, which runs on the main thread.
     rt: Arc<tokio::runtime::Runtime>,
     /// Shared across scans so the system-bus connection they open is memoized.
-    discovery_ctx: Arc<crate::discovery::Context>,
+    discovery_ctx: Arc<crate::sources::Context>,
     /// `Some` while a scan's result is outstanding; taken (and cleared) once
     /// `try_recv` yields something.
     scan_rx: Option<mpsc::Receiver<ScanResult>>,
@@ -1281,7 +1281,7 @@ pub fn run() -> anyhow::Result<()> {
     // treats a missing store as an optimisation, never a dependency.
     let store = state::open();
     let (rt, appearance) = start()?;
-    let discovery_ctx = Arc::new(crate::discovery::Context::new());
+    let discovery_ctx = Arc::new(crate::sources::Context::new());
     let text_scale = appearance.borrow().text_scale;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1765,7 +1765,7 @@ mod tests {
                     .build()
                     .expect("building test tokio runtime"),
             ),
-            discovery_ctx: Arc::new(crate::discovery::Context::new()),
+            discovery_ctx: Arc::new(crate::sources::Context::new()),
             scan_rx: None,
             scanning: false,
             tab: Tab::General,

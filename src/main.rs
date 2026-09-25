@@ -16,6 +16,7 @@ mod i18n;
 mod icon;
 mod ipc;
 mod notifications;
+mod refresh;
 mod session;
 mod settings;
 mod sources;
@@ -282,7 +283,7 @@ async fn async_main(invocation: Invocation) {
         return;
     }
 
-    let ctx = discovery::Context::new();
+    let ctx = sources::Context::new();
     let sweeps = discovery::discover_all(&ctx).await;
     let sources = discovery::flatten(sweeps);
 
@@ -302,11 +303,11 @@ async fn async_main(invocation: Invocation) {
 /// than a resolved connection. Both are optimisations, never dependencies —
 /// the periodic discovery sweep is the safety net — so a missing or later
 /// lost bus never delays or fails startup: each watcher runs its own
-/// supervising retry loop (`discovery::backoff`) and keeps trying to dial in
+/// supervising retry loop (`sources::supervise`) and keeps trying to dial in
 /// through `ctx.system_bus()` in the background.
 fn spawn_bus_dependent_tasks(
-    ctx: std::sync::Arc<discovery::Context>,
-    refresh: crate::app::refresh::RefreshSignal,
+    ctx: std::sync::Arc<sources::Context>,
+    refresh: crate::refresh::RefreshSignal,
 ) {
     crate::session::watch_resume(refresh.clone(), ctx.clone());
     crate::sources::bluez::watch_events(refresh, ctx);
@@ -355,7 +356,7 @@ async fn run_tray() {
         crate::state::spawn_retention(store.clone());
     }
 
-    let ctx = std::sync::Arc::new(discovery::Context::new());
+    let ctx = std::sync::Arc::new(sources::Context::new());
     let (rx, refresh) = app::supervisor::Supervisor::spawn(
         config_tx.clone(),
         ctx.clone(),
@@ -426,7 +427,7 @@ async fn run_waybar() {
     let (config_tx, _config_rx) = tokio::sync::watch::channel(config);
     crate::config::watch_file(config_tx.clone());
 
-    let ctx = std::sync::Arc::new(discovery::Context::new());
+    let ctx = std::sync::Arc::new(sources::Context::new());
     // No state store here: only `rigbat tray` writes to it (see
     // `src/state/mod.rs`'s module doc and `run_tray`).
     let (mut rx, refresh) = app::supervisor::Supervisor::spawn(
@@ -748,11 +749,10 @@ mod tests {
 mod featured_tests {
     use std::time::{Duration, Instant};
 
-    use crate::app::supervisor::TrayState;
     use crate::config::Config;
     use crate::domain::{
         BatteryReading, ChargeState, DeviceInfo, DeviceKind, DeviceState, Estimate, Presence,
-        PrimaryStatus, Transport,
+        PrimaryStatus, Transport, TrayState,
     };
 
     fn device(

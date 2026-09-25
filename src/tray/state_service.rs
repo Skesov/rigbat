@@ -6,11 +6,10 @@ use tokio::sync::watch;
 use zbus::object_server::SignalEmitter;
 
 use super::manager::featured_id;
-use crate::app::refresh::RefreshSignal;
-use crate::app::supervisor::TrayState;
-use crate::config::{Config, TrayMode};
-use crate::domain::{DeviceState, Estimate, device_status, is_visible};
+use crate::config::Config;
+use crate::domain::{DeviceState, Estimate, TrayMode, TrayState, device_status, is_visible};
 use crate::ipc::{DeviceCard, Snapshot, TRAY_PATH};
+use crate::refresh::RefreshSignal;
 
 /// Every device, classified exactly as its tray icon is; hidden ones apart.
 pub fn snapshot(state: &TrayState, cfg: &Config, now: Instant) -> Snapshot {

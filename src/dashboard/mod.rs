@@ -626,10 +626,9 @@ fn open_settings() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DisplayMode;
     use crate::domain::{
-        CHARGING_SIGN, ChargeState, DeviceKind, LOW_SIGN, Transport, format_age, format_coarse,
-        state_label,
+        CHARGING_SIGN, ChargeState, DeviceKind, DisplayMode, LOW_SIGN, Transport, format_age,
+        format_coarse, state_label,
     };
     use crate::egui_test::{assert_single_lines_without_overlap, fully_painted_text_at};
 
@@ -971,13 +970,12 @@ mod bus_tests {
     use tokio::sync::watch;
 
     use super::*;
-    use crate::app::refresh::RefreshSignal;
-    use crate::app::supervisor::TrayState;
     use crate::bus_test::isolated;
     use crate::config::Config;
     use crate::domain::{
-        BatteryReading, ChargeState, DeviceInfo, DeviceState, Estimate, Transport,
+        BatteryReading, ChargeState, DeviceInfo, DeviceState, Estimate, Transport, TrayState,
     };
+    use crate::refresh::RefreshSignal;
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 

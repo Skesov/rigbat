@@ -129,8 +129,7 @@ fn row(card: DeviceCard) -> Option<(DeviceInfo, PollOutcome)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DisplayMode;
-    use crate::domain::{ChargeState, DeviceKind, PrimaryStatus, Transport};
+    use crate::domain::{ChargeState, DeviceKind, DisplayMode, PrimaryStatus, Transport};
 
     fn card(name: &str, presence: Presence, percent: Option<u8>) -> DeviceCard {
         DeviceCard {
@@ -190,11 +189,10 @@ mod bus_tests {
     use tokio::sync::watch;
 
     use super::*;
-    use crate::app::refresh::RefreshSignal;
-    use crate::app::supervisor::TrayState;
     use crate::bus_test::{eventually, isolated};
     use crate::config::Config;
-    use crate::domain::{ChargeState, DeviceKind, DeviceState, Estimate, Transport};
+    use crate::domain::{ChargeState, DeviceKind, DeviceState, Estimate, Transport, TrayState};
+    use crate::refresh::RefreshSignal;
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 

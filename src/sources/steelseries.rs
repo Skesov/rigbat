@@ -22,7 +22,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
 
-use super::{BatteryBackend, BatterySource, hidraw};
+use super::{BatteryBackend, BatterySource, Context, hidraw};
 
 // ── Protocol constants ────────────────────────────────────────────────────────
 
@@ -85,10 +85,7 @@ impl BatteryBackend for SteelSeriesBackend {
         Some(&FAMILY)
     }
 
-    async fn discover(
-        &self,
-        _ctx: &crate::discovery::Context,
-    ) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
+    async fn discover(&self, _ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
         let devices = hidraw::discover(&FAMILY).await?;
         Ok(devices
             .into_iter()

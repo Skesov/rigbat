@@ -5,16 +5,15 @@ use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{MenuItem, ToolTip, Tray, TrayMethods};
 use tokio::sync::watch;
 
-use crate::app::refresh::RefreshSignal;
-use crate::app::supervisor::TrayState;
 use crate::appearance::ColorScheme;
-use crate::config::{Config, TrayMode};
+use crate::config::Config;
 use crate::domain::{
-    DeviceId, DeviceState, PrimaryStatus, Roster, device_line, device_status,
+    DeviceId, DeviceState, PrimaryStatus, Roster, TrayMode, TrayState, device_line, device_status,
     freedesktop_icon_name, is_visible,
 };
 use crate::i18n::{Lang, fl, loader};
 use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
+use crate::refresh::RefreshSignal;
 
 // ---------------------------------------------------------------------------
 // sni_id: a stable, unique SNI item id per device
@@ -510,11 +509,10 @@ mod tests {
         ColorScheme, MenuItem, RefreshSignal, RigbatTray, SaveConfig, TinySkiaRenderer, Tray as _,
         desired_keys, featured_id, resolve_for, shown_ids, sni_id, watch,
     };
-    use crate::app::supervisor::TrayState;
-    use crate::config::{Config, TrayMode};
+    use crate::config::Config;
     use crate::domain::{
         BatteryReading, ChargeState, DeviceId, DeviceInfo, DeviceKind, DeviceState, Presence,
-        PrimaryStatus, RETAINED_ICON_MAX_AGE, Transport,
+        PrimaryStatus, RETAINED_ICON_MAX_AGE, Transport, TrayMode, TrayState,
     };
     use std::time::Duration;
 

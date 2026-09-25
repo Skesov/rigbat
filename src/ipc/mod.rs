@@ -5,8 +5,7 @@ pub mod single_instance;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::DisplayMode;
-use crate::domain::{ChargeState, DeviceKind, Presence, PrimaryStatus, Transport};
+use crate::domain::{ChargeState, DeviceKind, DisplayMode, Presence, PrimaryStatus, Transport};
 
 pub const TRAY_NAME: &str = "org.rigbat.Tray";
 pub const TRAY_PATH: &str = "/org/rigbat/Tray";

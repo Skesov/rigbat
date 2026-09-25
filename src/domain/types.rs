@@ -275,6 +275,12 @@ impl PollOutcome {
     }
 }
 
+/// Every tracked device, as the supervisor publishes it to the surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrayState {
+    pub devices: Vec<DeviceState>,
+}
+
 /// A device's presence and last-known reading, retained across polling gaps
 /// and disconnects.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,13 +1,16 @@
 use std::path::PathBuf;
 
-use crate::discovery::Context;
 use crate::domain::{BatteryReading, DeviceInfo};
 
 pub mod bluez;
+pub mod context;
 pub mod eightbitdo;
 pub mod hidraw;
 pub mod steelseries;
+pub mod supervise;
 pub mod sysfs;
+
+pub use context::Context;
 
 #[async_trait::async_trait]
 pub trait BatterySource: Send {

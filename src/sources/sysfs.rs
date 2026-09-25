@@ -4,7 +4,7 @@ use anyhow::Context as _;
 
 use crate::domain::{BatteryReading, ChargeState, DeviceInfo, Transport, guess_kind};
 
-use super::{BatteryBackend, BatterySource, hidraw};
+use super::{BatteryBackend, BatterySource, Context, hidraw};
 
 pub struct SysfsSource {
     info: DeviceInfo,
@@ -217,10 +217,7 @@ impl BatteryBackend for SysfsBackend {
         "sysfs"
     }
 
-    async fn discover(
-        &self,
-        _ctx: &crate::discovery::Context,
-    ) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
+    async fn discover(&self, _ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
         // The walk is `std::fs` on a sysfs tree: fast, but still blocking,
         // and it runs on the same runtime as every source task. Off-thread for
         // the same reason `poll` is (R35): how long a sysfs read takes is the

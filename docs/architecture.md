@@ -22,25 +22,37 @@ icons, or GUI widgets. The surfaces are adapters on top of it.
 
 ## Layering and dependency direction
 
-Dependencies point inward. `domain` is pure and imports no infrastructure crate
-(`zbus`/`tiny-skia`/`nix`/`eframe`). Each outer layer may depend on inner layers, never the
-reverse.
+Dependencies point inward. `domain` is pure: it imports only `i18n` and no infrastructure crate
+(`zbus`/`tiny-skia`/`nix`/`eframe`/`rusqlite`/`tokio`). Each outer layer may depend on inner
+layers, never the reverse.
 
 ```text
         domain            pure types + logic (DeviceInfo, BatteryReading, PrimaryStatus,
           ▲               classify, guess_kind, freedesktop_icon_name, DeviceId, estimate,
-          │               roster policy, device text)
+          │               roster policy, device text, TrayState, DisplayMode/TrayMode)
         i18n              Fluent catalogues + Lang; pure, so domain may use it
+        refresh           RefreshSignal, a tokio-only primitive with no crate imports
           │
-        sources           BatterySource / BatteryBackend traits + sysfs/bluez/
-          ▲               steelseries/eightbitdo impls
+        config            config.json: user intent, serialized; imports domain + i18n
+          │
+   icon / ipc / gui / appearance   shared ports: domain, refresh and each other, never config
+          │
+        sources           BatterySource / BatteryBackend traits + Context + supervise +
+          ▲               sysfs/bluez/steelseries/eightbitdo impls
         discovery         registry of backends + discover_all()
           ▲
           app             poll_once (list/--json) and Supervisor (tray, --waybar): orchestration
           ▲
-   cli / tray / settings  output + input adapters (table/json, ksni icons, egui window)
-   appearance / session / notifications / config / state / autostart   side services
+   cli / tray / dashboard / settings   output + input adapters (table/json, ksni, egui windows)
+   session / notifications / state / autostart                side services
 ```
+
+`main.rs`, `app` and `doctor` are the composition roots and may import anything. Every other
+module is checked by `tests/architecture.rs`, which strips `#[cfg(test)]` code and fails on a
+dependency cycle or an edge outside these rules. Its few allowed sideways edges carry their
+reason: `discovery → sources` (the registry), `session → sources` (the shared system bus it
+listens on) and `settings` wiring its own process (`app::poll_once`, `discovery`, `state`,
+`autostart`).
 
 New infrastructure (a D-Bus client, a HID transport, a renderer) goes behind a **port** — a
 trait in an inner layer — with the concrete dependency living in the implementation. This keeps
@@ -73,7 +85,7 @@ translated.
   unprompted — 8BitDo in DInput) opens per poll and closes, since holding the handle open just
   queues discarded reports into the kernel's ring and nothing is written to deadlock. A new
   backend determines which kind it is before choosing.
-- **`BatteryBackend`** (`sources`): `async fn discover(&self, ctx: &discovery::Context) ->
+- **`BatteryBackend`** (`sources`): `async fn discover(&self, ctx: &Context) ->
 anyhow::Result<Vec<Box<dyn BatterySource>>>`. Finds devices and constructs sources; `Err` is a
   failed sweep, distinct from `Ok(vec![])`. A hidraw backend also returns its `HidrawFamily`
   (vendor, models, battery interface) from `hidraw_family()`: the shared discovery in
@@ -81,7 +93,7 @@ anyhow::Result<Vec<Box<dyn BatterySource>>>`. Finds devices and constructs sourc
   listed in `discovery::registry::backends()`; what a backend must guarantee is the
   [backend contract](../CONTRIBUTING.md#backend-contract), and the steps to add one are its
   [checklists](../CONTRIBUTING.md#checklists). `Context` is the dependency container built at the
-  composition root: it holds the process-wide system-bus connection (`discovery/context.rs`),
+  composition root: it holds the process-wide system-bus connection (`sources/context.rs`),
   opened lazily on first use and re-dialled if it has since closed, so a `dbus-daemon` restart
   does not strand the BlueZ backend for the life of the process. A backend that needs no
   infrastructure ignores the parameter.
