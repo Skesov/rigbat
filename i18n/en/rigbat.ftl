@@ -22,6 +22,7 @@ age-days = { $count }d ago
 
 estimate-minutes = ~{ $count }m
 estimate-hours = ~{ $count }h
+estimate-over-days = >{ $count }d
 
 entry-online = { $name }: { $percent }%  { $state }
 entry-online-estimate = { $name }: { $percent }%  { $state }  { $estimate } left

@@ -1,18 +1,18 @@
 //! Serves the tray's device state to `rigbat dashboard` as `org.rigbat.Tray1`.
 
-use std::time::Instant;
-
 use tokio::sync::watch;
 use zbus::object_server::SignalEmitter;
 
 use super::resolve::featured_id;
 use crate::config::Config;
-use crate::domain::{DeviceState, Estimate, TrayMode, TrayState, device_status, is_visible};
+use crate::domain::{
+    BootTime, DeviceState, Estimate, TrayMode, TrayState, device_status, is_visible,
+};
 use crate::ipc::{DeviceCard, Snapshot, TRAY_PATH};
 use crate::refresh::RefreshSignal;
 
 /// Every device, classified exactly as its tray icon is; hidden ones apart.
-pub fn snapshot(state: &TrayState, cfg: &Config, now: Instant) -> Snapshot {
+pub fn snapshot(state: &TrayState, cfg: &Config, now: BootTime) -> Snapshot {
     let featured = featured_id(state, cfg, now);
     let card = |d: &DeviceState, in_tray: bool| {
         let (status, stale) = device_status(d, cfg.effective_low_threshold(&d.info.name));
@@ -31,7 +31,7 @@ pub fn snapshot(state: &TrayState, cfg: &Config, now: Instant) -> Snapshot {
                 .map(|seen| now.saturating_duration_since(seen).as_secs()),
             remaining_secs: match d.estimate {
                 Estimate::Remaining(left) => Some(left.as_secs()),
-                Estimate::Unknown | Estimate::Charging => None,
+                Estimate::Unknown => None,
             },
             in_tray,
         }
@@ -66,7 +66,11 @@ struct StateService {
 #[zbus::interface(name = "org.rigbat.Tray1")]
 impl StateService {
     fn state(&self) -> zbus::fdo::Result<String> {
-        let snapshot = snapshot(&self.rx.borrow(), &self.config.borrow(), Instant::now());
+        let snapshot = snapshot(
+            &self.rx.borrow(),
+            &self.config.borrow(),
+            crate::clock::now(),
+        );
         serde_json::to_string(&snapshot).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
@@ -126,7 +130,7 @@ mod tests {
         Transport,
     };
 
-    fn device(name: &str, presence: Presence, percent: u8, seen: Instant) -> DeviceState {
+    fn device(name: &str, presence: Presence, percent: u8, seen: BootTime) -> DeviceState {
         DeviceState {
             info: DeviceInfo {
                 name: name.to_owned(),
@@ -143,7 +147,7 @@ mod tests {
 
     #[test]
     fn hidden_devices_are_listed_apart() {
-        let now = Instant::now();
+        let now = crate::clock::now();
         let state = TrayState {
             devices: vec![
                 device("mouse", Presence::Online, 80, now),
@@ -163,7 +167,7 @@ mod tests {
 
     #[test]
     fn a_retained_reading_is_classified_like_its_tray_icon() {
-        let seen = Instant::now();
+        let seen = crate::clock::now();
         let now = seen + Duration::from_secs(600);
         let state = TrayState {
             devices: vec![device("mouse", Presence::Unreachable, 15, seen)],
@@ -177,7 +181,7 @@ mod tests {
 
     #[test]
     fn in_tray_follows_the_tray_mode() {
-        let now = Instant::now();
+        let now = crate::clock::now();
         let state = TrayState {
             devices: vec![
                 device("mouse", Presence::Online, 80, now),
@@ -211,7 +215,7 @@ mod tests {
     /// another device shares its name.
     #[test]
     fn in_tray_marks_one_of_two_same_named_devices() {
-        let now = Instant::now();
+        let now = crate::clock::now();
         let mut bluetooth = device("mouse", Presence::Online, 40, now);
         bluetooth.info.transport = Transport::Bluetooth;
         let state = TrayState {
@@ -253,7 +257,7 @@ mod bus_tests {
                 locator: None,
             },
             last_reading: Some(BatteryReading::new(percent, ChargeState::Discharging)),
-            last_seen: Some(Instant::now()),
+            last_seen: Some(crate::clock::now()),
             presence: Presence::Online,
             estimate: Estimate::Unknown,
         }

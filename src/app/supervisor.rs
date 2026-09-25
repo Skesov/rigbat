@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 use tokio::task::AbortHandle;
@@ -12,7 +12,8 @@ use crate::config::Config;
 use crate::discovery::BackendSweep;
 use crate::domain::estimate::estimate as estimate_remaining;
 use crate::domain::{
-    BatteryReading, DeviceId, DeviceInfo, DeviceKind, DeviceState, Estimate, Presence, TrayState,
+    BatteryReading, BootTime, DeviceId, DeviceInfo, DeviceKind, DeviceState, Estimate, Presence,
+    TrayState,
 };
 use crate::refresh::RefreshSignal;
 use crate::sources::hidraw::NodeReassigned;
@@ -38,9 +39,7 @@ const DISCONNECTED_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 /// (see `push_reading`), so this is naturally small; the cap exists so a
 /// device left running for weeks cannot grow it without bound. 20 points is
 /// generous for the multi-hour windows the estimator needs while staying a
-/// few bytes per device. History is in-memory only — a restart starts over.
-/// Persisting it would mean writing a data file and reasoning about clock
-/// jumps across reboots, disproportionate to a tooltip hint.
+/// few bytes per device. A new source is seeded from the state store.
 const HISTORY_CAP: usize = 20;
 
 pub struct Supervisor;
@@ -155,13 +154,13 @@ impl Supervisor {
 struct DeviceEntry {
     info: DeviceInfo,
     last_reading: Option<BatteryReading>,
-    last_seen: Option<Instant>,
+    last_seen: Option<BootTime>,
     presence: Presence,
     consecutive_failures: u32,
     /// Percent-change points feeding the remaining-time estimate. Only a
     /// point where the percent differs from the previous one is kept — see
     /// `push_reading`.
-    battery_history: Vec<(Instant, u8)>,
+    battery_history: Vec<(BootTime, u8)>,
     /// Name of the `BatteryBackend` that last (re)discovered this device —
     /// how `reconcile` decides whether a vanished entry is safe to retire.
     /// Not derived from `DeviceId`/`transport`: `Transport::Hidraw` is
@@ -174,13 +173,13 @@ struct DeviceEntry {
 impl DeviceEntry {
     /// Records a new percent reading into `battery_history`. See
     /// `push_history_point` for the reduction rule.
-    fn push_reading(&mut self, now: Instant, percent: u8) {
+    fn push_reading(&mut self, now: BootTime, percent: u8) {
         push_history_point(&mut self.battery_history, now, percent);
     }
 
-    fn estimate(&self, now: Instant) -> Estimate {
+    fn estimate(&self) -> Estimate {
         match self.last_reading {
-            Some(r) => estimate_remaining(&self.battery_history, now, r),
+            Some(r) => estimate_remaining(&self.battery_history, r),
             None => Estimate::Unknown,
         }
     }
@@ -198,7 +197,7 @@ impl DeviceEntry {
 /// freshly (re)discovered device's history from the state store
 /// (`seed_history`), so a reading replayed from disk is reduced exactly the
 /// way a live one would have been.
-fn push_history_point(history: &mut Vec<(Instant, u8)>, now: Instant, percent: u8) {
+fn push_history_point(history: &mut Vec<(BootTime, u8)>, now: BootTime, percent: u8) {
     if let Some(&(_, last)) = history.last() {
         match percent.cmp(&last) {
             std::cmp::Ordering::Equal => return,
@@ -221,18 +220,14 @@ fn push_history_point(history: &mut Vec<(Instant, u8)>, now: Instant, percent: u
 /// increase partway through the persisted history still clears what came
 /// before it, exactly as it would live.
 ///
-/// A stored point older than what this process's monotonic clock can
-/// express (`Instant::checked_sub` returns `None` when the process has not
-/// been up long enough to represent a point that old) is dropped rather than
-/// clamped to `now`: clamping would misrepresent its age and could distort
-/// the estimate's rate calculation, whereas dropping it just means seeding
-/// starts from a shorter, still-honest window.
+/// Each stored wall-clock timestamp is converted once, by its age, to a
+/// `BootTime` — negative for a reading from before this boot.
 async fn seed_history(
     store: &state::Store,
     id: &DeviceId,
-    now: Instant,
+    now: BootTime,
     now_unix: i64,
-) -> Vec<(Instant, u8)> {
+) -> Vec<(BootTime, u8)> {
     let rows = match store.recent_readings(id, HISTORY_CAP).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -243,10 +238,10 @@ async fn seed_history(
     let mut history = Vec::new();
     for (at, percent) in rows.into_iter().rev() {
         let age_secs = now_unix.saturating_sub(at).max(0) as u64;
-        let Some(instant) = now.checked_sub(Duration::from_secs(age_secs)) else {
+        let Some(at) = now.checked_sub(Duration::from_secs(age_secs)) else {
             continue;
         };
-        push_history_point(&mut history, instant, percent);
+        push_history_point(&mut history, at, percent);
     }
     history
 }
@@ -336,7 +331,7 @@ impl DeviceRegistry {
         };
         match reading {
             Some(r) => {
-                let now = Instant::now();
+                let now = crate::clock::now();
                 entry.push_reading(now, r.percent);
                 entry.last_reading = Some(r);
                 entry.last_seen = Some(now);
@@ -375,7 +370,7 @@ impl DeviceRegistry {
         ctx: &SourceCtx,
     ) -> Vec<(String, String)> {
         let mut renames: Vec<(String, String)> = Vec::new();
-        let now_instant = Instant::now();
+        let now_boot = crate::clock::now();
         let now_unix = state::now_unix();
 
         let mut found: Vec<(&'static str, Box<dyn BatterySource>)> = Vec::new();
@@ -403,7 +398,7 @@ impl DeviceRegistry {
         for (name, src) in found {
             fresh_ids.push(src.device().id());
             if let Some(rename) = self
-                .admit(src, name, seen.next(), now_instant, now_unix, ctx)
+                .admit(src, name, seen.next(), now_boot, now_unix, ctx)
                 .await
             {
                 renames.push(rename);
@@ -412,7 +407,7 @@ impl DeviceRegistry {
 
         self.demote_crashed(&fresh_ids, &succeeded_backends);
         self.retire_vanished(&fresh_ids, &succeeded_backends);
-        self.prune_stale(Instant::now());
+        self.prune_stale(crate::clock::now());
         renames
     }
 
@@ -444,7 +439,7 @@ impl DeviceRegistry {
         src: Box<dyn BatterySource>,
         name: &'static str,
         seen: Option<state::Seen>,
-        now_instant: Instant,
+        now_boot: BootTime,
         now_unix: i64,
         ctx: &SourceCtx,
     ) -> Option<(String, String)> {
@@ -519,7 +514,7 @@ impl DeviceRegistry {
                 // `Disconnected` reuses the Occupied arm above and keeps
                 // whatever history it already has in memory instead.
                 let battery_history = match &self.store {
-                    Some(store) => seed_history(store, &id, now_instant, now_unix).await,
+                    Some(store) => seed_history(store, &id, now_boot, now_unix).await,
                     None => Vec::new(),
                 };
                 slot.insert(DeviceEntry {
@@ -635,14 +630,14 @@ impl DeviceRegistry {
     /// nothing to retain, so it is dropped on disconnect rather than waiting
     /// out the cap. `now` is a parameter so tests can age an entry without a
     /// wall-clock sleep.
-    fn prune_stale(&mut self, now: Instant) {
+    fn prune_stale(&mut self, now: BootTime) {
         let stale: Vec<DeviceId> = self
             .entries
             .iter()
             .filter(|(_, e)| e.presence == Presence::Disconnected)
             .filter(|(_, e)| match e.last_seen {
                 None => true,
-                Some(t) => now.duration_since(t) > DISCONNECTED_RETENTION,
+                Some(t) => now.saturating_duration_since(t) > DISCONNECTED_RETENTION,
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -666,7 +661,6 @@ impl DeviceRegistry {
     }
 
     fn snapshot(&self) -> Vec<DeviceState> {
-        let now = Instant::now();
         self.order
             .iter()
             .filter_map(|id| {
@@ -676,7 +670,7 @@ impl DeviceRegistry {
                     last_reading: entry.last_reading,
                     last_seen: entry.last_seen,
                     presence: entry.presence,
-                    estimate: entry.estimate(now),
+                    estimate: entry.estimate(),
                 })
             })
             .collect()
@@ -1249,7 +1243,7 @@ mod tests {
         info: &DeviceInfo,
         presence: Presence,
         last_reading: Option<BatteryReading>,
-        last_seen: Option<Instant>,
+        last_seen: Option<BootTime>,
         consecutive_failures: u32,
     ) {
         registry.order.push(info.id());
@@ -1391,7 +1385,7 @@ mod tests {
             &a,
             Presence::Online,
             Some(reading_discharging(80)),
-            Some(Instant::now()),
+            Some(crate::clock::now()),
             0,
         );
         registry.spawn(Box::new(ReassignedSource { info: a.clone() }), a.id(), &ctx);
@@ -1463,7 +1457,7 @@ mod tests {
             &a,
             Presence::Online,
             Some(reading_discharging(80)),
-            Some(Instant::now()),
+            Some(crate::clock::now()),
             0,
         );
         attach_task(&mut registry, &a.id());
@@ -1499,7 +1493,7 @@ mod tests {
             &a,
             Presence::Online,
             Some(reading_discharging(80)),
-            Some(Instant::now()),
+            Some(crate::clock::now()),
             0,
         );
         attach_task(&mut registry, &a.id());
@@ -1587,7 +1581,7 @@ mod tests {
             &a,
             Presence::Online,
             Some(reading_discharging(80)),
-            Some(Instant::now()),
+            Some(crate::clock::now()),
             0,
         );
 
@@ -1608,7 +1602,7 @@ mod tests {
             &a,
             Presence::Online,
             Some(reading_discharging(80)),
-            Some(Instant::now()),
+            Some(crate::clock::now()),
             0,
         );
 
@@ -1632,7 +1626,7 @@ mod tests {
             &a,
             Presence::Unreachable,
             Some(reading_discharging(80)),
-            Some(Instant::now()),
+            Some(crate::clock::now()),
             OFFLINE_AFTER_FAILURES - 1,
         );
 
@@ -2027,7 +2021,7 @@ mod tests {
     fn disconnected_entry_older_than_cap_is_pruned() {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
-        let last_seen = Instant::now();
+        let last_seen = crate::clock::now();
         insert_entry(
             &mut registry,
             &a,
@@ -2341,7 +2335,7 @@ mod tests {
     fn push_history_point_dedups_and_caps_like_live_polling() {
         // Exercises the free function directly (not just through
         // DeviceEntry::push_reading), since `seed_history` also drives it.
-        let base = Instant::now();
+        let base = crate::clock::now();
         let mut history = Vec::new();
         push_history_point(&mut history, base, 80);
         push_history_point(&mut history, base, 80); // duplicate, dropped

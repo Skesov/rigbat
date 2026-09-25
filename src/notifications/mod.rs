@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::watch;
 
 use crate::config::Config;
-use crate::domain::{DeviceId, Presence, PrimaryStatus, TrayState, classify};
+use crate::domain::{BootTime, DeviceId, Presence, PrimaryStatus, TrayState, classify};
 use crate::i18n::{fl, loader};
 
 /// Upper bound on a single `notify` call. The D-Bus default reply timeout is
@@ -45,7 +45,7 @@ trait Notifications {
 /// recent one counted (so a republished reading with the same timestamp does
 /// not advance the streak).
 struct LowStreak {
-    last_seen: Instant,
+    last_seen: BootTime,
     count: u8,
 }
 
@@ -75,7 +75,7 @@ impl LowTracker {
     /// carry the same name. Keyed by name their streaks would merge — one
     /// entry's recovery re-arming the other, one entry's reading confirming
     /// the other's crossing.
-    fn observe(&mut self, id: &DeviceId, is_low: bool, last_seen: Option<Instant>) -> bool {
+    fn observe(&mut self, id: &DeviceId, is_low: bool, last_seen: Option<BootTime>) -> bool {
         if !is_low {
             self.streaks.remove(id);
             self.notified.remove(id);
@@ -277,13 +277,13 @@ pub fn spawn(mut rx: watch::Receiver<TrayState>, config_rx: watch::Receiver<Conf
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::{LowTracker, NOTIFY_TIMEOUT, compute_pending};
     use crate::config::Config;
     use crate::domain::{
-        BatteryReading, ChargeState, DeviceId, DeviceInfo, DeviceKind, DeviceState, Presence,
-        Transport, TrayState,
+        BatteryReading, BootTime, ChargeState, DeviceId, DeviceInfo, DeviceKind, DeviceState,
+        Presence, Transport, TrayState,
     };
 
     #[test]
@@ -294,7 +294,7 @@ mod tests {
             low_threshold: 20,
             ..Config::default()
         };
-        let now = Instant::now();
+        let now = crate::clock::now();
         let state = TrayState {
             devices: vec![device_state_at(
                 "mouse",
@@ -323,14 +323,14 @@ mod tests {
     #[test]
     fn one_low_reading_does_not_notify() {
         let mut t = LowTracker::default();
-        let t0 = Instant::now();
+        let t0 = crate::clock::now();
         assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
     }
 
     #[test]
     fn two_distinct_low_readings_notify_exactly_once() {
         let mut t = LowTracker::default();
-        let t0 = Instant::now();
+        let t0 = crate::clock::now();
         let t1 = t0 + Duration::from_secs(60);
         assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
         assert!(t.observe(&test_id("mouse"), true, Some(t1)));
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn republished_same_reading_does_not_notify() {
         let mut t = LowTracker::default();
-        let t0 = Instant::now();
+        let t0 = crate::clock::now();
         assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
         // Same last_seen — a republication of the same reading, not a new one.
         assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn rearm_after_not_low_needs_two_fresh_confirmations() {
         let mut t = LowTracker::default();
-        let t0 = Instant::now();
+        let t0 = crate::clock::now();
         let t1 = t0 + Duration::from_secs(60);
         assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
         assert!(t.observe(&test_id("mouse"), true, Some(t1)));
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn going_offline_between_low_readings_leaves_streak_intact() {
         let mut t = LowTracker::default();
-        let t0 = Instant::now();
+        let t0 = crate::clock::now();
         // First low reading builds a streak of one.
         assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
         // Device goes non-Online: compute_pending skips it entirely, so
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn two_devices_tracked_independently() {
         let mut t = LowTracker::default();
-        let t0 = Instant::now();
+        let t0 = crate::clock::now();
         let t1 = t0 + Duration::from_secs(60);
 
         assert!(!t.observe(&test_id("mouse"), true, Some(t0)));
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn same_name_on_two_transports_tracks_separately() {
         let mut t = LowTracker::default();
-        let t0 = Instant::now();
+        let t0 = crate::clock::now();
         let t1 = t0 + Duration::from_secs(60);
         let sysfs = DeviceId {
             name: "MX Anywhere 3".to_owned(),
@@ -451,14 +451,19 @@ mod tests {
     }
 
     fn device_state(name: &str, presence: Presence, percent: Option<u8>) -> DeviceState {
-        device_state_at(name, presence, percent, percent.map(|_| Instant::now()))
+        device_state_at(
+            name,
+            presence,
+            percent,
+            percent.map(|_| crate::clock::now()),
+        )
     }
 
     fn device_state_at(
         name: &str,
         presence: Presence,
         percent: Option<u8>,
-        last_seen: Option<Instant>,
+        last_seen: Option<BootTime>,
     ) -> DeviceState {
         DeviceState {
             info: DeviceInfo {
@@ -516,7 +521,7 @@ mod tests {
     fn device_still_low_after_reconnecting_does_not_double_notify() {
         let mut tracker = LowTracker::default();
         let cfg = Config::default();
-        let t0 = Instant::now();
+        let t0 = crate::clock::now();
         let t1 = t0 + Duration::from_secs(60);
 
         // First low reading while Online — only one confirmation so far.

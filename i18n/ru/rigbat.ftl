@@ -22,6 +22,7 @@ age-days = { $count } д назад
 
 estimate-minutes = ~{ $count } мин
 estimate-hours = ~{ $count } ч
+estimate-over-days = >{ $count } д
 
 entry-online = { $name }: { $percent }%  { $state }
 entry-online-estimate = { $name }: { $percent }%  { $state }  осталось { $estimate }

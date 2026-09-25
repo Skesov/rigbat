@@ -7,10 +7,10 @@
 //! `settings` imported one adapter from another, which is the one direction
 //! the layering forbids. Pure — `now` and `lang` are always parameters.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::estimate::format_coarse;
-use super::{ChargeState, DeviceState, Estimate, Presence, PrimaryStatus};
+use super::{BootTime, ChargeState, DeviceState, Estimate, Presence, PrimaryStatus};
 use crate::i18n::{Lang, fl, loader};
 
 /// Wire value for `--json` and `list`; never translated (see `state_label`).
@@ -56,8 +56,8 @@ pub fn format_age(age: Duration, lang: Lang) -> String {
 /// `Online` renders the live reading. `Unreachable`/`Disconnected` render the
 /// retained reading with its age (e.g. "88%  offline (2h ago)"), or plain
 /// "offline" when there is nothing retained. `now` is a parameter, not
-/// `Instant::now()` inside the function, so callers can render deterministically.
-pub fn format_device_entry(state: &DeviceState, now: Instant, lang: Lang) -> String {
+/// `BootTime::TEST_NOW` inside the function, so callers can render deterministically.
+pub fn format_device_entry(state: &DeviceState, now: BootTime, lang: Lang) -> String {
     let l = loader(lang);
     let name = state.info.name.as_str();
 
@@ -84,7 +84,7 @@ pub fn format_device_entry(state: &DeviceState, now: Instant, lang: Lang) -> Str
                             estimate = estimate
                         )
                     }
-                    Estimate::Unknown | Estimate::Charging => fl!(
+                    Estimate::Unknown => fl!(
                         l,
                         "entry-online",
                         name = name,
@@ -100,7 +100,7 @@ pub fn format_device_entry(state: &DeviceState, now: Instant, lang: Lang) -> Str
     match (state.last_reading, state.last_seen) {
         (Some(r), Some(seen)) => {
             let percent = r.percent;
-            let age = format_age(now.duration_since(seen), lang);
+            let age = format_age(now.saturating_duration_since(seen), lang);
             let age = age.as_str();
             fl!(
                 l,
@@ -179,7 +179,7 @@ pub fn status_note(
 pub fn device_line(
     device: &DeviceState,
     status: PrimaryStatus,
-    now: Instant,
+    now: BootTime,
     lang: Lang,
 ) -> String {
     let reading = device.last_reading;
@@ -192,7 +192,7 @@ pub fn device_line(
     );
     let remaining = match device.estimate {
         Estimate::Remaining(left) => Some(left),
-        Estimate::Unknown | Estimate::Charging => None,
+        Estimate::Unknown => None,
     };
     let seen_ago = device
         .last_seen
@@ -222,7 +222,7 @@ mod tests {
         name: &str,
         presence: Presence,
         last_reading: Option<BatteryReading>,
-        last_seen: Option<Instant>,
+        last_seen: Option<BootTime>,
     ) -> DeviceState {
         DeviceState {
             info: device(name),
@@ -241,7 +241,7 @@ mod tests {
         DeviceState {
             info: device(name),
             last_reading,
-            last_seen: Some(Instant::now()),
+            last_seen: Some(BootTime::TEST_NOW),
             presence: Presence::Online,
             estimate,
         }
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn format_device_entry_online_offline_reading() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         assert_eq!(
             format_device_entry(&state("mouse", Presence::Online, None, None), now, Lang::En),
             "mouse: offline"
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn format_device_entry_online_discharging() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let r = BatteryReading::new(75, ChargeState::Discharging);
         assert_eq!(
             format_device_entry(
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn format_device_entry_online_charging() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let r = BatteryReading::new(42, ChargeState::Charging);
         assert_eq!(
             format_device_entry(
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn format_device_entry_online_full() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let r = BatteryReading::new(100, ChargeState::Full);
         assert_eq!(
             format_device_entry(
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn format_device_entry_retained_reading_shows_age() {
-        let seen = Instant::now();
+        let seen = BootTime::TEST_NOW;
         let now = seen + Duration::from_secs(2 * 3600);
         let r = BatteryReading::new(88, ChargeState::Discharging);
         assert_eq!(
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn format_device_entry_unreachable_with_retained_reading() {
-        let seen = Instant::now();
+        let seen = BootTime::TEST_NOW;
         let now = seen + Duration::from_secs(300);
         let r = BatteryReading::new(50, ChargeState::Discharging);
         assert_eq!(
@@ -374,7 +374,7 @@ mod tests {
             Estimate::Remaining(Duration::from_secs(7 * 3600)),
         );
         assert_eq!(
-            format_device_entry(&s, Instant::now(), Lang::En),
+            format_device_entry(&s, BootTime::TEST_NOW, Lang::En),
             "MX Anywhere 3: 62%  discharging  ~7h left"
         );
     }
@@ -384,24 +384,24 @@ mod tests {
         let r = BatteryReading::new(62, ChargeState::Discharging);
         let s = state_with_estimate("mouse", Some(r), Estimate::Unknown);
         assert_eq!(
-            format_device_entry(&s, Instant::now(), Lang::En),
+            format_device_entry(&s, BootTime::TEST_NOW, Lang::En),
             "mouse: 62%  discharging"
         );
     }
 
     #[test]
-    fn format_device_entry_appends_nothing_when_estimate_is_charging() {
+    fn format_device_entry_shows_a_charging_device_without_an_estimate() {
         let r = BatteryReading::new(62, ChargeState::Charging);
-        let s = state_with_estimate("mouse", Some(r), Estimate::Charging);
+        let s = state_with_estimate("mouse", Some(r), Estimate::Unknown);
         assert_eq!(
-            format_device_entry(&s, Instant::now(), Lang::En),
+            format_device_entry(&s, BootTime::TEST_NOW, Lang::En),
             "mouse: 62%  charging"
         );
     }
 
     #[test]
     fn format_device_entry_disconnected_without_reading() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         assert_eq!(
             format_device_entry(
                 &state("gamepad", Presence::Disconnected, None, None),
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn format_device_entry_no_access_points_at_doctor_even_with_a_retained_reading() {
-        let seen = Instant::now();
+        let seen = BootTime::TEST_NOW;
         let r = BatteryReading::new(88, ChargeState::Discharging);
         let denied = state("mouse", Presence::NoAccess, Some(r), Some(seen));
         assert_eq!(
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn russian_entries_render_every_shape() {
-        let seen = Instant::now();
+        let seen = BootTime::TEST_NOW;
         let now = seen + Duration::from_secs(2 * 3600);
         let r = BatteryReading::new(88, ChargeState::Discharging);
         let remaining = state_with_estimate(
@@ -449,7 +449,7 @@ mod tests {
                 "mouse: 88%  разряжается",
             ),
             (
-                format_device_entry(&remaining, Instant::now(), Lang::Ru),
+                format_device_entry(&remaining, BootTime::TEST_NOW, Lang::Ru),
                 "MX Anywhere 3: 62%  разряжается  осталось ~7 ч",
             ),
             (

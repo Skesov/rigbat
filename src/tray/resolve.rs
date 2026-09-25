@@ -1,17 +1,15 @@
-use std::time::Instant;
-
 use crate::config::Config;
 use crate::domain::{
-    DeviceId, DeviceState, PrimaryStatus, Roster, TrayState, device_status, is_visible,
+    BootTime, DeviceId, DeviceState, PrimaryStatus, Roster, TrayState, device_status, is_visible,
 };
 
 /// The devices the tray shows, in roster order.
-pub(super) fn visible<'a>(state: &'a TrayState, cfg: &Config, now: Instant) -> Roster<'a> {
+pub(super) fn visible<'a>(state: &'a TrayState, cfg: &Config, now: BootTime) -> Roster<'a> {
     Roster::visible(&state.devices, |name| cfg.is_shown(name), now)
 }
 
 /// The device the single (aggregate) icon represents: `Roster::featured`.
-pub(super) fn featured_id(state: &TrayState, cfg: &Config, now: Instant) -> Option<DeviceId> {
+pub(super) fn featured_id(state: &TrayState, cfg: &Config, now: BootTime) -> Option<DeviceId> {
     visible(state, cfg, now)
         .featured(cfg.primary_device.as_deref())
         .map(|d| d.info.id())
@@ -57,7 +55,7 @@ pub(crate) fn resolve_for(
     key: Option<&DeviceId>,
     state: &TrayState,
     cfg: &Config,
-    now: Instant,
+    now: BootTime,
 ) -> Option<Resolved> {
     let id = match key {
         Some(id) => id.clone(),
@@ -78,11 +76,11 @@ pub(crate) fn resolve_for(
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::{featured_id, resolve_for};
     use crate::config::Config;
-    use crate::domain::{BatteryReading, ChargeState, DeviceState, Presence};
+    use crate::domain::{BatteryReading, BootTime, ChargeState, DeviceState, Presence};
     use crate::domain::{PrimaryStatus, RETAINED_ICON_MAX_AGE, Transport, TrayState};
     use crate::tray::fixtures::{
         cfg_with_primary, key, make_info, make_reading, make_state, no_access, retained,
@@ -95,9 +93,9 @@ mod tests {
     fn featured_id_prefers_the_online_device_among_same_named_ones() {
         let state = same_name_two_transports(Presence::Online);
         let cfg = cfg_with_primary(Some("MX"));
-        let featured = featured_id(&state, &cfg, Instant::now()).unwrap();
+        let featured = featured_id(&state, &cfg, crate::clock::now()).unwrap();
         assert_eq!(featured.transport, Transport::Bluetooth);
-        let resolved = resolve_for(None, &state, &cfg, Instant::now()).unwrap();
+        let resolved = resolve_for(None, &state, &cfg, crate::clock::now()).unwrap();
         assert_eq!(resolved.state.last_reading, Some(make_reading(40)));
     }
 
@@ -105,11 +103,11 @@ mod tests {
     fn featured_id_falls_back_to_the_first_same_named_device_when_none_is_online() {
         let state = same_name_two_transports(Presence::Unreachable);
         let cfg = cfg_with_primary(Some("MX"));
-        let featured = featured_id(&state, &cfg, Instant::now()).unwrap();
+        let featured = featured_id(&state, &cfg, crate::clock::now()).unwrap();
         assert_eq!(featured.transport, Transport::Sysfs);
     }
 
-    fn featured_name(state: &TrayState, cfg: &Config, now: Instant) -> Option<String> {
+    fn featured_name(state: &TrayState, cfg: &Config, now: BootTime) -> Option<String> {
         featured_id(state, cfg, now).map(|id| id.name)
     }
 
@@ -121,7 +119,7 @@ mod tests {
         ]);
         let cfg = cfg_with_primary(Some("keyboard"));
         assert_eq!(
-            featured_name(&state, &cfg, Instant::now()),
+            featured_name(&state, &cfg, crate::clock::now()),
             Some("keyboard".to_string())
         );
     }
@@ -137,7 +135,7 @@ mod tests {
             (make_info("gamepad"), Some(make_reading(30))),
         ]);
         assert_eq!(
-            featured_name(&state, &cfg, Instant::now()),
+            featured_name(&state, &cfg, crate::clock::now()),
             Some("keyboard".to_string())
         );
     }
@@ -150,7 +148,7 @@ mod tests {
         ]);
         let cfg = cfg_with_primary(None);
         assert_eq!(
-            featured_name(&state, &cfg, Instant::now()),
+            featured_name(&state, &cfg, crate::clock::now()),
             Some("keyboard".to_string())
         );
     }
@@ -166,7 +164,7 @@ mod tests {
         let cfg = cfg_with_primary(None);
         // Nothing online; falls back to the first device still worth showing.
         assert_eq!(
-            featured_name(&state, &cfg, Instant::now()),
+            featured_name(&state, &cfg, crate::clock::now()),
             Some("keyboard".to_string())
         );
     }
@@ -180,7 +178,7 @@ mod tests {
             (make_info("keyboard"), None),
         ]);
         let cfg = cfg_with_primary(None);
-        assert_eq!(featured_name(&state, &cfg, Instant::now()), None);
+        assert_eq!(featured_name(&state, &cfg, crate::clock::now()), None);
     }
 
     /// A reading old enough to be a fact about last week is not a battery
@@ -195,14 +193,14 @@ mod tests {
             )],
         };
         let cfg = cfg_with_primary(None);
-        assert_eq!(featured_name(&state, &cfg, Instant::now()), None);
+        assert_eq!(featured_name(&state, &cfg, crate::clock::now()), None);
     }
 
     #[test]
     fn featured_name_no_devices_returns_none() {
         let state = make_state(vec![]);
         let cfg = cfg_with_primary(None);
-        assert_eq!(featured_name(&state, &cfg, Instant::now()), None);
+        assert_eq!(featured_name(&state, &cfg, crate::clock::now()), None);
     }
 
     #[test]
@@ -214,7 +212,7 @@ mod tests {
             (make_info("keyboard"), Some(make_reading(50))),
         ]);
         // Both present devices are hidden.
-        assert_eq!(featured_name(&state, &cfg, Instant::now()), None);
+        assert_eq!(featured_name(&state, &cfg, crate::clock::now()), None);
     }
 
     // --- resolve_for ----------------------------------------------------------
@@ -223,7 +221,7 @@ mod tests {
     fn resolve_for_per_device_key_present_and_shown() {
         let state = make_state(vec![(make_info("mouse"), Some(make_reading(80)))]);
         let cfg = cfg_with_primary(None);
-        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, Instant::now()).unwrap();
+        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
         assert_eq!(resolved.state.info.name, "mouse");
         assert_eq!(resolved.state.last_reading, Some(make_reading(80)));
     }
@@ -233,14 +231,14 @@ mod tests {
         let mut cfg = cfg_with_primary(None);
         cfg.hidden_devices = vec!["mouse".to_string()];
         let state = make_state(vec![(make_info("mouse"), Some(make_reading(80)))]);
-        assert!(resolve_for(Some(&key("mouse")), &state, &cfg, Instant::now()).is_none());
+        assert!(resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).is_none());
     }
 
     #[test]
     fn resolve_for_per_device_key_absent_from_state_returns_none() {
         let state = make_state(vec![(make_info("keyboard"), Some(make_reading(50)))]);
         let cfg = cfg_with_primary(None);
-        assert!(resolve_for(Some(&key("mouse")), &state, &cfg, Instant::now()).is_none());
+        assert!(resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).is_none());
     }
 
     #[test]
@@ -250,7 +248,7 @@ mod tests {
             (make_info("keyboard"), Some(make_reading(50))),
         ]);
         let cfg = cfg_with_primary(Some("keyboard"));
-        let resolved = resolve_for(None, &state, &cfg, Instant::now()).unwrap();
+        let resolved = resolve_for(None, &state, &cfg, crate::clock::now()).unwrap();
         assert_eq!(resolved.state.info.name, "keyboard");
     }
 
@@ -258,7 +256,7 @@ mod tests {
     fn resolve_for_aggregate_key_no_devices_returns_none() {
         let state = make_state(vec![]);
         let cfg = cfg_with_primary(None);
-        assert!(resolve_for(None, &state, &cfg, Instant::now()).is_none());
+        assert!(resolve_for(None, &state, &cfg, crate::clock::now()).is_none());
     }
 
     #[test]
@@ -269,7 +267,7 @@ mod tests {
         // Global threshold (20) would already flag 15% as Low; override it down
         // so the global default alone would report Ok, isolating the override.
         cfg.low_threshold = 5;
-        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, Instant::now()).unwrap();
+        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
         assert!(matches!(resolved.status, PrimaryStatus::Ok { .. }));
 
         cfg.device_overrides.insert(
@@ -279,7 +277,7 @@ mod tests {
                 low_threshold: Some(20),
             },
         );
-        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, Instant::now()).unwrap();
+        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
         assert!(matches!(resolved.status, PrimaryStatus::Low { .. }));
     }
 
@@ -290,12 +288,12 @@ mod tests {
             devices: vec![DeviceState {
                 info: make_info("mouse"),
                 last_reading: Some(make_reading(5)), // classifies as Low
-                last_seen: Some(Instant::now()),
+                last_seen: Some(crate::clock::now()),
                 presence: Presence::Unreachable,
                 estimate: crate::domain::Estimate::Unknown,
             }],
         };
-        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, Instant::now()).unwrap();
+        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
         assert!(matches!(resolved.status, PrimaryStatus::Low { .. }));
         assert!(resolved.stale);
     }
@@ -316,7 +314,7 @@ mod tests {
                 estimate: crate::domain::Estimate::Unknown,
             }],
         };
-        assert!(resolve_for(Some(&key("mouse")), &state, &cfg, Instant::now()).is_none());
+        assert!(resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).is_none());
     }
 
     #[test]
@@ -325,7 +323,7 @@ mod tests {
         let state = TrayState {
             devices: vec![retained("mouse", 88, Duration::from_secs(3600))],
         };
-        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, Instant::now()).unwrap();
+        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
         assert_eq!(resolved.status, PrimaryStatus::Ok { percent: 88 });
         assert!(resolved.stale);
     }
@@ -340,7 +338,7 @@ mod tests {
                 RETAINED_ICON_MAX_AGE + Duration::from_secs(1),
             )],
         };
-        assert!(resolve_for(Some(&key("mouse")), &state, &cfg, Instant::now()).is_none());
+        assert!(resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).is_none());
     }
 
     #[test]
@@ -352,12 +350,12 @@ mod tests {
             devices: vec![DeviceState {
                 info: make_info("mouse"),
                 last_reading: Some(BatteryReading::new(80, ChargeState::Charging)),
-                last_seen: Some(Instant::now()),
+                last_seen: Some(crate::clock::now()),
                 presence: Presence::Unreachable,
                 estimate: crate::domain::Estimate::Unknown,
             }],
         };
-        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, Instant::now()).unwrap();
+        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
         assert_eq!(resolved.status, PrimaryStatus::Ok { percent: 80 });
         assert!(resolved.stale);
     }
@@ -371,12 +369,12 @@ mod tests {
             devices: vec![DeviceState {
                 info: make_info("mouse"),
                 last_reading: Some(BatteryReading::new(15, ChargeState::Charging)),
-                last_seen: Some(Instant::now()),
+                last_seen: Some(crate::clock::now()),
                 presence: Presence::Unreachable,
                 estimate: crate::domain::Estimate::Unknown,
             }],
         };
-        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, Instant::now()).unwrap();
+        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
         assert_eq!(resolved.status, PrimaryStatus::Low { percent: 15 });
         assert!(resolved.stale);
     }
@@ -385,7 +383,7 @@ mod tests {
     fn resolve_for_online_device_is_never_stale() {
         let state = make_state(vec![(make_info("mouse"), Some(make_reading(80)))]);
         let cfg = cfg_with_primary(None);
-        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, Instant::now()).unwrap();
+        let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
         assert!(!resolved.stale);
     }
 
@@ -395,7 +393,7 @@ mod tests {
         state.devices.insert(0, no_access("mouse"));
         let cfg = cfg_with_primary(None);
         assert_eq!(
-            featured_name(&state, &cfg, Instant::now()),
+            featured_name(&state, &cfg, crate::clock::now()),
             Some("keyboard".to_string())
         );
     }

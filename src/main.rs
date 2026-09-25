@@ -4,6 +4,7 @@ mod autostart;
 #[cfg(test)]
 mod bus_test;
 mod cli;
+mod clock;
 mod config;
 mod dashboard;
 mod discovery;
@@ -671,12 +672,12 @@ mod tests {
 
 #[cfg(test)]
 mod featured_tests {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use crate::config::Config;
     use crate::domain::{
-        BatteryReading, ChargeState, DeviceInfo, DeviceKind, DeviceState, Estimate, Presence,
-        PrimaryStatus, Transport, TrayState,
+        BatteryReading, BootTime, ChargeState, DeviceInfo, DeviceKind, DeviceState, Estimate,
+        Presence, PrimaryStatus, Transport, TrayState,
     };
 
     fn device(
@@ -684,7 +685,7 @@ mod featured_tests {
         transport: Transport,
         presence: Presence,
         percent: Option<u8>,
-        seen: Instant,
+        seen: BootTime,
     ) -> DeviceState {
         DeviceState {
             info: DeviceInfo {
@@ -701,8 +702,8 @@ mod featured_tests {
     }
 
     /// Two copies of one mouse, a sleeping keyboard and a dongle that never answered.
-    fn roster(now: Instant) -> TrayState {
-        let seen = now - Duration::from_secs(300);
+    fn roster(now: BootTime) -> TrayState {
+        let seen = now.checked_sub(Duration::from_secs(300)).unwrap();
         TrayState {
             devices: vec![
                 device(
@@ -733,7 +734,7 @@ mod featured_tests {
 
     #[test]
     fn waybar_and_the_tray_icon_feature_the_same_device_and_status() {
-        let now = Instant::now();
+        let now = crate::clock::now();
         let state = roster(now);
         let cases = [
             (None, "MX", Transport::Bluetooth, 40),

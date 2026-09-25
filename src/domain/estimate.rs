@@ -3,123 +3,76 @@
 //! Most peripheral battery readings cannot support a time estimate at all:
 //! BlueZ's GATT Battery Service often reports coarse buckets (100/70/40/10)
 //! rather than a real percent, a sleeping device does not discharge at its
-//! in-use rate even though the wall clock keeps moving, and the default 60 s
+//! in-use rate even though the clock keeps moving, and the default 60 s
 //! poll interval against a single-digit-percent-per-hour discharge means most
-//! consecutive samples are identical. The only usable signal is the step
-//! transitions where the percent actually changed, observed over a long
-//! enough window to distinguish a real discharge rate from a bucket edge or
-//! poll jitter. Everything here refuses rather than guesses whenever that
+//! consecutive samples are identical. The only usable signal is the edges —
+//! the moments the percent was seen to change — observed over a long enough
+//! window to distinguish a real discharge rate from a bucket edge or poll
+//! jitter. Everything here refuses rather than guesses whenever that
 //! evidence is thin — a wrong number is worse than no number.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::domain::BatteryReading;
+use crate::domain::{BatteryReading, BootTime, ChargeState};
 use crate::i18n::{Lang, fl, loader};
 
-/// Below this span, two transitions cannot be told apart from a coincidence
-/// of poll timing — the estimate needs to see the trend hold for a while.
+/// Below this span between the first and last edge, the trend cannot be told
+/// apart from a coincidence of poll timing.
 const MIN_WINDOW: Duration = Duration::from_secs(30 * 60);
 
-/// Fewer than two downward transitions cannot distinguish a real discharge
-/// rate from a single bucket edge (e.g. 70% -> 40%).
-const MIN_TRANSITIONS: usize = 2;
+/// Two edges are the fewest that bound a measured interval.
+const MIN_EDGES: usize = 2;
 
-/// A single step larger than this is not plausible organic discharge at the
+/// A single drop larger than this is not plausible organic discharge at the
 /// default poll interval — it is the signature of a coarse-bucket reading
-/// (BlueZ Battery Service devices commonly report 100/70/40/10 or similar).
-const MAX_PLAUSIBLE_STEP: u32 = 5;
+/// (BlueZ Battery Service devices commonly report 100/70/40/10 or similar)
+/// or a recalibration jump.
+const MAX_PLAUSIBLE_STEP: i16 = 5;
 
-/// If the largest observed step is more than this many times the smallest,
-/// the steps are not one steady rate — averaging through them would report a
-/// number the data does not support.
-const MAX_STEP_RATIO: f64 = 3.0;
+/// Longer estimates are shown as "more than this many days": the evidence
+/// behind them is a handful of edges days apart.
+const MAX_SHOWN_DAYS: u64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Estimate {
-    /// Not enough evidence yet, or the reading is not moving monotonically down.
+    /// Not discharging, a coarse reading, or not enough evidence yet.
     Unknown,
-    /// Charging. No numeric time-to-full is reported — the same coarse-bucket
-    /// and sleep problems that make a discharge estimate untrustworthy apply
-    /// equally to a charge estimate, so this is a state flag, not a duration.
-    Charging,
     Remaining(Duration),
 }
 
-/// Estimates remaining discharge time from a device's recorded percent-change
-/// history. `history` holds only points where the percent differed from the
-/// previous sample (see `push_reading` in the supervisor) — the caller is not
-/// expected to include `current` in it. `now`/`current` are the latest poll,
-/// passed separately so a poll that has not yet changed the percent still
-/// updates the elapsed window.
-pub fn estimate(history: &[(Instant, u8)], now: Instant, current: BatteryReading) -> Estimate {
-    if current.coarse {
-        // Steps between level bands are band edges, not a discharge rate.
+/// Estimates remaining discharge time from a device's change-point history:
+/// one point per observed percent, oldest first (see `push_history_point` in
+/// the supervisor).
+///
+/// The first point is when a level was first *seen*, not when it was reached,
+/// so the rate is measured between edges only, from the first to the last.
+/// An implausible step — a rise, or a drop above `MAX_PLAUSIBLE_STEP` —
+/// restarts the window at that edge rather than disabling the estimate.
+pub fn estimate(history: &[(BootTime, u8)], current: BatteryReading) -> Estimate {
+    if current.state != ChargeState::Discharging || current.coarse {
         return Estimate::Unknown;
     }
-    let current = current.percent;
-    let mut points: Vec<(Instant, u8)> = history.to_vec();
-    if points.last().map(|&(_, p)| p) != Some(current) {
-        points.push((now, current));
+    let mut first_edge = None;
+    for (i, pair) in history.windows(2).enumerate() {
+        let step = i16::from(pair[0].1) - i16::from(pair[1].1);
+        if first_edge.is_none() || !(1..=MAX_PLAUSIBLE_STEP).contains(&step) {
+            first_edge = Some(i + 1);
+        }
     }
-
-    let transitions: Vec<(Duration, i32)> = points
-        .windows(2)
-        .map(|w| {
-            let dt = w[1].0.duration_since(w[0].0);
-            let dp = w[1].1 as i32 - w[0].1 as i32;
-            (dt, dp)
-        })
-        .filter(|&(_, dp)| dp != 0)
-        .collect();
-
-    let has_up = transitions.iter().any(|&(_, dp)| dp > 0);
-    let has_down = transitions.iter().any(|&(_, dp)| dp < 0);
-
-    match (has_up, has_down) {
-        (true, true) => Estimate::Unknown,
-        (true, false) => Estimate::Charging,
-        (false, false) => Estimate::Unknown,
-        (false, true) => estimate_discharge(&points, &transitions, current),
-    }
-}
-
-fn estimate_discharge(
-    points: &[(Instant, u8)],
-    transitions: &[(Duration, i32)],
-    current: u8,
-) -> Estimate {
-    if transitions.len() < MIN_TRANSITIONS {
+    let window = first_edge
+        .and_then(|i| history.get(i..))
+        .unwrap_or_default();
+    let (Some(&(first_at, first_percent)), Some(&(last_at, last_percent))) =
+        (window.first(), window.last())
+    else {
+        return Estimate::Unknown;
+    };
+    let span = last_at.saturating_duration_since(first_at);
+    if window.len() < MIN_EDGES || span < MIN_WINDOW {
         return Estimate::Unknown;
     }
-
-    let (first, _) = points[0];
-    let (last, _) = points[points.len() - 1];
-    let span = last.duration_since(first);
-    if span < MIN_WINDOW {
-        return Estimate::Unknown;
-    }
-
-    let steps: Vec<u32> = transitions
-        .iter()
-        .map(|&(_, dp)| dp.unsigned_abs())
-        .collect();
-    let max_step = steps.iter().copied().max().unwrap_or(0);
-    let min_step = steps.iter().copied().min().unwrap_or(0);
-
-    if max_step > MAX_PLAUSIBLE_STEP {
-        return Estimate::Unknown;
-    }
-    if min_step == 0 || max_step as f64 / min_step as f64 > MAX_STEP_RATIO {
-        return Estimate::Unknown;
-    }
-
-    let total_drop: u32 = steps.iter().sum();
-    let rate_per_sec = total_drop as f64 / span.as_secs_f64();
-    if rate_per_sec <= 0.0 {
-        return Estimate::Unknown;
-    }
-
-    let remaining_secs = (current as f64 / rate_per_sec).max(0.0);
+    let rate_per_sec = f64::from(first_percent - last_percent) / span.as_secs_f64();
+    let remaining_secs = f64::from(current.percent) / rate_per_sec;
     Estimate::Remaining(round_coarse(Duration::from_secs_f64(remaining_secs)))
 }
 
@@ -138,11 +91,15 @@ fn round_coarse(d: Duration) -> Duration {
     }
 }
 
-/// Formats a coarsely-rounded duration as `~2h` or `~45m` (`~2 ч`, `~45 мин`).
+/// Formats a coarsely-rounded duration as `~2h` or `~45m` (`~2 ч`, `~45 мин`),
+/// or as `>4d` (`>4 д`) past `MAX_SHOWN_DAYS`.
 pub fn format_coarse(d: Duration, lang: Lang) -> String {
     let l = loader(lang);
     let secs = round_coarse(d).as_secs();
-    if secs < 3600 {
+    if secs > MAX_SHOWN_DAYS * 86_400 {
+        let count = MAX_SHOWN_DAYS;
+        fl!(l, "estimate-over-days", count = count)
+    } else if secs < 3600 {
         let count = secs / 60;
         fl!(l, "estimate-minutes", count = count)
     } else {
@@ -154,132 +111,109 @@ pub fn format_coarse(d: Duration, lang: Lang) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ChargeState;
 
-    fn at(base: Instant, mins: u64) -> Instant {
-        base + Duration::from_secs(mins * 60)
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    fn at(mins: u64) -> BootTime {
+        BootTime::TEST_NOW + Duration::from_secs(mins * 60)
     }
 
     fn cur(percent: u8) -> BatteryReading {
-        BatteryReading::new(percent, crate::domain::ChargeState::Discharging)
+        BatteryReading::new(percent, ChargeState::Discharging)
+    }
+
+    /// 1% every 6 minutes, 60% down to 54%.
+    fn steady() -> Vec<(BootTime, u8)> {
+        (0..=6).map(|i| (at(i * 6), 60 - i as u8)).collect()
     }
 
     #[test]
     fn empty_history_is_unknown() {
-        let now = Instant::now();
-        assert_eq!(estimate(&[], now, cur(50)), Estimate::Unknown);
+        assert_eq!(estimate(&[], cur(50)), Estimate::Unknown);
     }
 
     #[test]
     fn single_transition_is_unknown() {
-        let base = Instant::now();
-        let history = [(at(base, 0), 80), (at(base, 10), 79)];
-        assert_eq!(estimate(&history, at(base, 10), cur(79)), Estimate::Unknown);
+        let history = [(at(0), 80), (at(10), 79)];
+        assert_eq!(estimate(&history, cur(79)), Estimate::Unknown);
     }
 
     #[test]
     fn bucketed_device_is_unknown_not_confidently_wrong() {
-        let base = Instant::now();
-        let history = [(at(base, 0), 100), (at(base, 20), 70), (at(base, 40), 40)];
-        assert_eq!(estimate(&history, at(base, 40), cur(40)), Estimate::Unknown);
-    }
-
-    #[test]
-    fn upward_step_yields_unknown_or_charging() {
-        let base = Instant::now();
-        let history = [(at(base, 0), 50), (at(base, 10), 60)];
-        let result = estimate(&history, at(base, 10), cur(60));
-        assert!(matches!(result, Estimate::Unknown | Estimate::Charging));
-    }
-
-    #[test]
-    fn pure_upward_trend_is_charging() {
-        let base = Instant::now();
-        let history = [(at(base, 0), 50), (at(base, 10), 55), (at(base, 20), 60)];
-        assert_eq!(
-            estimate(&history, at(base, 20), cur(60)),
-            Estimate::Charging
-        );
+        let history = [(at(0), 100), (at(20), 70), (at(40), 40)];
+        assert_eq!(estimate(&history, cur(40)), Estimate::Unknown);
     }
 
     #[test]
     fn mixed_direction_is_unknown() {
-        let base = Instant::now();
-        let history = [(at(base, 0), 50), (at(base, 40), 40), (at(base, 80), 45)];
-        assert_eq!(estimate(&history, at(base, 80), cur(45)), Estimate::Unknown);
+        let history = [(at(0), 50), (at(40), 40), (at(80), 45)];
+        assert_eq!(estimate(&history, cur(45)), Estimate::Unknown);
     }
 
     #[test]
-    // clippy::panic has no allow-in-tests config (unlike unwrap_used/expect_used);
-    // this panic is the test's own failure message for an unexpected match arm.
-    #[expect(clippy::panic)]
-    fn steady_discharge_yields_a_plausible_remaining_range() {
-        let base = Instant::now();
-        // 1% per 6 minutes, held for 36 minutes: 6 downward transitions.
-        let history = [
-            (at(base, 0), 60),
-            (at(base, 6), 59),
-            (at(base, 12), 58),
-            (at(base, 18), 57),
-            (at(base, 24), 56),
-            (at(base, 30), 55),
-            (at(base, 36), 54),
-        ];
-        let result = estimate(&history, at(base, 36), cur(54));
-        match result {
-            Estimate::Remaining(d) => {
-                // 54% at 1%/6min is ~5.4h; assert a wide, honest range rather
-                // than the exact figure.
-                assert!(d >= Duration::from_secs(4 * 3600));
-                assert!(d <= Duration::from_secs(7 * 3600));
-            }
-            other => panic!("expected Remaining, got {other:?}"),
+    fn steady_discharge_yields_remaining_time() {
+        // 54% at 1% per 6 minutes: 5.4h.
+        assert_eq!(estimate(&steady(), cur(54)), Estimate::Remaining(5 * HOUR));
+    }
+
+    #[test]
+    fn charging_or_full_device_holding_its_percent_has_no_remaining_time() {
+        for state in [ChargeState::Charging, ChargeState::Full] {
+            let current = BatteryReading::new(54, state);
+            assert_eq!(estimate(&steady(), current), Estimate::Unknown, "{state:?}");
         }
+    }
+
+    #[test]
+    fn rate_is_measured_from_the_first_edge_not_the_first_observation() {
+        // 60% first seen a minute before it dropped; after that, 1% per hour.
+        let history = [(at(0), 60), (at(1), 59), (at(61), 58), (at(121), 57)];
+        assert_eq!(estimate(&history, cur(57)), Estimate::Remaining(57 * HOUR));
+    }
+
+    #[test]
+    fn outlier_step_restarts_the_window_instead_of_disabling_the_estimate() {
+        // 1% per hour, a 10% jump, then 1% per hour again.
+        let history = [
+            (at(0), 80),
+            (at(60), 79),
+            (at(120), 78),
+            (at(180), 68),
+            (at(240), 67),
+            (at(300), 66),
+        ];
+        assert_eq!(estimate(&history, cur(66)), Estimate::Remaining(66 * HOUR));
+    }
+
+    #[test]
+    fn outlier_step_as_the_latest_edge_leaves_no_window() {
+        let history = [(at(0), 80), (at(60), 79), (at(120), 78), (at(180), 68)];
+        assert_eq!(estimate(&history, cur(68)), Estimate::Unknown);
+    }
+
+    #[test]
+    fn host_suspend_between_edges_counts_as_elapsed_time() {
+        // 1h awake, 8h suspended, 1h awake: the boot clock says 10h per 1%.
+        let history = [
+            (at(0), 51),
+            (at(60), 50),
+            (at(60 + 10 * 60), 49),
+            (at(60 + 20 * 60), 48),
+        ];
+        assert_eq!(estimate(&history, cur(48)), Estimate::Remaining(480 * HOUR));
     }
 
     #[test]
     fn coarse_reading_is_unknown_even_on_a_steady_history() {
-        let base = Instant::now();
-        let history: Vec<(Instant, u8)> =
-            (0..=6).map(|i| (at(base, i * 6), 60 - i as u8)).collect();
-        assert!(matches!(
-            estimate(&history, at(base, 36), cur(54)),
-            Estimate::Remaining(_)
-        ));
-        let coarse = BatteryReading::new_coarse(54, crate::domain::ChargeState::Discharging);
-        assert_eq!(estimate(&history, at(base, 36), coarse), Estimate::Unknown);
+        let coarse = BatteryReading::new_coarse(54, ChargeState::Discharging);
+        assert_eq!(estimate(&steady(), coarse), Estimate::Unknown);
     }
 
     #[test]
     fn short_window_is_unknown_even_with_two_transitions() {
-        let base = Instant::now();
-        // Two transitions, but only 10 minutes apart — below MIN_WINDOW.
-        let history = [(at(base, 0), 60), (at(base, 5), 59), (at(base, 10), 58)];
-        assert_eq!(estimate(&history, at(base, 10), cur(58)), Estimate::Unknown);
-    }
-
-    #[test]
-    fn uneven_steps_are_unknown() {
-        let base = Instant::now();
-        // Steps of 1, 1, 4: individually plausible, but ratio 4/1 exceeds
-        // MAX_STEP_RATIO — not one steady rate.
-        let history = [
-            (at(base, 0), 60),
-            (at(base, 10), 59),
-            (at(base, 20), 58),
-            (at(base, 40), 54),
-        ];
-        assert_eq!(estimate(&history, at(base, 40), cur(54)), Estimate::Unknown);
-    }
-
-    #[test]
-    fn never_negative_when_current_exceeds_rate_projection() {
-        let base = Instant::now();
-        let history = [(at(base, 0), 10), (at(base, 30), 5), (at(base, 60), 0)];
-        let result = estimate(&history, at(base, 60), cur(0));
-        // current is 0: remaining must not be negative.
-        if let Estimate::Remaining(d) = result {
-            assert!(d.as_secs() < u64::MAX);
-        }
+        let history = [(at(0), 60), (at(5), 59), (at(10), 58), (at(15), 57)];
+        assert_eq!(estimate(&history, cur(57)), Estimate::Unknown);
     }
 
     // --- round_coarse / format_coarse --------------------------------------
@@ -288,10 +222,7 @@ mod tests {
     fn round_coarse_boundaries() {
         assert_eq!(format_coarse(Duration::from_secs(59 * 60), Lang::En), "~1h");
         assert_eq!(format_coarse(Duration::from_secs(61 * 60), Lang::En), "~1h");
-        assert_eq!(
-            format_coarse(Duration::from_secs(25 * 3600), Lang::En),
-            "~25h"
-        );
+        assert_eq!(format_coarse(25 * HOUR, Lang::En), "~25h");
     }
 
     #[test]
@@ -307,6 +238,14 @@ mod tests {
     fn format_coarse_in_russian() {
         let ru = |d| format_coarse(d, Lang::Ru);
         assert_eq!(ru(Duration::from_secs(44 * 60)), "~45 мин");
-        assert_eq!(ru(Duration::from_secs(25 * 3600)), "~25 ч");
+        assert_eq!(ru(25 * HOUR), "~25 ч");
+    }
+
+    #[test]
+    fn format_coarse_caps_at_four_days_in_both_languages() {
+        assert_eq!(format_coarse(96 * HOUR, Lang::En), "~96h");
+        assert_eq!(format_coarse(97 * HOUR, Lang::En), ">4d");
+        assert_eq!(format_coarse(300 * HOUR, Lang::En), ">4d");
+        assert_eq!(format_coarse(300 * HOUR, Lang::Ru), ">4 д");
     }
 }

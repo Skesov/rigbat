@@ -35,7 +35,7 @@ layers, never the reverse.
           │
         config            config.json: user intent, serialized; imports domain + i18n
           │
-   icon / ipc / gui / appearance   shared ports: domain, refresh and each other, never config
+   icon / ipc / gui / appearance / clock   shared ports: domain, refresh and each other, never config
           │
         sources           BatterySource / BatteryBackend traits + Context + supervise +
           ▲               sysfs/bluez/steelseries/eightbitdo impls
@@ -169,10 +169,17 @@ flows out through channels.
   icon's pick and `--waybar` all go through one predicate (`domain::is_visible`, via
   `Roster::visible`), so they cannot disagree about which devices exist.
 - **Estimate**: on every reading the manager derives a time-remaining estimate
-  (`domain::estimate`) from the device's percent-change history, refusing rather than guessing
-  when the evidence is thin (coarse-bucket readings, a short window, an uneven step rate — see
-  the module doc for why). The tray menu and the dashboard render it via `format_coarse` (e.g. "~3h")
-  after the device's charge.
+  (`domain::estimate`) from the device's percent-change history. Only a discharging, non-coarse
+  reading gets one. The rate runs from the first edge (a moment the percent was seen to change) to
+  the last, never from the first observation, which only says when a level was first seen. A rise
+  or a drop above 5 % restarts the window at that edge instead of disabling the estimate. Fewer
+  than two edges or under 30 min between them is no estimate. The tray menu and the dashboard
+  render it via `format_coarse` ("~3h"), capped at ">4d" (">4 д") — beyond that the evidence is a
+  handful of edges days apart.
+- **Clock**: reading times, ages and the estimate use `domain::BootTime`, read from
+  `CLOCK_BOOTTIME` by `clock::now`. Unlike `Instant` (`CLOCK_MONOTONIC`) it counts suspend, so a
+  discharge across a night's suspend is not squeezed into seconds, and the 24 h retention caps are
+  24 h of real time, not of awake time.
 
 ## Data flow per surface
 
@@ -295,9 +302,9 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
 - What the history is _for_: the time-remaining estimate needs a run of percent changes, and a
   restart used to throw that away, so every device showed no estimate until it had discharged a
   few percent again. `reconcile` seeds a newly-discovered device's in-memory history from the
-  store (`seed_history`, `HISTORY_CAP` = 20 change points, most recent first). A stored point too
-  old for this process's monotonic clock to express is dropped rather than clamped to `now`:
-  clamping would misstate its age and distort the rate the estimate is derived from.
+  store (`seed_history`, `HISTORY_CAP` = 20 change points, most recent first). Each stored
+  wall-clock timestamp becomes a `BootTime` once, by its age; `BootTime` is signed, so a reading
+  from before this boot keeps its place.
 - Retention: `state::spawn_retention` prunes readings older than `RETENTION_SECS` (14 days) every
   `RETENTION_INTERVAL` (1 h), and drops readings orphaned by a deleted device. Inventory rows are
   never pruned on age — a device you own but have not switched on for a month must still be in the

@@ -18,7 +18,7 @@ const COMPOSITION_ROOTS: &[&str] = &["main", "app", "doctor"];
 
 /// Shared ports: any adapter may use them. They import only `CORE` and each
 /// other — never `config` or an adapter.
-const SHARED_PORTS: &[&str] = &["i18n", "icon", "ipc", "gui", "appearance"];
+const SHARED_PORTS: &[&str] = &["i18n", "icon", "ipc", "gui", "appearance", "clock"];
 
 /// Vocabulary and primitives with no infrastructure behind them.
 const CORE: &[&str] = &["domain", "refresh"];

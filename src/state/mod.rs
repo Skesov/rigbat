@@ -227,8 +227,8 @@ pub fn spawn_retention(store: Store) {
 }
 
 /// Current wall-clock time as unix seconds — the one place this project
-/// persists a timestamp (`std::time::Instant` is monotonic-but-unanchored
-/// and cannot survive a restart, see `domain::DeviceState::last_seen`).
+/// persists a timestamp (`domain::BootTime` restarts at every boot, see
+/// `domain::DeviceState::last_seen`).
 /// `SystemTime::now()` before `UNIX_EPOCH` cannot happen on a real system
 /// clock; falls back to `0` rather than panicking if it ever did.
 pub fn now_unix() -> i64 {

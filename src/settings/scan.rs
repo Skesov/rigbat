@@ -184,7 +184,7 @@ mod tests {
 #[cfg(test)]
 mod bus_tests {
     use std::cell::Cell;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use tokio::sync::watch;
 
@@ -213,7 +213,7 @@ mod bus_tests {
         DeviceState {
             info: device(name),
             last_reading: Some(BatteryReading::new(70, ChargeState::Discharging)),
-            last_seen: Some(Instant::now()),
+            last_seen: Some(crate::clock::now()),
             presence: Presence::Online,
             estimate: Estimate::Unknown,
         }

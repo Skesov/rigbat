@@ -26,7 +26,7 @@ tiny-skia = "0.11"
 ashpd = { version = "0.13.11", default-features = false, features = ["tokio", "settings"] }
 futures-util = { version = "0.3", default-features = false }
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
-nix = { version = "0.31", default-features = false, features = ["fs", "poll"] }
+nix = { version = "0.31", default-features = false, features = ["fs", "poll", "time"] }
 notify = "8"
 # bundled compiles SQLite from source and links it statically: no runtime
 # libsqlite3 dependency, cargo build stays self-contained. Needs a C

@@ -14,7 +14,9 @@ use futures_util::{Stream, StreamExt as _};
 use zbus::fdo::{DBusProxy, NameOwnerChangedStream};
 
 use crate::config;
-use crate::domain::{DeviceKind, Presence, PrimaryStatus, charge_value, roster_order, status_note};
+use crate::domain::{
+    BootTime, DeviceKind, Presence, PrimaryStatus, charge_value, roster_order, status_note,
+};
 use crate::gui;
 use crate::i18n::{Lang, fl, loader};
 use crate::icon::Theme;
@@ -284,7 +286,7 @@ const REFRESH: &str = "\u{21BB}";
 
 struct Dashboard {
     snapshot: Option<Snapshot>,
-    received_at: Instant,
+    received_at: BootTime,
     lang: Lang,
     updates: mpsc::Receiver<Option<Snapshot>>,
     tray: Option<(Tray1Proxy<'static>, tokio::runtime::Handle)>,
@@ -309,7 +311,7 @@ impl Dashboard {
     ) -> Self {
         let mut dashboard = Self {
             snapshot: None,
-            received_at: Instant::now(),
+            received_at: crate::clock::now(),
             lang,
             updates,
             tray,
@@ -327,7 +329,7 @@ impl Dashboard {
             sort_cards(&mut s.devices);
             s
         });
-        self.received_at = Instant::now();
+        self.received_at = crate::clock::now();
         self.refreshing = None;
     }
 
@@ -385,7 +387,10 @@ impl Dashboard {
             ui.centered_and_justified(|ui| ui.label(fl!(l, "tray-no-devices")));
             return;
         }
-        let (lang, elapsed) = (self.lang, self.received_at.elapsed().as_secs());
+        let lang = self.lang;
+        let elapsed = crate::clock::now()
+            .saturating_duration_since(self.received_at)
+            .as_secs();
         let (list, footer) = ui
             .max_rect()
             .split_top_bottom_at_y(ui.max_rect().bottom() - FOOTER_HEIGHT);
@@ -1028,7 +1033,7 @@ mod bus_tests {
                     locator: None,
                 },
                 last_reading: Some(BatteryReading::new(percent, ChargeState::Discharging)),
-                last_seen: Some(Instant::now()),
+                last_seen: Some(crate::clock::now()),
                 presence: Presence::Online,
                 estimate: Estimate::Unknown,
             }],

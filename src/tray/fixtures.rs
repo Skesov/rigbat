@@ -1,6 +1,6 @@
 //! `TrayState` and `Config` builders shared by the tray's unit tests.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::domain::{
@@ -41,7 +41,7 @@ pub(super) fn retained(name: &str, percent: u8, age: Duration) -> DeviceState {
     DeviceState {
         info: make_info(name),
         last_reading: Some(make_reading(percent)),
-        last_seen: Instant::now().checked_sub(age),
+        last_seen: crate::clock::now().checked_sub(age),
         presence: Presence::Unreachable,
         estimate: crate::domain::Estimate::Unknown,
     }
@@ -57,7 +57,7 @@ pub(super) fn make_state(devices: Vec<(DeviceInfo, Option<BatteryReading>)>) -> 
             .map(|(info, reading)| DeviceState {
                 info,
                 last_reading: reading,
-                last_seen: reading.map(|_| Instant::now()),
+                last_seen: reading.map(|_| crate::clock::now()),
                 presence: if reading.is_some() {
                     Presence::Online
                 } else {
@@ -87,7 +87,7 @@ pub(super) fn same_name_two_transports(bt_presence: Presence) -> TrayState {
             locator: Some(locator.to_owned()),
         },
         last_reading: Some(make_reading(percent)),
-        last_seen: Some(Instant::now()),
+        last_seen: Some(crate::clock::now()),
         presence,
         estimate: crate::domain::Estimate::Unknown,
     };

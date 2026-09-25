@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Instant;
 
 use ksni::TrayMethods;
 use tokio::sync::watch;
@@ -8,7 +7,7 @@ use super::item::{RigbatTray, SaveConfig};
 use super::resolve::visible;
 use crate::appearance::ColorScheme;
 use crate::config::Config;
-use crate::domain::{DeviceId, TrayMode, TrayState};
+use crate::domain::{BootTime, DeviceId, TrayMode, TrayState};
 use crate::icon::TinySkiaRenderer;
 use crate::refresh::RefreshSignal;
 
@@ -30,7 +29,7 @@ pub fn desired_keys(mode: TrayMode, shown: &[DeviceId]) -> Vec<Option<DeviceId>>
 }
 
 /// The tray-visible devices, in roster order, one entry per `DeviceId`.
-fn shown_ids(state: &TrayState, cfg: &Config, now: Instant) -> Vec<DeviceId> {
+fn shown_ids(state: &TrayState, cfg: &Config, now: BootTime) -> Vec<DeviceId> {
     let mut shown: Vec<DeviceId> = Vec::new();
     for d in visible(state, cfg, now).devices() {
         let id = d.info.id();
@@ -57,7 +56,7 @@ async fn reconcile(
     let desired: Vec<Option<DeviceId>> = {
         let state = rx.borrow();
         let cfg = config.borrow();
-        desired_keys(cfg.tray_mode, &shown_ids(&state, &cfg, Instant::now()))
+        desired_keys(cfg.tray_mode, &shown_ids(&state, &cfg, crate::clock::now()))
     }; // borrows dropped here
 
     let prev_len = items.len();
@@ -135,7 +134,6 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
 
     use super::{desired_keys, shown_ids};
     use crate::config::Config;
@@ -172,7 +170,7 @@ mod tests {
             tray_mode: TrayMode::PerDevice,
             ..Config::default()
         };
-        let now = Instant::now();
+        let now = crate::clock::now();
         let keys = desired_keys(cfg.tray_mode, &shown_ids(&state, &cfg, now));
         assert_eq!(keys.len(), 2, "two icons, not one: {keys:?}");
 

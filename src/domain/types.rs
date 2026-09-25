@@ -1,8 +1,9 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::estimate::Estimate;
+use crate::domain::time::BootTime;
 use crate::i18n::{Lang, fl, loader};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,10 +290,10 @@ pub struct DeviceState {
     /// Last successful reading. Survives going Unreachable or Disconnected.
     pub last_reading: Option<BatteryReading>,
     /// When `last_reading` was taken. `None` if the device has never answered.
-    /// `Instant`, not `SystemTime`: the only consumer is a relative age
-    /// ("2h ago"), a monotonic clock cannot be thrown off by an NTP step or a
-    /// suspend/resume jump, and nothing here is persisted across restarts.
-    pub last_seen: Option<Instant>,
+    /// `BootTime`, not `SystemTime`: the only consumer is a relative age
+    /// ("2h ago"), the boot clock cannot be thrown off by an NTP step and
+    /// keeps counting through suspend, and nothing here is persisted.
+    pub last_seen: Option<BootTime>,
     pub presence: Presence,
     /// Remaining-time estimate derived from this device's recorded
     /// percent-change history (kept in the supervisor, not here — see
@@ -317,7 +318,7 @@ impl DeviceState {
     /// returns the moment it answers again. This governs display only.
     ///
     /// A `NoAccess` device always is: the user has a setup problem to fix.
-    pub fn is_currently_informative(&self, now: Instant, max_age: Duration) -> bool {
+    pub fn is_currently_informative(&self, now: BootTime, max_age: Duration) -> bool {
         if matches!(self.presence, Presence::Online | Presence::NoAccess) {
             return true;
         }
@@ -337,7 +338,7 @@ mod tests {
     fn state_at(
         presence: Presence,
         reading: Option<BatteryReading>,
-        seen: Option<Instant>,
+        seen: Option<BootTime>,
     ) -> DeviceState {
         DeviceState {
             info: DeviceInfo {
@@ -355,14 +356,14 @@ mod tests {
 
     #[test]
     fn online_device_is_always_informative() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let state = state_at(Presence::Online, None, None);
         assert!(state.is_currently_informative(now, DAY));
     }
 
     #[test]
     fn offline_device_that_never_answered_is_not_informative() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         for presence in [Presence::Unreachable, Presence::Disconnected] {
             let state = state_at(presence, None, None);
             assert!(!state.is_currently_informative(now, DAY));
@@ -372,7 +373,7 @@ mod tests {
     #[test]
     fn no_access_device_is_informative_without_a_reading() {
         let state = state_at(Presence::NoAccess, None, None);
-        assert!(state.is_currently_informative(Instant::now(), DAY));
+        assert!(state.is_currently_informative(BootTime::TEST_NOW, DAY));
     }
 
     #[test]
@@ -396,7 +397,7 @@ mod tests {
 
     #[test]
     fn offline_device_keeps_a_recent_reading() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let seen = now.checked_sub(Duration::from_secs(3600));
         let state = state_at(
             Presence::Unreachable,
@@ -408,7 +409,7 @@ mod tests {
 
     #[test]
     fn offline_device_loses_a_reading_older_than_the_cap() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let seen = now.checked_sub(DAY + Duration::from_secs(1));
         let state = state_at(
             Presence::Unreachable,
@@ -422,7 +423,7 @@ mod tests {
     /// keeps showing something.
     #[test]
     fn offline_device_at_exactly_the_cap_is_still_informative() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let seen = now.checked_sub(DAY);
         let state = state_at(
             Presence::Unreachable,
@@ -430,6 +431,20 @@ mod tests {
             seen,
         );
         assert!(state.is_currently_informative(now, DAY));
+    }
+
+    #[test]
+    fn host_suspend_counts_toward_the_cap() {
+        let seen = BootTime::TEST_NOW;
+        let awake = 20 * 3600;
+        let suspended = 5 * 3600;
+        let now = seen + Duration::from_secs(awake + suspended);
+        let state = state_at(
+            Presence::Unreachable,
+            Some(BatteryReading::new(88, ChargeState::Discharging)),
+            Some(seen),
+        );
+        assert!(!state.is_currently_informative(now, DAY));
     }
 
     use super::*;

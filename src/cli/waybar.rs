@@ -1,10 +1,10 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::config::Config;
-use crate::domain::{DeviceState, PrimaryStatus, Roster, TrayState};
+use crate::domain::{BootTime, DeviceState, PrimaryStatus, Roster, TrayState};
 use crate::domain::{device_status, format_device_entry};
 use crate::i18n::Lang;
 
@@ -13,7 +13,7 @@ use crate::i18n::Lang;
 pub fn waybar_featured<'a>(
     states: &'a [DeviceState],
     cfg: &Config,
-    now: Instant,
+    now: BootTime,
 ) -> Option<(&'a DeviceState, PrimaryStatus)> {
     let roster = Roster::visible(states, |name| cfg.is_shown(name), now);
     let device = roster.featured(cfg.primary_device.as_deref())?;
@@ -32,7 +32,7 @@ pub fn waybar_featured<'a>(
 /// `class` vocabulary (documented in the README, styled by the user's CSS):
 /// `charging`, `low`, `ok`, `offline`. `percentage` is omitted, not `0`, when
 /// there is no reading to report.
-pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: Instant) -> Value {
+pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: BootTime) -> Value {
     let roster = Roster::visible(states, |name| cfg.is_shown(name), now);
 
     let tooltip = if roster.devices().is_empty() {
@@ -79,7 +79,7 @@ pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: Instant) -> Value {
 /// Returns the line rather than printing it so the streaming loop can compare
 /// consecutive lines and skip a repeat: the supervisor republishes its state on
 /// every poll, most of which leave the rendered line byte-identical.
-fn render_waybar_line(states: &[DeviceState], cfg: &Config, now: Instant) -> String {
+fn render_waybar_line(states: &[DeviceState], cfg: &Config, now: BootTime) -> String {
     let value = to_waybar(states, cfg, now);
     serde_json::to_string(&value).unwrap_or_else(|_| {
         r#"{"text":"error","tooltip":"rigbat: failed to render status","class":"offline"}"#
@@ -126,7 +126,7 @@ pub async fn run(mut rx: watch::Receiver<TrayState>, mut cfg_rx: watch::Receiver
                 // every shown device to answer never settles when one of them is
                 // permanently asleep, which is the normal state of a wireless
                 // mouse on its charger.
-                let now = Instant::now();
+                let now = crate::clock::now();
                 let settled = match waybar_featured(&state.devices, &cfg, now) {
                     Some((d, _)) => d.last_reading.is_some(),
                     None => !state.devices.iter().any(|d| cfg.is_shown(&d.info.name)),
@@ -148,7 +148,7 @@ pub async fn run(mut rx: watch::Receiver<TrayState>, mut cfg_rx: watch::Receiver
         {
             let state = rx.borrow();
             let cfg = cfg_rx.borrow();
-            let line = render_waybar_line(&state.devices, &cfg, Instant::now());
+            let line = render_waybar_line(&state.devices, &cfg, crate::clock::now());
             if last_line.as_deref() != Some(line.as_str()) {
                 print_line(&line);
                 last_line = Some(line);
@@ -186,7 +186,7 @@ mod tests {
         name: &str,
         presence: Presence,
         last_reading: Option<BatteryReading>,
-        last_seen: Option<Instant>,
+        last_seen: Option<BootTime>,
     ) -> DeviceState {
         DeviceState {
             info: device(name),
@@ -203,7 +203,7 @@ mod tests {
         let states = vec![device_state("mouse", Presence::Online, Some(reading), None)];
         let cfg = Config::default();
 
-        let value = to_waybar(&states, &cfg, Instant::now());
+        let value = to_waybar(&states, &cfg, crate::clock::now());
         assert_eq!(value["class"], "charging");
         assert_eq!(value["percentage"], 80);
         assert_eq!(value["text"], "80%");
@@ -218,7 +218,7 @@ mod tests {
             ..Config::default()
         };
 
-        let value = to_waybar(&states, &cfg, Instant::now());
+        let value = to_waybar(&states, &cfg, crate::clock::now());
         assert_eq!(value["class"], "low");
         assert_eq!(value["percentage"], 10);
     }
@@ -229,7 +229,7 @@ mod tests {
         let states = vec![device_state("mouse", Presence::Online, Some(reading), None)];
         let cfg = Config::default();
 
-        let value = to_waybar(&states, &cfg, Instant::now());
+        let value = to_waybar(&states, &cfg, crate::clock::now());
         assert_eq!(value["class"], "ok");
         assert_eq!(value["percentage"], 80);
     }
@@ -239,7 +239,7 @@ mod tests {
         let states = vec![device_state("mouse", Presence::Disconnected, None, None)];
         let cfg = Config::default();
 
-        let value = to_waybar(&states, &cfg, Instant::now());
+        let value = to_waybar(&states, &cfg, crate::clock::now());
         assert_eq!(value["class"], "offline");
         assert!(value.get("percentage").is_none());
         assert_eq!(value["text"], "no devices");
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn waybar_unreachable_with_retained_reading_shows_it_like_the_tray() {
-        let seen = Instant::now();
+        let seen = crate::clock::now();
         let now = seen + Duration::from_secs(300);
         let reading = BatteryReading::new(88, ChargeState::Discharging);
         let states = vec![device_state(
@@ -271,7 +271,7 @@ mod tests {
         let states: Vec<DeviceState> = vec![];
         let cfg = Config::default();
 
-        let value = to_waybar(&states, &cfg, Instant::now());
+        let value = to_waybar(&states, &cfg, crate::clock::now());
         assert_eq!(value["class"], "offline");
         assert_eq!(value["text"], "no devices");
         assert!(value.get("percentage").is_none());
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn waybar_tooltip_lists_the_tray_roster_in_its_order() {
-        let seen = Instant::now();
+        let seen = crate::clock::now();
         let now = seen + Duration::from_secs(300);
         let charging = BatteryReading::new(80, ChargeState::Charging);
         let retained = BatteryReading::new(50, ChargeState::Discharging);
@@ -312,7 +312,7 @@ mod tests {
             device_state("keyboard", Presence::Online, Some(reading), None),
         ];
 
-        let value = to_waybar(&states, &Config::default(), Instant::now());
+        let value = to_waybar(&states, &Config::default(), crate::clock::now());
         assert_eq!(value["text"], "60%");
         let tooltip = value["tooltip"].as_str().expect("tooltip is a string");
         assert!(tooltip.contains("mouse: no access (run rigbat doctor)"));
@@ -330,7 +330,7 @@ mod tests {
             ..Config::default()
         };
 
-        let value = to_waybar(&states, &cfg, Instant::now());
+        let value = to_waybar(&states, &cfg, crate::clock::now());
         let tooltip = value["tooltip"].as_str().expect("tooltip is a string");
         assert_eq!(tooltip.lines().count(), 1);
         assert!(tooltip.contains("keyboard"));
@@ -349,7 +349,7 @@ mod tests {
             ..Config::default()
         };
 
-        let value = to_waybar(&states, &cfg, Instant::now());
+        let value = to_waybar(&states, &cfg, crate::clock::now());
         assert_eq!(value["percentage"], 10);
         assert_eq!(value["class"], "low");
     }
@@ -359,7 +359,7 @@ mod tests {
         let states = vec![device_state("mouse", Presence::NoAccess, None, None)];
         let cfg = Config::default();
 
-        let value = to_waybar(&states, &cfg, Instant::now());
+        let value = to_waybar(&states, &cfg, crate::clock::now());
         assert!(value.get("percentage").is_none());
         assert_eq!(value["text"], "offline");
     }
@@ -370,7 +370,7 @@ mod tests {
         let states = vec![device_state("mouse", Presence::Online, Some(reading), None)];
         let cfg = Config::default();
 
-        let value = to_waybar(&states, &cfg, Instant::now());
+        let value = to_waybar(&states, &cfg, crate::clock::now());
         let text = serde_json::to_string(&value).expect("serializes");
         let parsed = assert_single_line_json(&text);
         assert_eq!(parsed["class"], "charging");

@@ -98,6 +98,7 @@ src/
 │                 # roster policy, device text (state_str/format_age/entry line),
 │                 # TrayState, DisplayMode/TrayMode
 ├── refresh.rs     # RefreshSignal: "re-poll and re-discover now" generation counter
+├── clock.rs       # clock::now(): domain::BootTime from CLOCK_BOOTTIME (counts suspend)
 ├── sources/       # BatterySource + BatteryBackend + Context (shared system bus) +
 │                 # supervise (bus-watcher retry); sysfs/bluez/steelseries/eightbitdo
 ├── discovery/     # discover_all + registry::backends()
@@ -126,7 +127,7 @@ Dependencies point inward: `domain` imports only `i18n` and no infrastructure cr
 (`zbus`/`tiny-skia`/`nix`/…), and no adapter imports another adapter — text or policy that
 `cli`, `tray` and `settings` all render lives in `domain`, not in whichever surface happened to
 need it first. Adapters may use `domain`, `refresh`, `config` and the shared ports (`i18n`,
-`icon`, `ipc`, `gui`, `appearance`), which themselves never import `config`; `main.rs`, `app`
+`icon`, `ipc`, `gui`, `appearance`, `clock`), which themselves never import `config`; `main.rs`, `app`
 and `doctor` are the composition roots. The few allowed sideways edges (`discovery → sources`,
 `session → sources`, `settings` wiring its own process) are listed in `tests/architecture.rs`,
 which fails on any other edge and on any cycle.

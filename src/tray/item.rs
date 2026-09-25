@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{MenuItem, ToolTip, Tray};
 use tokio::sync::watch;
@@ -9,7 +7,8 @@ use super::resolve::{Resolved, featured_id, resolve_for, visible};
 use crate::appearance::ColorScheme;
 use crate::config::Config;
 use crate::domain::{
-    DeviceId, PrimaryStatus, TrayMode, TrayState, device_line, device_status, freedesktop_icon_name,
+    BootTime, DeviceId, PrimaryStatus, TrayMode, TrayState, device_line, device_status,
+    freedesktop_icon_name,
 };
 use crate::i18n::{Lang, fl, loader};
 use crate::icon::{IconRenderer, Theme};
@@ -85,7 +84,7 @@ impl RigbatTray {
     fn resolve(&self) -> Option<Resolved> {
         let state = self.rx.borrow();
         let cfg = self.config.borrow();
-        resolve_for(self.key.as_ref(), &state, &cfg, Instant::now())
+        resolve_for(self.key.as_ref(), &state, &cfg, crate::clock::now())
         // `state` and `cfg` (watch::Ref) are dropped here, before any await.
     }
 
@@ -106,7 +105,7 @@ impl RigbatTray {
         }
     }
 
-    fn menu_rows(&self, now: Instant) -> (Vec<MenuRow>, TrayMode, bool, Lang) {
+    fn menu_rows(&self, now: BootTime) -> (Vec<MenuRow>, TrayMode, bool, Lang) {
         let state = self.rx.borrow();
         let cfg = self.config.borrow();
         let lang = cfg.lang();
@@ -181,7 +180,7 @@ impl Tray for RigbatTray {
         let l = loader(lang);
         let title = self
             .resolve()
-            .map(|r| device_line(&r.state, r.status, Instant::now(), lang))
+            .map(|r| device_line(&r.state, r.status, crate::clock::now(), lang))
             .unwrap_or_else(|| match &self.key {
                 Some(id) => fl!(l, "entry-offline", name = id.name.as_str()),
                 None => fl!(l, "tray-no-devices"),
@@ -193,7 +192,7 @@ impl Tray for RigbatTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let (rows, mode, automatic, lang) = self.menu_rows(Instant::now());
+        let (rows, mode, automatic, lang) = self.menu_rows(crate::clock::now());
         let l = loader(lang);
 
         let mut items: Vec<MenuItem<Self>> = Vec::new();
@@ -283,7 +282,7 @@ impl Tray for RigbatTray {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::{MenuItem, RigbatTray, SaveConfig, Tray as _, sni_id, watch};
     use crate::appearance::ColorScheme;
@@ -382,7 +381,7 @@ mod tests {
                 ..make_info(name)
             },
             last_reading: Some(reading),
-            last_seen: Some(Instant::now()),
+            last_seen: Some(crate::clock::now()),
             presence: Presence::Online,
             estimate,
         }
@@ -405,7 +404,7 @@ mod tests {
                     "Ear",
                     DeviceKind::Headset,
                     BatteryReading::new(40, ChargeState::Charging),
-                    Estimate::Charging,
+                    Estimate::Unknown,
                 ),
                 device(
                     "Pad",

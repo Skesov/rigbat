@@ -1,5 +1,6 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use super::time::BootTime;
 use super::types::{DeviceState, Presence};
 
 /// How long a device that is not `Online` stays on a status surface after its
@@ -11,7 +12,7 @@ pub const RETAINED_ICON_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Whether a status surface shows the device: not hidden by the user, and
 /// still saying something (`DeviceState::is_currently_informative`).
-pub fn is_visible(device: &DeviceState, is_shown: impl Fn(&str) -> bool, now: Instant) -> bool {
+pub fn is_visible(device: &DeviceState, is_shown: impl Fn(&str) -> bool, now: BootTime) -> bool {
     is_shown(&device.info.name) && device.is_currently_informative(now, RETAINED_ICON_MAX_AGE)
 }
 
@@ -29,7 +30,7 @@ impl<'a> Roster<'a> {
     pub fn visible(
         devices: &'a [DeviceState],
         is_shown: impl Fn(&str) -> bool,
-        now: Instant,
+        now: BootTime,
     ) -> Self {
         let mut shown: Vec<&DeviceState> = devices
             .iter()
@@ -66,7 +67,7 @@ mod tests {
         name: &str,
         transport: Transport,
         presence: Presence,
-        reading: Option<(u8, Instant)>,
+        reading: Option<(u8, BootTime)>,
     ) -> DeviceState {
         DeviceState {
             info: DeviceInfo {
@@ -82,7 +83,7 @@ mod tests {
         }
     }
 
-    fn online(name: &str, now: Instant) -> DeviceState {
+    fn online(name: &str, now: BootTime) -> DeviceState {
         device(name, Transport::Sysfs, Presence::Online, Some((50, now)))
     }
 
@@ -101,7 +102,7 @@ mod tests {
     fn featured_id(
         devices: &[DeviceState],
         primary: Option<&str>,
-        now: Instant,
+        now: BootTime,
     ) -> Option<DeviceId> {
         Roster::visible(devices, all, now)
             .featured(primary)
@@ -112,7 +113,7 @@ mod tests {
 
     #[test]
     fn a_hidden_device_is_not_visible() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let mouse = online("mouse", now);
         assert!(is_visible(&mouse, all, now));
         assert!(!is_visible(&mouse, |n| n != "mouse", now));
@@ -120,14 +121,14 @@ mod tests {
 
     #[test]
     fn a_device_that_never_answered_is_not_visible() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let dongle = device("dongle", Transport::Hidraw, Presence::Unreachable, None);
         assert!(!is_visible(&dongle, all, now));
     }
 
     #[test]
     fn a_retained_reading_is_visible_for_a_day_and_not_after() {
-        let seen = Instant::now();
+        let seen = BootTime::TEST_NOW;
         let keys = device(
             "keys",
             Transport::Hidraw,
@@ -142,14 +143,14 @@ mod tests {
     #[test]
     fn a_device_without_access_is_visible_without_a_reading() {
         let locked = device("locked", Transport::Hidraw, Presence::NoAccess, None);
-        assert!(is_visible(&locked, all, Instant::now()));
+        assert!(is_visible(&locked, all, BootTime::TEST_NOW));
     }
 
     // --- order ----------------------------------------------------------------
 
     #[test]
     fn roster_lists_online_devices_first_then_by_name_ignoring_case() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let devices = vec![
             device(
                 "alpha",
@@ -167,7 +168,7 @@ mod tests {
 
     #[test]
     fn same_named_devices_keep_their_relative_order() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let devices = vec![
             device("MX", Transport::Sysfs, Presence::Online, Some((70, now))),
             device(
@@ -187,7 +188,7 @@ mod tests {
 
     #[test]
     fn roster_leaves_out_what_is_not_visible() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let devices = vec![
             online("mouse", now),
             online("hidden", now),
@@ -201,7 +202,7 @@ mod tests {
 
     #[test]
     fn featured_follows_a_visible_pin() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let devices = vec![online("mouse", now), online("keyboard", now)];
         let pick = featured_id(&devices, Some("mouse"), now).map(|id| id.name);
         assert_eq!(pick.as_deref(), Some("mouse"));
@@ -209,7 +210,7 @@ mod tests {
 
     #[test]
     fn featured_ignores_a_pin_that_is_not_visible() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let devices = vec![
             online("mouse", now),
             device("dongle", Transport::Hidraw, Presence::Unreachable, None),
@@ -222,7 +223,7 @@ mod tests {
 
     #[test]
     fn featured_prefers_an_online_device_over_a_sleeping_one() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let devices = vec![
             device(
                 "alpha",
@@ -238,7 +239,7 @@ mod tests {
 
     #[test]
     fn featured_picks_the_online_copy_of_a_duplicate_name() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let devices = vec![
             device(
                 "MX",
@@ -261,7 +262,7 @@ mod tests {
 
     #[test]
     fn with_nothing_online_featured_skips_a_dongle_without_a_reading() {
-        let now = Instant::now();
+        let now = BootTime::TEST_NOW;
         let dongle = device("a-dongle", Transport::Hidraw, Presence::Unreachable, None);
         let keys = device(
             "keys",
