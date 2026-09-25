@@ -1,6 +1,15 @@
 # rigbat
 
-System tray battery monitor for gaming peripherals.
+[![crates.io](https://img.shields.io/crates/v/rigbat.svg)](https://crates.io/crates/rigbat)
+[![CI](https://github.com/Skesov/rigbat/actions/workflows/ci.yml/badge.svg)](https://github.com/Skesov/rigbat/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/rigbat.svg)](#license)
+
+System tray battery monitor for gaming peripherals on Linux.
+
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" width="386"
+       alt="The device overview: an 8BitDo controller at 82%, a NuPhy keyboard at 100% and a SteelSeries mouse at 65%, each with a charge bar">
+</p>
 
 ## What it does
 
@@ -8,8 +17,9 @@ System tray battery monitor for gaming peripherals.
 - Displays one tray icon for every device, or a single aggregate icon (switch in the settings
   window); the aggregate icon shows the device pinned on the Devices tab, or the connected
   visible device with the lowest charge when none is pinned
-- Left-click the tray icon for an overview: one card per device with its tray glyph, charge bar,
-  status and time left, so you can tell which icon is which. Right-click opens the menu
+- Left-click the tray icon for an overview: one row per device with its kind, charge bar, status
+  and time left (above). Right-click opens the menu, where the single icon can be pinned to a
+  device
 - Automatically discovers connected devices on startup — no manual configuration required
 - Supports multiple devices simultaneously; the settings window lists every device ever seen —
   hide the ones you do not care about, delete the ones you no longer own
@@ -52,7 +62,8 @@ Adding a device to either table is a small, well-scoped change: see
 To run it:
 
 - Linux
-- System tray support (StatusNotifierItem / XEmbed)
+- A StatusNotifierItem tray host (KDE, GNOME with the AppIndicator extension, COSMIC, Waybar's
+  tray, …). An XEmbed-only tray needs [snixembed](https://git.sr.ht/~steef/snixembed) in between
 
 To build it from source:
 
@@ -72,7 +83,21 @@ libXrandr-devel libXi-devel mesa-libGL-devel pkgconf-pkg-config`.
   The tray itself reaches X11, Wayland and GL through `dlopen` at runtime; these are what the
   build scripts need.
 
-## Build and install
+## Install
+
+- **Packages** — `.deb` and `.rpm` from the
+  [releases page](https://github.com/Skesov/rigbat/releases). They install `/usr/bin/rigbat`, the
+  udev rule, the systemd user unit, the desktop entry and the icon; then run
+  `systemctl --user enable --now rigbat.service`.
+- **Tarball** — the same release page has `rigbat-v<version>-x86_64-unknown-linux-gnu.tar.gz`:
+  the binary plus the `packaging/` files, each with a `.sha256`.
+- **crates.io** — `cargo install rigbat --locked` builds the binary only (needs the build
+  requirements above). A USB HID device also needs the udev rule (see [Permissions](#permissions));
+  start the tray with the settings window's `Start with session` switch.
+- **Arch Linux** — see [below](#arch-linux-aur).
+- **From source** — see the next section.
+
+## Build and install from source
 
 The `Makefile` standardizes the local flow. Run `make` for the full target list.
 
@@ -152,7 +177,7 @@ and says the service manages startup when it sees the service enabled.
 ## Permissions
 
 `/dev/hidraw*` nodes are root-only by default on most distros, so a USB HID device
-(e.g. a SteelSeries mouse) shows as `offline` until you install the udev rule:
+(e.g. a SteelSeries mouse) shows as `no access` until you install the udev rule:
 
 ```sh
 sudo make udev-install
@@ -184,14 +209,25 @@ GNOME or Nord; light or dark still follows the system), the default low-battery 
 default 20), the default poll interval (30 s to 1 h, default 1 min), low-battery notifications,
 whether rigbat starts with the session, and the language (`System` follows `LANG`).
 
+<p align="center">
+  <img src="docs/screenshots/general.png" width="726"
+       alt="The General tab: icon style tiles, the one-icon-per-device switch, colour palette tiles with Catppuccin, Everforest, GNOME and Nord, and the low battery threshold">
+</p>
+
 **Devices** — every device rigbat has ever seen on this machine, in two groups: `Connected now`,
 with its charge and a `Show in tray` switch, and `Seen before`, with when it was last seen. Click
 a row to open that device's own settings in place: pin it to the single tray icon, override the
 threshold and the poll interval (`↺` returns to the default), or remove it. Turning off
 `Show in tray` hides that one device and touches nothing else, so the setting survives reboots,
 unplugged dongles, and devices that happen to be asleep when the window opens. Remove forgets a
-device you no longer own; it comes back if the device is ever seen again. Renaming a device — in your Bluetooth settings, for instance — keeps its row, its history
-and its per-device settings: rigbat recognises the hardware, not the label.
+device you no longer own; it comes back if the device is ever seen again. Renaming a device — in
+your Bluetooth settings, for instance — keeps its row, its history and its per-device settings:
+rigbat recognises the hardware, not the label.
+
+<p align="center">
+  <img src="docs/screenshots/devices.png" width="726"
+       alt="The Devices tab: three connected devices with their charge and a show-in-tray switch, and four devices seen before with when they were last seen">
+</p>
 
 Changes are written immediately and the tray picks them up through a file watch — no restart.
 Escape closes the window; if a removal is waiting for confirmation, a row is open or a search
@@ -209,8 +245,8 @@ Two files back this:
 
 ## Status bars
 
-rigbat's tray is a StatusNotifierItem, which does not cover wlroots compositors running
-Waybar/Polybar instead of an SNI host.
+Waybar's `tray` module hosts rigbat's icon like any other SNI host. For a text readout in the bar
+itself, or on Polybar, which has no SNI tray, use the modes below.
 
 ### Waybar
 
