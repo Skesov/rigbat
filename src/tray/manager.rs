@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{MenuItem, ToolTip, Tray, TrayMethods};
@@ -10,8 +10,8 @@ use crate::app::supervisor::TrayState;
 use crate::appearance::ColorScheme;
 use crate::config::{Config, TrayMode};
 use crate::domain::{
-    DeviceId, DeviceState, Presence, PrimaryStatus, device_line, device_status,
-    freedesktop_icon_name, select_featured,
+    DeviceId, DeviceState, PrimaryStatus, Roster, device_line, device_status,
+    freedesktop_icon_name, is_visible,
 };
 use crate::i18n::{Lang, fl, loader};
 use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
@@ -54,24 +54,9 @@ fn id_hash(id: &DeviceId) -> u32 {
     hash
 }
 
-/// How long a device that is not `Online` keeps its tray presence after its
-/// last reading.
-///
-/// Matches the supervisor's `DISCONNECTED_RETENTION` deliberately: the roster
-/// and the tray forget a silent device on the same schedule, so an icon never
-/// outlives the entry behind it. A day is long enough that a peripheral left
-/// off overnight is where the user left it, and short enough that a mouse
-/// unused for a week is not still claiming a slot.
-const RETAINED_ICON_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// Whether a device should appear in the tray at all: not hidden by the user,
-/// and still saying something (`DeviceState::is_currently_informative`).
-///
-/// Every place that turns `TrayState` into tray output goes through this, so
-/// the icon list, the menu roster and the aggregate icon's pick can never
-/// disagree about which devices exist.
-pub(super) fn tray_visible(device: &DeviceState, cfg: &Config, now: Instant) -> bool {
-    cfg.is_shown(&device.info.name) && device.is_currently_informative(now, RETAINED_ICON_MAX_AGE)
+/// The devices the tray shows, in roster order.
+fn visible<'a>(state: &'a TrayState, cfg: &Config, now: Instant) -> Roster<'a> {
+    Roster::visible(&state.devices, |name| cfg.is_shown(name), now)
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +79,7 @@ pub fn desired_keys(mode: TrayMode, shown: &[DeviceId]) -> Vec<Option<DeviceId>>
 /// The tray-visible devices, in roster order, one entry per `DeviceId`.
 fn shown_ids(state: &TrayState, cfg: &Config, now: Instant) -> Vec<DeviceId> {
     let mut shown: Vec<DeviceId> = Vec::new();
-    for d in state.devices.iter().filter(|d| tray_visible(d, cfg, now)) {
+    for d in visible(state, cfg, now).devices() {
         let id = d.info.id();
         if !shown.contains(&id) {
             shown.push(id);
@@ -103,32 +88,10 @@ fn shown_ids(state: &TrayState, cfg: &Config, now: Instant) -> Vec<DeviceId> {
     shown
 }
 
-// ---------------------------------------------------------------------------
-// featured_id — the device the aggregate icon represents
-// ---------------------------------------------------------------------------
-
-/// Returns the device the single (aggregate) icon represents.
-///
-/// Priority: explicit user choice (if still shown) → first connected shown
-/// device → first shown device → None. The pin is name-keyed, so among
-/// visible devices sharing the picked name the first online one wins.
+/// The device the single (aggregate) icon represents: `Roster::featured`.
 pub(super) fn featured_id(state: &TrayState, cfg: &Config, now: Instant) -> Option<DeviceId> {
-    let visible: Vec<&DeviceState> = state
-        .devices
-        .iter()
-        .filter(|d| tray_visible(d, cfg, now))
-        .collect();
-    let shown: Vec<(&str, bool)> = visible
-        .iter()
-        .map(|d| (d.info.name.as_str(), d.presence == Presence::Online))
-        .collect();
-    let name = select_featured(&shown, cfg.primary_device.as_deref())?;
-
-    let mut named = visible.iter().filter(|d| d.info.name == name);
-    let first = named.clone().next();
-    named
-        .find(|d| d.presence == Presence::Online)
-        .or(first)
+    visible(state, cfg, now)
+        .featured(cfg.primary_device.as_deref())
         .map(|d| d.info.id())
 }
 
@@ -137,9 +100,9 @@ pub(super) fn featured_id(state: &TrayState, cfg: &Config, now: Instant) -> Opti
 // ---------------------------------------------------------------------------
 
 /// The device a tray icon stands for, resolved against the current state and config.
-struct Resolved {
-    state: DeviceState,
-    status: PrimaryStatus,
+pub(crate) struct Resolved {
+    pub(crate) state: DeviceState,
+    pub(crate) status: PrimaryStatus,
     /// `true` when `status` classifies a retained reading from a device that
     /// is not currently `Online` — the icon should render dimmed.
     stale: bool,
@@ -168,7 +131,7 @@ struct Resolved {
 /// priority, hiding a low battery behind a stale green icon. So a stale
 /// reading is classified by `classify_stale`, which looks only at the
 /// percentage.
-fn resolve_for(
+pub(crate) fn resolve_for(
     key: Option<&DeviceId>,
     state: &TrayState,
     cfg: &Config,
@@ -182,7 +145,7 @@ fn resolve_for(
         .devices
         .iter()
         .find(|d| d.info.id() == id)
-        .filter(|d| tray_visible(d, cfg, now))?;
+        .filter(|d| is_visible(d, |name| cfg.is_shown(name), now))?;
     let (status, stale) = device_status(device, cfg.effective_low_threshold(&device.info.name));
     Some(Resolved {
         state: device.clone(),
@@ -250,10 +213,9 @@ impl RigbatTray {
         let lang = cfg.lang();
         let pinned = featured_id(&state, &cfg, now)
             .filter(|id| cfg.primary_device.as_deref() == Some(id.name.as_str()));
-        let rows = state
-            .devices
+        let rows = visible(&state, &cfg, now)
+            .devices()
             .iter()
-            .filter(|d| tray_visible(d, &cfg, now))
             .map(|d| {
                 let (status, _) = device_status(d, cfg.effective_low_threshold(&d.info.name));
                 MenuRow {
@@ -545,15 +507,14 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        ColorScheme, MenuItem, RETAINED_ICON_MAX_AGE, RefreshSignal, RigbatTray, SaveConfig,
-        TinySkiaRenderer, Tray as _, desired_keys, featured_id, resolve_for, shown_ids, sni_id,
-        watch,
+        ColorScheme, MenuItem, RefreshSignal, RigbatTray, SaveConfig, TinySkiaRenderer, Tray as _,
+        desired_keys, featured_id, resolve_for, shown_ids, sni_id, watch,
     };
     use crate::app::supervisor::TrayState;
     use crate::config::{Config, TrayMode};
     use crate::domain::{
         BatteryReading, ChargeState, DeviceId, DeviceInfo, DeviceKind, DeviceState, Presence,
-        PrimaryStatus, Transport,
+        PrimaryStatus, RETAINED_ICON_MAX_AGE, Transport,
     };
     use std::time::Duration;
 
@@ -686,8 +647,8 @@ mod tests {
         assert_eq!(
             percents,
             [
-                (Transport::Sysfs, Some(70)),
-                (Transport::Bluetooth, Some(40))
+                (Transport::Bluetooth, Some(40)),
+                (Transport::Sysfs, Some(70))
             ]
         );
 
@@ -790,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn featured_name_explicit_hidden_falls_back_to_first_connected() {
+    fn featured_name_explicit_hidden_falls_back_to_first_connected_by_name() {
         // "gamepad" is hidden, so the explicit choice is ignored.
         let mut cfg = cfg_with_primary(Some("gamepad"));
         cfg.hidden_devices = vec!["gamepad".to_string()];
@@ -799,10 +760,9 @@ mod tests {
             (make_info("keyboard"), Some(make_reading(50))),
             (make_info("gamepad"), Some(make_reading(30))),
         ]);
-        // "gamepad" is not shown, so falls back to first connected shown: "mouse"
         assert_eq!(
             featured_name(&state, &cfg, Instant::now()),
-            Some("mouse".to_string())
+            Some("keyboard".to_string())
         );
     }
 
@@ -831,7 +791,7 @@ mod tests {
         // Nothing online; falls back to the first device still worth showing.
         assert_eq!(
             featured_name(&state, &cfg, Instant::now()),
-            Some("mouse".to_string())
+            Some("keyboard".to_string())
         );
     }
 
@@ -1221,12 +1181,12 @@ mod tests {
             describe(&tray),
             with_tail(&[
                 "[x] Automatic",
-                "[ ] MX__Master: 62% · ~3h left #input-mouse",
-                "[ ] Ear: ⚡ 40% #audio-headset",
-                "[ ] Pad: 100% · full #input-gaming",
                 "[ ] Aerox: ⚠ 15% #input-mouse",
-                "[ ] NuPhy: Unreachable · last reading 2h ago #input-keyboard",
+                "[ ] Ear: ⚡ 40% #audio-headset",
+                "[ ] MX__Master: 62% · ~3h left #input-mouse",
+                "[ ] Pad: 100% · full #input-gaming",
                 "[ ] mouse: No access · run rigbat doctor #input-mouse",
+                "[ ] NuPhy: Unreachable · last reading 2h ago #input-keyboard",
             ])
         );
     }
@@ -1260,8 +1220,8 @@ mod tests {
             describe(&tray),
             with_tail(&[
                 "[ ] Automatic",
-                "[ ] MX: Unreachable · last reading just now #input-mouse",
                 "[x] MX: 40% #input-mouse",
+                "[ ] MX: Unreachable · last reading just now #input-mouse",
             ])
         );
     }
@@ -1276,12 +1236,12 @@ mod tests {
         assert_eq!(
             describe(&tray),
             with_tail(&[
-                "MX__Master: 62% · ~3h left #input-mouse",
-                "Ear: ⚡ 40% #audio-headset",
-                "Pad: 100% · full #input-gaming",
                 "Aerox: ⚠ 15% #input-mouse",
-                "NuPhy: Unreachable · last reading 2h ago #input-keyboard",
+                "Ear: ⚡ 40% #audio-headset",
+                "MX__Master: 62% · ~3h left #input-mouse",
+                "Pad: 100% · full #input-gaming",
                 "mouse: No access · run rigbat doctor #input-mouse",
+                "NuPhy: Unreachable · last reading 2h ago #input-keyboard",
             ])
         );
     }
@@ -1571,40 +1531,37 @@ mod tests {
             .await;
             let item = item.as_str();
             let title = || async move { item_property(client, item, "Title").await };
-            assert_eq!(title().await.as_deref(), Some("mouse"));
+            assert_eq!(title().await.as_deref(), Some("keyboard"));
 
             let rows = menu(client, item).await;
             let rows: Vec<(&str, i32)> = rows.iter().map(|(_, l, t)| (l.as_str(), *t)).collect();
             assert_eq!(
                 &rows[..3],
-                [("Automatic", 1), ("mouse: 80%", 0), ("keyboard: 50%", 0)]
+                [("Automatic", 1), ("keyboard: 50%", 0), ("mouse: 80%", 0)]
             );
 
-            let keyboard_id = menu(client, item)
+            let mouse_id = menu(client, item)
                 .await
                 .into_iter()
-                .find(|(_, label, _)| label == "keyboard: 50%")
+                .find(|(_, label, _)| label == "mouse: 80%")
                 .map(|(id, _, _)| id)
-                .expect("keyboard row");
+                .expect("mouse row");
             client
                 .call_method(
                     Some(item),
                     "/MenuBar",
                     Some("com.canonical.dbusmenu"),
                     "Event",
-                    &(keyboard_id, "clicked", Value::from(0i32), 0u32),
+                    &(mouse_id, "clicked", Value::from(0i32), 0u32),
                 )
                 .await
                 .expect("Event");
 
             eventually(TIMEOUT, || async move {
-                (title().await.as_deref() == Some("keyboard")).then_some(())
+                (title().await.as_deref() == Some("mouse")).then_some(())
             })
             .await;
-            assert_eq!(
-                config_tx.borrow().primary_device.as_deref(),
-                Some("keyboard")
-            );
+            assert_eq!(config_tx.borrow().primary_device.as_deref(), Some("mouse"));
             let rows = menu(client, item).await;
             let toggles: Vec<i32> = rows.iter().take(3).map(|(_, _, t)| *t).collect();
             assert_eq!(toggles, [0, 0, 1]);

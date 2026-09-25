@@ -93,7 +93,7 @@ Full rationale, data flow, and contracts: [`docs/architecture.md`](docs/architec
 ```text
 src/
 ├── domain/        # types, classify, guess_kind, freedesktop_icon_name, estimate,
-│                 # select_featured, device text (state_str/format_age/entry line)
+│                 # roster policy, device text (state_str/format_age/entry line)
 ├── sources/       # BatterySource + BatteryBackend; sysfs/bluez/steelseries/eightbitdo
 ├── discovery/     # discover_all + registry::backends() + Context (shared system bus) + backoff
 ├── cli/           # output adapter: table / --json / --wide / --waybar

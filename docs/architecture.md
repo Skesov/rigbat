@@ -29,7 +29,7 @@ reverse.
 ```text
         domain            pure types + logic (DeviceInfo, BatteryReading, PrimaryStatus,
           ▲               classify, guess_kind, freedesktop_icon_name, DeviceId, estimate,
-          │               select_featured, device text)
+          │               roster policy, device text)
         i18n              Fluent catalogues + Lang; pure, so domain may use it
           │
         sources           BatterySource / BatteryBackend traits + sysfs/bluez/
@@ -50,10 +50,11 @@ trait in an inner layer — with the concrete dependency living in the implement
 is how one surface's incidental choice becomes another's contract. What they share moves inward
 instead. Two things did, and they are the shape to copy — `domain::text` (`state_str`,
 `format_age`, `format_device_entry`, `device_line`), because a device reads the same in the tray
-menu, the dashboard, the CLI table and the Devices tab, and `domain::primary::select_featured`, because "which device does the
-single view show" is policy, answered identically by the aggregate icon, `--waybar` and the
-settings window's description of it. Both are pure, so both are tested without a bus or a
-display.
+menu, the dashboard, the CLI table and the Devices tab, and `domain::roster` (`Roster`,
+`is_visible`, `roster_order`), because which devices a view lists, in what order (online first,
+then by name), and which one the single view shows is policy, answered identically by the tray
+icons and menu, the dashboard, `--waybar` and the CLI table. Both are pure, so both are tested
+without a bus or a display.
 
 Translated text takes the language as a parameter (`format_device_entry(state, now, lang)`),
 the same way it takes `now`: the language changes at runtime and tests run in parallel, so no
@@ -144,9 +145,9 @@ flows out through channels.
   reading at all. The second case is the common one: a wireless dongle stays enumerated while its
   mouse is switched off, so the device is discovered, polled, and never answers — an empty battery
   outline that has never meant anything. Display only: the device stays in the roster, keeps being
-  polled, and reappears on its next successful reading. Every path from `TrayState` to tray output
-  goes through one predicate (`tray_visible`), so the icon list, the menu roster and the aggregate
-  icon's pick cannot disagree about which devices exist.
+  polled, and reappears on its next successful reading. The tray icons, the menu, the aggregate
+  icon's pick and `--waybar` all go through one predicate (`domain::is_visible`, via
+  `Roster::visible`), so they cannot disagree about which devices exist.
 - **Estimate**: on every reading the manager derives a time-remaining estimate
   (`domain::estimate`) from the device's percent-change history, refusing rather than guessing
   when the evidence is thin (coarse-bucket readings, a short window, an uneven step rate — see

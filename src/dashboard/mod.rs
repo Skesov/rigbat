@@ -14,7 +14,7 @@ use futures_util::{Stream, StreamExt as _};
 use zbus::fdo::{DBusProxy, NameOwnerChangedStream};
 
 use crate::config;
-use crate::domain::{DeviceKind, Presence, PrimaryStatus, charge_value, status_note};
+use crate::domain::{DeviceKind, Presence, PrimaryStatus, charge_value, roster_order, status_note};
 use crate::gui;
 use crate::i18n::{Lang, fl, loader};
 use crate::icon::Theme;
@@ -465,13 +465,8 @@ impl eframe::App for Dashboard {
     }
 }
 
-/// Online devices first, then the rest, each group by name.
 fn sort_cards(cards: &mut [DeviceCard]) {
-    cards.sort_by(|a, b| {
-        (a.presence != Presence::Online)
-            .cmp(&(b.presence != Presence::Online))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+    cards.sort_by_cached_key(|c| roster_order(&c.name, c.presence));
 }
 
 fn render_row(ui: &mut egui::Ui, card: &DeviceCard, lang: Lang, elapsed: u64) {

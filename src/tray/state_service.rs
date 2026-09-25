@@ -5,11 +5,11 @@ use std::time::Instant;
 use tokio::sync::watch;
 use zbus::object_server::SignalEmitter;
 
-use super::manager::{featured_id, tray_visible};
+use super::manager::featured_id;
 use crate::app::refresh::RefreshSignal;
 use crate::app::supervisor::TrayState;
 use crate::config::{Config, TrayMode};
-use crate::domain::{Estimate, device_status};
+use crate::domain::{Estimate, device_status, is_visible};
 use crate::ipc::{DeviceCard, Snapshot, TRAY_PATH};
 
 /// Every shown device, classified exactly as its tray icon is.
@@ -22,7 +22,7 @@ pub fn snapshot(state: &TrayState, cfg: &Config, now: Instant) -> Snapshot {
         .map(|d| {
             let (status, stale) = device_status(d, cfg.effective_low_threshold(&d.info.name));
             let in_tray = match cfg.tray_mode {
-                TrayMode::PerDevice => tray_visible(d, cfg, now),
+                TrayMode::PerDevice => is_visible(d, |name| cfg.is_shown(name), now),
                 TrayMode::PrimaryOnly => featured.as_ref() == Some(&d.info.id()),
             };
             DeviceCard {

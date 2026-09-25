@@ -22,9 +22,6 @@ mod sources;
 mod state;
 mod tray;
 
-use crate::domain::Presence;
-use crate::domain::select_featured;
-
 const USAGE: &str = "\
 rigbat — system tray battery monitor for peripherals
 
@@ -465,25 +462,15 @@ async fn run_waybar() {
             {
                 let state = rx.borrow();
                 let cfg = cfg_rx.borrow();
-                // Judge the device the frame is actually built from, resolved the
-                // same way the renderer resolves it. A roster can carry the same
-                // mouse twice (sysfs and Bluetooth) and a hidden copy answering
-                // first says nothing about the visible one; conversely, requiring
+                // Judge the device the frame is actually built from. A roster can
+                // carry the same mouse twice (sysfs and Bluetooth), and requiring
                 // every shown device to answer never settles when one of them is
                 // permanently asleep, which is the normal state of a wireless
                 // mouse on its charger.
-                let shown: Vec<(&str, bool)> = state
-                    .devices
-                    .iter()
-                    .filter(|d| cfg.is_shown(&d.info.name))
-                    .map(|d| (d.info.name.as_str(), d.presence == Presence::Online))
-                    .collect();
-                let settled = match select_featured(&shown, cfg.primary_device.as_deref()) {
-                    None => true,
-                    Some(name) => state
-                        .devices
-                        .iter()
-                        .any(|d| d.info.name == name && d.last_reading.is_some()),
+                let now = std::time::Instant::now();
+                let settled = match cli::waybar_featured(&state.devices, &cfg, now) {
+                    Some((d, _)) => d.last_reading.is_some(),
+                    None => !state.devices.iter().any(|d| cfg.is_shown(&d.info.name)),
                 };
                 if settled {
                     return;
@@ -753,6 +740,106 @@ mod tests {
             "--wide",
         ] {
             assert!(USAGE.contains(token), "USAGE missing '{token}'");
+        }
+    }
+}
+
+#[cfg(test)]
+mod featured_tests {
+    use std::time::{Duration, Instant};
+
+    use crate::app::supervisor::TrayState;
+    use crate::config::Config;
+    use crate::domain::{
+        BatteryReading, ChargeState, DeviceInfo, DeviceKind, DeviceState, Estimate, Presence,
+        PrimaryStatus, Transport,
+    };
+
+    fn device(
+        name: &str,
+        transport: Transport,
+        presence: Presence,
+        percent: Option<u8>,
+        seen: Instant,
+    ) -> DeviceState {
+        DeviceState {
+            info: DeviceInfo {
+                name: name.to_owned(),
+                kind: DeviceKind::Mouse,
+                transport,
+                locator: None,
+            },
+            last_reading: percent.map(|p| BatteryReading::new(p, ChargeState::Discharging)),
+            last_seen: percent.map(|_| seen),
+            presence,
+            estimate: Estimate::Unknown,
+        }
+    }
+
+    /// Two copies of one mouse, a sleeping keyboard and a dongle that never answered.
+    fn roster(now: Instant) -> TrayState {
+        let seen = now - Duration::from_secs(300);
+        TrayState {
+            devices: vec![
+                device(
+                    "MX",
+                    Transport::Sysfs,
+                    Presence::Unreachable,
+                    Some(70),
+                    seen,
+                ),
+                device("MX", Transport::Bluetooth, Presence::Online, Some(40), now),
+                device(
+                    "Keys",
+                    Transport::Hidraw,
+                    Presence::Unreachable,
+                    Some(88),
+                    seen,
+                ),
+                device(
+                    "Dongle",
+                    Transport::Hidraw,
+                    Presence::Unreachable,
+                    None,
+                    seen,
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn waybar_and_the_tray_icon_feature_the_same_device_and_status() {
+        let now = Instant::now();
+        let state = roster(now);
+        let cases = [
+            (None, "MX", Transport::Bluetooth, 40),
+            (Some("MX"), "MX", Transport::Bluetooth, 40),
+            (Some("Keys"), "Keys", Transport::Hidraw, 88),
+            (Some("Dongle"), "MX", Transport::Bluetooth, 40),
+        ];
+        for (primary, name, transport, percent) in cases {
+            let cfg = Config {
+                primary_device: primary.map(str::to_owned),
+                ..Config::default()
+            };
+            let tray = crate::tray::manager::resolve_for(None, &state, &cfg, now)
+                .expect("the tray features a device");
+            let (waybar, waybar_status) =
+                crate::cli::waybar_featured(&state.devices, &cfg, now).expect("waybar too");
+            assert_eq!(waybar.info.id(), tray.state.info.id(), "pin {primary:?}");
+            assert_eq!(waybar_status, tray.status, "pin {primary:?}");
+            assert_eq!(
+                (
+                    waybar.info.name.as_str(),
+                    waybar.info.transport,
+                    waybar_status
+                ),
+                (name, transport, PrimaryStatus::Ok { percent }),
+                "pin {primary:?}"
+            );
+
+            let json = crate::cli::to_waybar(&state.devices, &cfg, now);
+            assert_eq!(json["percentage"], percent, "pin {primary:?}");
         }
     }
 }

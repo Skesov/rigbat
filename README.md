@@ -245,11 +245,11 @@ add `restart-interval` so Waybar respawns it:
 }
 ```
 
-`--waybar` retains the last reading of a device that goes unreachable (asleep, switched off, out
-of range), the same as the tray: the tooltip shows it with its age (e.g. "mouse: 88% offline
-(5m ago)") instead of losing the value. The featured device's own `text`/`class`/`percentage`
-still report a plain `offline` with no `percentage` key while it is unreachable — only the
-tooltip carries the retained value.
+`--waybar` shows the same devices, in the same order, as the tray menu, and features the device
+the single tray icon shows. A device that goes unreachable (asleep, switched off, out of range)
+keeps its last reading, as in the tray: `text`/`class`/`percentage` report it, and the tooltip
+adds its age (e.g. "mouse: 88% offline (5m ago)"). A device drops out once that reading is older
+than 24 h, or if it never produced one.
 
 ### Polybar
 

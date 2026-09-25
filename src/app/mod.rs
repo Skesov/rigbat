@@ -3,7 +3,7 @@ pub mod supervisor;
 
 use tokio::task::JoinSet;
 
-use crate::domain::{DeviceInfo, PollOutcome};
+use crate::domain::{DeviceInfo, PollOutcome, roster_order};
 use crate::sources::{AccessDenied, BatterySource};
 
 /// Polls all sources in parallel. An error from a source becomes `Failed`, or
@@ -52,7 +52,7 @@ pub async fn poll_once(sources: Vec<Box<dyn BatterySource>>) -> Vec<(DeviceInfo,
         }
     }
 
-    rows.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+    rows.sort_by_cached_key(|(info, outcome)| roster_order(&info.name, outcome.presence()));
     rows
 }
 
@@ -212,6 +212,28 @@ mod tests {
         let names: Vec<&str> = rows.iter().map(|r| r.0.name.as_str()).collect();
         assert!(names.contains(&"keyboard"));
         assert!(names.contains(&"mouse"));
+    }
+
+    #[tokio::test]
+    async fn online_devices_come_first_then_by_name() {
+        let sources: Vec<Box<dyn BatterySource>> = vec![
+            Box::new(ErrSource {
+                info: device("alpha"),
+            }),
+            Box::new(OkSource {
+                info: device("zebra"),
+                reading: reading(50),
+            }),
+            Box::new(OkSource {
+                info: device("Mouse"),
+                reading: reading(70),
+            }),
+        ];
+
+        let rows = poll_once(sources).await;
+
+        let names: Vec<&str> = rows.iter().map(|r| r.0.name.as_str()).collect();
+        assert_eq!(names, ["Mouse", "zebra", "alpha"]);
     }
 
     #[tokio::test]

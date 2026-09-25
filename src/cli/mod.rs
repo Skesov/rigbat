@@ -3,8 +3,8 @@ use std::time::Instant;
 use serde_json::{Value, json};
 
 use crate::config::Config;
-use crate::domain::{DeviceInfo, DeviceState, PollOutcome, Presence, PrimaryStatus, classify};
-use crate::domain::{format_device_entry, select_featured, state_str};
+use crate::domain::{DeviceInfo, DeviceState, PollOutcome, PrimaryStatus, Roster};
+use crate::domain::{device_status, format_device_entry, state_str};
 use crate::i18n::Lang;
 
 type Row = (DeviceInfo, PollOutcome);
@@ -58,41 +58,38 @@ pub fn print_json(rows: &[Row]) {
     println!("{}", text);
 }
 
+/// The device the waybar module features and its status: the aggregate tray
+/// icon's pick and classification, from the same `domain` policy.
+pub fn waybar_featured<'a>(
+    states: &'a [DeviceState],
+    cfg: &Config,
+    now: Instant,
+) -> Option<(&'a DeviceState, PrimaryStatus)> {
+    let roster = Roster::visible(states, |name| cfg.is_shown(name), now);
+    let device = roster.featured(cfg.primary_device.as_deref())?;
+    let (status, _) = device_status(device, cfg.effective_low_threshold(&device.info.name));
+    Some((device, status))
+}
+
 /// Builds the waybar `custom` module payload (`return-type: json`): a single
-/// object describing the featured device — the same device the aggregate
-/// tray icon shows, picked by `select_featured` (the tray's own selection
-/// logic, extracted so this does not reimplement it).
+/// object describing the featured device (`waybar_featured`), with a tooltip
+/// line per device the tray lists, in the tray's order.
 ///
-/// Renders straight from the live `DeviceState` snapshots `Supervisor`
-/// publishes (`TrayState.devices`), not from a one-shot `Row`: a `DeviceState`
-/// carries `presence` and `last_seen`, so a device that is `Unreachable` or
-/// `Disconnected` still contributes its retained reading and age to the
-/// tooltip instead of collapsing to a bare "offline". `now` is a parameter,
-/// not `Instant::now()` inside the function, so tests are deterministic —
-/// same convention as `format_device_entry`.
+/// Renders from the live `DeviceState` snapshots `Supervisor` publishes, so a
+/// sleeping device keeps its retained reading, as it does in the tray. `now`
+/// is a parameter so tests are deterministic.
 ///
 /// `class` vocabulary (documented in the README, styled by the user's CSS):
 /// `charging`, `low`, `ok`, `offline`. `percentage` is omitted, not `0`, when
 /// there is no reading to report.
 pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: Instant) -> Value {
-    let shown: Vec<&DeviceState> = states
-        .iter()
-        .filter(|d| cfg.is_shown(&d.info.name))
-        .collect();
+    let roster = Roster::visible(states, |name| cfg.is_shown(name), now);
 
-    let pairs: Vec<(&str, bool)> = shown
-        .iter()
-        .map(|d| (d.info.name.as_str(), d.presence == Presence::Online))
-        .collect();
-    let featured_name = select_featured(&pairs, cfg.primary_device.as_deref());
-    let featured: Option<&DeviceState> = featured_name
-        .as_deref()
-        .and_then(|name| shown.iter().copied().find(|d| d.info.name == name));
-
-    let tooltip = if shown.is_empty() {
+    let tooltip = if roster.devices().is_empty() {
         "No devices".to_owned()
     } else {
-        shown
+        roster
+            .devices()
             .iter()
             // CLI surface: always English.
             .map(|d| format_device_entry(d, now, Lang::En))
@@ -100,28 +97,18 @@ pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: Instant) -> Value {
             .join("\n")
     };
 
-    let (text, class, percentage): (String, &str, Option<u8>) = match featured {
-        None => ("no devices".to_owned(), "offline", None),
-        Some(d) => {
-            // classify only knows readings, not reachability — an
-            // Unreachable/Disconnected device maps to Offline here rather
-            // than teaching classify about presence (same rule tray::manager
-            // applies for the aggregate icon).
-            let status = if d.presence == Presence::Online {
-                classify(d.last_reading, cfg.effective_low_threshold(&d.info.name))
-            } else {
-                PrimaryStatus::Offline
-            };
-            match status {
+    let (text, class, percentage): (String, &str, Option<u8>) =
+        match waybar_featured(states, cfg, now) {
+            None => ("no devices".to_owned(), "offline", None),
+            Some((_, status)) => match status {
                 PrimaryStatus::Offline => ("offline".to_owned(), "offline", None),
                 PrimaryStatus::Charging { percent } => {
                     (format!("{percent}%"), "charging", Some(percent))
                 }
                 PrimaryStatus::Low { percent } => (format!("{percent}%"), "low", Some(percent)),
                 PrimaryStatus::Ok { percent } => (format!("{percent}%"), "ok", Some(percent)),
-            }
-        }
-    };
+            },
+        };
 
     let mut obj = json!({
         "text": text,
@@ -263,7 +250,7 @@ pub fn print_table_wide(rows: &[Row]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
+    use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind, Presence};
 
     fn device(name: &str) -> DeviceInfo {
         DeviceInfo {
@@ -511,18 +498,19 @@ mod tests {
     }
 
     #[test]
-    fn waybar_disconnected_without_reading_is_offline_class_with_no_percentage() {
+    fn waybar_leaves_out_a_device_that_never_answered_like_the_tray() {
         let states = vec![device_state("mouse", Presence::Disconnected, None, None)];
         let cfg = Config::default();
 
         let value = to_waybar(&states, &cfg, Instant::now());
         assert_eq!(value["class"], "offline");
         assert!(value.get("percentage").is_none());
-        assert_eq!(value["text"], "offline");
+        assert_eq!(value["text"], "no devices");
+        assert_eq!(value["tooltip"], "No devices");
     }
 
     #[test]
-    fn waybar_unreachable_with_retained_reading_shows_offline_but_keeps_age_in_tooltip() {
+    fn waybar_unreachable_with_retained_reading_shows_it_like_the_tray() {
         let seen = Instant::now();
         let now = seen + Duration::from_secs(300);
         let reading = BatteryReading::new(88, ChargeState::Discharging);
@@ -534,13 +522,9 @@ mod tests {
         )];
         let cfg = Config::default();
 
-        // The featured device is Unreachable, so the primary line stays a
-        // plain "offline" — classify never sees a retained reading for an
-        // unreachable device — but the tooltip, built from format_device_entry,
-        // must still carry the retained percent and its age.
         let value = to_waybar(&states, &cfg, now);
-        assert_eq!(value["class"], "offline");
-        assert!(value.get("percentage").is_none());
+        assert_eq!(value["class"], "ok");
+        assert_eq!(value["percentage"], 88);
         let tooltip = value["tooltip"].as_str().expect("tooltip is a string");
         assert_eq!(tooltip, "mouse: 88%  offline (5m ago)");
     }
@@ -557,20 +541,30 @@ mod tests {
     }
 
     #[test]
-    fn waybar_tooltip_has_one_line_per_device_matching_tray_formatter() {
+    fn waybar_tooltip_lists_the_tray_roster_in_its_order() {
+        let seen = Instant::now();
+        let now = seen + Duration::from_secs(300);
         let charging = BatteryReading::new(80, ChargeState::Charging);
+        let retained = BatteryReading::new(50, ChargeState::Discharging);
         let states = vec![
-            device_state("mouse", Presence::Online, Some(charging), None),
-            device_state("keyboard", Presence::Disconnected, None, None),
+            device_state(
+                "keyboard",
+                Presence::Unreachable,
+                Some(retained),
+                Some(seen),
+            ),
+            device_state("dongle", Presence::Disconnected, None, None),
+            device_state("mouse", Presence::Online, Some(charging), Some(now)),
         ];
         let cfg = Config::default();
 
-        let value = to_waybar(&states, &cfg, Instant::now());
+        let value = to_waybar(&states, &cfg, now);
         let tooltip = value["tooltip"].as_str().expect("tooltip is a string");
         let lines: Vec<&str> = tooltip.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "mouse: 80%  charging");
-        assert_eq!(lines[1], "keyboard: offline");
+        assert_eq!(
+            lines,
+            ["mouse: 80%  charging", "keyboard: 50%  offline (5m ago)"]
+        );
     }
 
     #[test]
@@ -625,7 +619,7 @@ mod tests {
 
     #[test]
     fn waybar_percentage_key_absent_when_featured_device_has_no_reading() {
-        let states = vec![device_state("mouse", Presence::Unreachable, None, None)];
+        let states = vec![device_state("mouse", Presence::NoAccess, None, None)];
         let cfg = Config::default();
 
         let value = to_waybar(&states, &cfg, Instant::now());
