@@ -407,16 +407,6 @@ async fn run_tray() {
 /// Modeled on `run_tray`, minus the icon/appearance/notifications stack: the
 /// bar has no icon to render, and the tray process already owns low-battery
 /// notifications, so spawning a second notifier here would double them up.
-/// How long `run_waybar` waits for a first battery reading before printing
-/// whatever state it has.
-const FIRST_SWEEP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
-
-// See cli::print_json: the waybar module line is program output on stdout.
-#[expect(clippy::print_stdout)]
-fn print_line(line: &str) {
-    println!("{line}");
-}
-
 async fn run_waybar() {
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -430,7 +420,7 @@ async fn run_waybar() {
     let ctx = std::sync::Arc::new(sources::Context::new());
     // No state store here: only `rigbat tray` writes to it (see
     // `src/state/mod.rs`'s module doc and `run_tray`).
-    let (mut rx, refresh) = app::supervisor::Supervisor::spawn(
+    let (rx, refresh) = app::supervisor::Supervisor::spawn(
         config_tx.clone(),
         ctx.clone(),
         None,
@@ -439,78 +429,12 @@ async fn run_waybar() {
     spawn_bus_dependent_tasks(ctx.clone(), refresh.clone());
 
     // A receiver of our own, so a primary_device/hidden_devices edit is
-    // picked up even between two TrayState publications.
-    let mut cfg_rx = config_tx.subscribe();
-
-    // `Supervisor::spawn` publishes an empty `TrayState` before any backend has
-    // run, so printing straight away puts a false "no devices" frame on the bar
-    // until the first sweep lands. A device that has been discovered but not yet
-    // polled is indistinguishable in `TrayState` from one that is genuinely
-    // unreachable — both carry no reading — so waiting for the first publication
-    // is not enough: that one announces the roster, not its charge.
-    //
-    // Wait for a reading, bounded: an all-offline roster never produces one, and
-    // a module with no label at all is worse than a late one. An empty roster is
-    // already final and does not wait.
-    let _ = tokio::time::timeout(FIRST_SWEEP_WAIT, async {
-        // The value already in the channel is the placeholder the supervisor
-        // published before discovery ran; an empty roster there means "not yet",
-        // not "none". Take the first real publication before judging.
-        if rx.changed().await.is_err() {
-            return;
-        }
-        loop {
-            {
-                let state = rx.borrow();
-                let cfg = cfg_rx.borrow();
-                // Judge the device the frame is actually built from. A roster can
-                // carry the same mouse twice (sysfs and Bluetooth), and requiring
-                // every shown device to answer never settles when one of them is
-                // permanently asleep, which is the normal state of a wireless
-                // mouse on its charger.
-                let now = std::time::Instant::now();
-                let settled = match cli::waybar_featured(&state.devices, &cfg, now) {
-                    Some((d, _)) => d.last_reading.is_some(),
-                    None => !state.devices.iter().any(|d| cfg.is_shown(&d.info.name)),
-                };
-                if settled {
-                    return;
-                }
-            }
-            if rx.changed().await.is_err() {
-                return;
-            }
-        }
-    })
-    .await;
-
-    let mut last_line: Option<String> = None;
-
-    loop {
-        {
-            let state = rx.borrow();
-            let cfg = cfg_rx.borrow();
-            let line = cli::render_waybar_line(&state.devices, &cfg, std::time::Instant::now());
-            if last_line.as_deref() != Some(line.as_str()) {
-                print_line(&line);
-                last_line = Some(line);
-            }
-        }
-
-        // config_tx must outlive this loop for the same reason run_tray keeps
-        // its config_tx alive: it is the sole sender, and dropping it makes
-        // every source task's config_rx.changed() resolve with an error,
-        // spinning that task's select loop.
-        tokio::select! {
-            r = rx.changed() => if r.is_err() { break; },
-            r = cfg_rx.changed() => if r.is_err() { break; },
-        }
-    }
-
-    // Reached only when a sender is gone, which means the supervisor is no
-    // longer publishing. Waybar restarts the module after `restart-interval`;
-    // say why the line stopped so the restart is not a silent mystery.
-    tracing::error!("state channel closed, waybar module exiting");
+    // picked up even between two TrayState publications. config_tx must
+    // outlive the loop for the same reason run_tray keeps its config_tx
+    // alive: it is the sole sender, and dropping it makes every source task's
+    // config_rx.changed() resolve with an error, spinning that task's select
+    // loop.
+    cli::waybar::run(rx, config_tx.subscribe()).await;
 }
 
 #[cfg(test)]
@@ -822,10 +746,10 @@ mod featured_tests {
                 primary_device: primary.map(str::to_owned),
                 ..Config::default()
             };
-            let tray = crate::tray::manager::resolve_for(None, &state, &cfg, now)
+            let tray = crate::tray::resolve::resolve_for(None, &state, &cfg, now)
                 .expect("the tray features a device");
             let (waybar, waybar_status) =
-                crate::cli::waybar_featured(&state.devices, &cfg, now).expect("waybar too");
+                crate::cli::waybar::waybar_featured(&state.devices, &cfg, now).expect("waybar too");
             assert_eq!(waybar.info.id(), tray.state.info.id(), "pin {primary:?}");
             assert_eq!(waybar_status, tray.status, "pin {primary:?}");
             assert_eq!(
@@ -838,7 +762,7 @@ mod featured_tests {
                 "pin {primary:?}"
             );
 
-            let json = crate::cli::to_waybar(&state.devices, &cfg, now);
+            let json = crate::cli::waybar::to_waybar(&state.devices, &cfg, now);
             assert_eq!(json["percentage"], percent, "pin {primary:?}");
         }
     }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::{DisplayMode, TrayMode};
 use crate::i18n::{self, Lang};
 
-pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
+const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_LOW_THRESHOLD: u8 = 20;
 
 /// Per-device poll interval and low-threshold overrides.

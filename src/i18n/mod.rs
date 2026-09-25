@@ -70,7 +70,7 @@ static SYSTEM: LazyLock<Lang> = LazyLock::new(|| from_env(|key| std::env::var(ke
 
 /// gettext precedence: `LC_ALL` > `LC_MESSAGES` > `LANG`; `LANGUAGE` overrides
 /// them unless the locale is C/POSIX.
-pub fn from_env(var: impl Fn(&str) -> Option<String>) -> Lang {
+fn from_env(var: impl Fn(&str) -> Option<String>) -> Lang {
     let Some(locale) = ["LC_ALL", "LC_MESSAGES", "LANG"]
         .into_iter()
         .filter_map(&var)

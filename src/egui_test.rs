@@ -4,7 +4,7 @@
 use eframe::egui;
 
 /// The narrowest a string may be drawn and still count as readable.
-pub const MIN_READABLE_WIDTH: f32 = 24.0;
+const MIN_READABLE_WIDTH: f32 = 24.0;
 
 /// One string as it landed on screen.
 #[derive(Debug)]

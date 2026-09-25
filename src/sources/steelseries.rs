@@ -65,7 +65,7 @@ pub static FAMILY: hidraw::HidrawFamily = hidraw::HidrawFamily {
 
 pub struct SteelSeriesBackend;
 
-pub struct SteelSeriesSource {
+struct SteelSeriesSource {
     info: DeviceInfo,
     dev_path: PathBuf, // /dev/hidrawN
     identity: hidraw::NodeIdentity,
@@ -242,7 +242,7 @@ fn clear_handle_on_error<T, U>(handle: &mut Option<T>, result: &anyhow::Result<U
 /// interface's collection declares no report IDs) followed by the full 64-byte
 /// output report the descriptor declares (`Output (usage 0xF1), Report Size 8,
 /// Report Count 0x40`). A short write is STALLed with `EPIPE`.
-pub fn battery_query_report() -> [u8; 1 + OUTPUT_REPORT_LEN] {
+fn battery_query_report() -> [u8; 1 + OUTPUT_REPORT_LEN] {
     let mut request = [0u8; 1 + OUTPUT_REPORT_LEN];
     request[1] = BATTERY_QUERY;
     request
@@ -262,7 +262,7 @@ pub enum Response {
     Unrelated,
 }
 
-pub fn classify_response(buf: &[u8]) -> Response {
+fn classify_response(buf: &[u8]) -> Response {
     if buf.len() >= 2 && buf[0] == WIRELESS_FLAG && buf[1] == LEVEL_UNAVAILABLE {
         return Response::DeviceUnreachable;
     }
@@ -272,7 +272,7 @@ pub fn classify_response(buf: &[u8]) -> Response {
     }
 }
 
-pub fn parse_battery_response(buf: &[u8]) -> Option<BatteryReading> {
+fn parse_battery_response(buf: &[u8]) -> Option<BatteryReading> {
     if buf.len() < 2 || buf[0] != BATTERY_QUERY {
         return None;
     }

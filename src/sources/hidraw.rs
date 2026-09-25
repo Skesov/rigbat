@@ -56,7 +56,7 @@ impl HidrawFamily {
 
     /// Every node under `sysfs_root` that is one of this family's devices.
     /// A missing root is an empty result, not an error: no hidraw driver, no devices.
-    pub fn discover_in(&self, sysfs_root: &Path) -> anyhow::Result<Vec<HidrawDevice>> {
+    fn discover_in(&self, sysfs_root: &Path) -> anyhow::Result<Vec<HidrawDevice>> {
         if !sysfs_root.exists() {
             return Ok(Vec::new());
         }
@@ -131,7 +131,7 @@ pub async fn discover(family: &'static HidrawFamily) -> anyhow::Result<Vec<Hidra
 
 /// The USB interface number from a canonical sysfs path: the last segment of
 /// the form `<port>:1.N` gives N. Example: `"/sys/devices/…/7-1.1:1.3/…"` → `Some(3)`.
-pub fn parse_usb_interface(real_path: &str) -> Option<u8> {
+fn parse_usb_interface(real_path: &str) -> Option<u8> {
     real_path.split('/').rev().find_map(|seg| {
         // A segment with no ':' is not an interface, even if it reads "1.N".
         let (_, after_colon) = seg.rsplit_once(':')?;
@@ -148,7 +148,7 @@ pub struct NodeIdentity {
 }
 
 impl NodeIdentity {
-    pub fn from_uevent(uevent: &str, node_name: &str) -> Option<Self> {
+    fn from_uevent(uevent: &str, node_name: &str) -> Option<Self> {
         let (vendor, product) = parse_hid_id(uevent_value(uevent, "HID_ID")?)?;
         Some(Self {
             vendor,
@@ -230,7 +230,7 @@ fn parse_dev_numbers(s: &str) -> Option<(u64, u64)> {
 /// or present but empty. Empty is treated as absent because the kernel writes
 /// `HID_UNIQ=` for every device that has no serial, and an empty locator
 /// identifies nothing.
-pub fn uevent_value<'a>(uevent: &'a str, key: &str) -> Option<&'a str> {
+fn uevent_value<'a>(uevent: &'a str, key: &str) -> Option<&'a str> {
     uevent
         .lines()
         .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
@@ -238,7 +238,7 @@ pub fn uevent_value<'a>(uevent: &'a str, key: &str) -> Option<&'a str> {
 }
 
 /// Parses a `HID_ID=bus:vendor:product` line into `(vendor, product)`.
-pub fn parse_hid_id(s: &str) -> Option<(u16, u16)> {
+fn parse_hid_id(s: &str) -> Option<(u16, u16)> {
     let mut parts = s.splitn(3, ':');
     let _bus = parts.next()?;
     let vendor_str = parts.next()?;

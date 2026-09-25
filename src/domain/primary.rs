@@ -28,7 +28,7 @@ pub fn classify(reading: Option<BatteryReading>, low_threshold: u8) -> PrimarySt
 /// Classifies a reading whose liveness is no longer known: the percentage is a
 /// measurement that ages gracefully, the charge state is a live condition that
 /// does not. Used for a device that is no longer `Online` but still holds a
-/// reading — see `tray::manager::resolve_for`.
+/// reading — see `tray::resolve::resolve_for`.
 pub fn classify_stale(percent: u8, low_threshold: u8) -> PrimaryStatus {
     if percent <= low_threshold {
         PrimaryStatus::Low { percent }

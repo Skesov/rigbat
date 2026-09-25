@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::AbortHandle;
 use tokio::time::sleep;
 
+use super::migration::migrate_shown_devices_once;
 use crate::config::Config;
 use crate::discovery::BackendSweep;
 use crate::domain::estimate::estimate as estimate_remaining;
@@ -115,7 +116,7 @@ impl Supervisor {
     /// needs to publish its result back onto the channel so the tray and
     /// notifier pick it up without a restart. `manager_task` derives its own
     /// `Receiver` from it.
-    pub fn spawn_with<F, Fut, L, S>(
+    fn spawn_with<F, Fut, L, S>(
         config_tx: watch::Sender<Config>,
         discover: F,
         load_config: L,
@@ -373,7 +374,6 @@ impl DeviceRegistry {
         sweeps: Vec<BackendSweep>,
         ctx: &SourceCtx,
     ) -> Vec<(String, String)> {
-        let store = self.store.clone();
         let mut renames: Vec<(String, String)> = Vec::new();
         let now_instant = Instant::now();
         let now_unix = state::now_unix();
@@ -396,115 +396,142 @@ impl DeviceRegistry {
             for src in fresh {
                 let id = src.device().id();
                 fresh_ids.push(id.clone());
-
-                // Every device discovery finds gets upserted, whether it is
-                // brand new, still running, or reappearing — this is the
-                // `devices` row's `last_seen`, updated once per sweep.
-                if let Some(store) = &store {
-                    match store.record_seen(&id, src.device().kind, now_unix).await {
-                        Ok(state::Seen::Renamed { from }) => {
-                            tracing::info!(
-                                device = %id.name,
-                                previous = %from,
-                                "device renamed; inventory row and settings follow it"
-                            );
-                            // The live roster is keyed by the same identity, so
-                            // the entry under the old name has to go now. Left
-                            // to the vanished path below it would linger as a
-                            // Disconnected duplicate for DISCONNECTED_RETENTION
-                            // — one device showing twice in the tray for a day,
-                            // while the Devices tab already shows it once.
-                            self.forget(&DeviceId {
-                                name: from.clone(),
-                                ..id.clone()
-                            });
-                            renames.push((from, id.name.clone()));
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(device = %id.name, "state store: failed to record device seen: {e:#}");
-                        }
-                    }
+                if let Some(rename) = self.admit(src, id, name, now_instant, now_unix, ctx).await {
+                    renames.push(rename);
                 }
-
-                if let Some(task) = self.tasks.get(&id) {
-                    if task.handle.is_finished() {
-                        // A handle only stays in `tasks` for an id that is also
-                        // still in `fresh_ids` if it was never aborted: the
-                        // vanished-device path below removes the handle from
-                        // `tasks` in the same call that aborts it, so it is never
-                        // seen here again. `is_finished()` can't tell a panic
-                        // apart from a deliberate abort on its own — this is
-                        // what makes the two paths unambiguous. Reaching this
-                        // branch therefore means the task ended by itself:
-                        // panicked, or its mpsc sender was dropped.
-                        tracing::error!(
-                            device = %src.device().name,
-                            "polling task ended unexpectedly; restarting it"
-                        );
-                        self.tasks.remove(&id);
-                        if let Some(entry) = self.entries.get_mut(&id) {
-                            // Positive proof of death, not a single missed poll —
-                            // demote immediately rather than waiting out
-                            // OFFLINE_AFTER_FAILURES.
-                            entry.presence = Presence::Unreachable;
-                            entry.consecutive_failures = OFFLINE_AFTER_FAILURES;
-                            entry.backend = name;
-                        }
-                        self.spawn(src, id, ctx);
-                    } else {
-                        // Still healthy — drop the transient handle, task keeps running.
-                        drop(src);
-                    }
-                    continue;
-                }
-
-                match self.entries.entry(id.clone()) {
-                    std::collections::hash_map::Entry::Occupied(mut slot) => {
-                        // Reappeared after being Disconnected: reuse the entry,
-                        // keep the retained reading and presence until the fresh
-                        // task proves it Online again.
-                        tracing::info!(device = %src.device().name, "device reappeared");
-                        slot.get_mut().info = src.device().clone();
-                        slot.get_mut().backend = name;
-                    }
-                    std::collections::hash_map::Entry::Vacant(slot) => {
-                        tracing::info!(device = %src.device().name, "device appeared");
-                        // First time this run: rebuild its change-point history
-                        // from the store, if there is one, so an estimate can
-                        // fire without waiting out a fresh window — see
-                        // `seed_history`. A device reappearing after
-                        // `Disconnected` reuses the Occupied arm above and keeps
-                        // whatever history it already has in memory instead.
-                        let battery_history = match &store {
-                            Some(store) => seed_history(store, &id, now_instant, now_unix).await,
-                            None => Vec::new(),
-                        };
-                        slot.insert(DeviceEntry {
-                            info: src.device().clone(),
-                            last_reading: None,
-                            last_seen: None,
-                            presence: Presence::Unreachable,
-                            consecutive_failures: 0,
-                            battery_history,
-                            backend: name,
-                        });
-                        self.order.push(id.clone());
-                    }
-                }
-
-                self.spawn(src, id, ctx);
             }
         }
 
+        self.demote_crashed(&fresh_ids, &succeeded_backends);
+        self.retire_vanished(&fresh_ids, &succeeded_backends);
+        self.prune_stale(Instant::now());
+        renames
+    }
+
+    /// One device a successful sweep found: upserts its inventory row, then
+    /// respawns a crashed task, keeps a healthy one, or adds the entry and
+    /// spawns its task. Returns the rename the store detected, if any.
+    async fn admit(
+        &mut self,
+        src: Box<dyn BatterySource>,
+        id: DeviceId,
+        name: &'static str,
+        now_instant: Instant,
+        now_unix: i64,
+        ctx: &SourceCtx,
+    ) -> Option<(String, String)> {
+        // Cloned because `forget` below needs `&mut self` while it is in use.
+        let store = self.store.clone();
+        let mut rename = None;
+        // Every device discovery finds gets upserted, whether it is
+        // brand new, still running, or reappearing — this is the
+        // `devices` row's `last_seen`, updated once per sweep.
+        if let Some(store) = &store {
+            match store.record_seen(&id, src.device().kind, now_unix).await {
+                Ok(state::Seen::Renamed { from }) => {
+                    tracing::info!(
+                        device = %id.name,
+                        previous = %from,
+                        "device renamed; inventory row and settings follow it"
+                    );
+                    // The live roster is keyed by the same identity, so
+                    // the entry under the old name has to go now. Left
+                    // to `retire_vanished` it would linger as a
+                    // Disconnected duplicate for DISCONNECTED_RETENTION
+                    // — one device showing twice in the tray for a day,
+                    // while the Devices tab already shows it once.
+                    self.forget(&DeviceId {
+                        name: from.clone(),
+                        ..id.clone()
+                    });
+                    rename = Some((from, id.name.clone()));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(device = %id.name, "state store: failed to record device seen: {e:#}");
+                }
+            }
+        }
+
+        if let Some(task) = self.tasks.get(&id) {
+            if task.handle.is_finished() {
+                // A handle only stays in `tasks` for an id that is also
+                // still in `fresh_ids` if it was never aborted:
+                // `retire_vanished` removes the handle from
+                // `tasks` in the same call that aborts it, so it is never
+                // seen here again. `is_finished()` can't tell a panic
+                // apart from a deliberate abort on its own — this is
+                // what makes the two paths unambiguous. Reaching this
+                // branch therefore means the task ended by itself:
+                // panicked, or its mpsc sender was dropped.
+                tracing::error!(
+                    device = %src.device().name,
+                    "polling task ended unexpectedly; restarting it"
+                );
+                self.tasks.remove(&id);
+                if let Some(entry) = self.entries.get_mut(&id) {
+                    // Positive proof of death, not a single missed poll —
+                    // demote immediately rather than waiting out
+                    // OFFLINE_AFTER_FAILURES.
+                    entry.presence = Presence::Unreachable;
+                    entry.consecutive_failures = OFFLINE_AFTER_FAILURES;
+                    entry.backend = name;
+                }
+                self.spawn(src, id, ctx);
+            } else {
+                // Still healthy — drop the transient handle, task keeps running.
+                drop(src);
+            }
+            return rename;
+        }
+
+        match self.entries.entry(id.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                // Reappeared after being Disconnected: reuse the entry,
+                // keep the retained reading and presence until the fresh
+                // task proves it Online again.
+                tracing::info!(device = %src.device().name, "device reappeared");
+                slot.get_mut().info = src.device().clone();
+                slot.get_mut().backend = name;
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                tracing::info!(device = %src.device().name, "device appeared");
+                // First time this run: rebuild its change-point history
+                // from the store, if there is one, so an estimate can
+                // fire without waiting out a fresh window — see
+                // `seed_history`. A device reappearing after
+                // `Disconnected` reuses the Occupied arm above and keeps
+                // whatever history it already has in memory instead.
+                let battery_history = match &store {
+                    Some(store) => seed_history(store, &id, now_instant, now_unix).await,
+                    None => Vec::new(),
+                };
+                slot.insert(DeviceEntry {
+                    info: src.device().clone(),
+                    last_reading: None,
+                    last_seen: None,
+                    presence: Presence::Unreachable,
+                    consecutive_failures: 0,
+                    battery_history,
+                    backend: name,
+                });
+                self.order.push(id.clone());
+            }
+        }
+
+        self.spawn(src, id, ctx);
+        rename
+    }
+
+    fn demote_crashed(&mut self, fresh_ids: &[DeviceId], succeeded_backends: &[&'static str]) {
         // A task whose backend's sweep failed is not in `fresh_ids`, so the
-        // crash check above never looked at it. Its device is not retired
+        // crash check in `admit` never looked at it. Its device is not retired
         // either (an error is not an empty result), which left a panicked task
         // frozen — last reading intact, presence Online — for as long as the
         // backend kept failing. Respawning needs a source object only a
         // successful sweep can hand over, so the honest move is to demote the
         // entry and drop the dead handle; the next sweep that succeeds
-        // respawns it through the path above.
+        // respawns it through `admit`.
         let crashed: Vec<DeviceId> = self
             .tasks
             .iter()
@@ -528,14 +555,16 @@ impl DeviceRegistry {
                 entry.consecutive_failures = OFFLINE_AFTER_FAILURES;
             }
         }
+    }
 
+    fn retire_vanished(&mut self, fresh_ids: &[DeviceId], succeeded_backends: &[&'static str]) {
         let vanished: Vec<DeviceId> = self
             .tasks
             .keys()
             .filter(|id| !fresh_ids.contains(id))
             .filter(|id| {
                 // No entry for a tracked task should not happen (entries and
-                // tasks are always inserted together above), but retiring is
+                // tasks are always inserted together in `admit`), but retiring is
                 // the pre-fix behaviour and the safer default if it ever
                 // does.
                 self.entries
@@ -550,9 +579,6 @@ impl DeviceRegistry {
                 tracing::info!(device = %entry.info.name, "device vanished");
             }
         }
-
-        self.prune_stale(Instant::now());
-        renames
     }
 
     /// Immediate, unlike `Unreachable`: a denial is not a dropped packet.
@@ -619,6 +645,10 @@ impl DeviceRegistry {
         self.order.retain(|oid| oid != id);
     }
 
+    fn names(&self) -> Vec<String> {
+        self.snapshot().into_iter().map(|d| d.info.name).collect()
+    }
+
     fn snapshot(&self) -> Vec<DeviceState> {
         let now = Instant::now();
         self.order
@@ -672,7 +702,7 @@ async fn manager_task<F, Fut, L, S>(
     // so a device connecting later can never retrigger it.
     let mut migration_sweeps: u32 = 0;
     let mut migration_done = migrate_shown_devices_once(
-        &registry,
+        &registry.names(),
         &config_tx,
         &load_config,
         &save_config,
@@ -704,7 +734,7 @@ async fn manager_task<F, Fut, L, S>(
                 if !migration_done {
                     migration_sweeps = migration_sweeps.saturating_add(1);
                     migration_done = migrate_shown_devices_once(
-                        &registry, &config_tx, &load_config, &save_config, migration_sweeps,
+                        &registry.names(), &config_tx, &load_config, &save_config, migration_sweeps,
                     );
                 }
             }
@@ -714,7 +744,7 @@ async fn manager_task<F, Fut, L, S>(
                 if !migration_done {
                     migration_sweeps = migration_sweeps.saturating_add(1);
                     migration_done = migrate_shown_devices_once(
-                        &registry, &config_tx, &load_config, &save_config, migration_sweeps,
+                        &registry.names(), &config_tx, &load_config, &save_config, migration_sweeps,
                     );
                 }
             }
@@ -867,173 +897,6 @@ fn publish(registry: &DeviceRegistry, watch_tx: &watch::Sender<TrayState>) {
     // Ignore error — receiver closed means the tray exited.
     let _ = watch_tx.send(state);
 }
-
-// ---------------------------------------------------------------------------
-// shown_devices → hidden_devices: one-time conversion after the first sweep
-// ---------------------------------------------------------------------------
-
-/// Converts a pre-T33 `shown_devices` whitelist into `hidden_devices`, given
-/// the device names `discovered` in the first sweep — the only roster this
-/// conversion is allowed to depend on. `None` when there is nothing to
-/// convert.
-///
-/// A device absent from `discovered` (offline during that one sweep) is
-/// unknowable and defaults to shown, same as an unlisted device did under
-/// the old empty-means-all-shown rule; this is not lossless, only the best a
-/// roster captured once allows. `hidden_devices` already on the config is
-/// unioned in, not replaced, so a value this version wrote before a
-/// downgrade and re-upgrade is not lost. Because the returned config always
-/// clears `shown_devices`, feeding that returned config back in — as the
-/// caller's own reload before its next save will — makes a repeat call a
-/// no-op regardless of what `discovered` grows to.
-/// How many discovery sweeps the conversion will wait for a roster that
-/// accounts for every name in the legacy whitelist. At `DISCOVERY_INTERVAL`
-/// this is a few minutes — long enough for Bluetooth peripherals to finish
-/// enumerating after login, short enough that a whitelist naming a device the
-/// user has since sold does not defer the conversion forever.
-const MIGRATION_MAX_SWEEPS: u32 = 10;
-
-/// The outcome of inspecting a legacy `shown_devices` whitelist against the
-/// devices discovered so far.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Migration {
-    /// No legacy whitelist to convert.
-    NotNeeded,
-    /// The roster does not yet account for every name the user listed, so it
-    /// cannot say which devices they meant to hide. Converting now would write
-    /// a wrong answer that can never be corrected, because clearing
-    /// `shown_devices` is what stops the conversion running again.
-    Defer { missing: Vec<String> },
-    /// Converted config, plus the names moved into `hidden_devices`.
-    Ready(Box<Config>, Vec<String>),
-}
-
-/// Converts the legacy "show exactly these" whitelist into the "hide these"
-/// list, given the devices discovered so far.
-///
-/// The conversion is only sound when the roster is complete enough: the
-/// whitelist records what to *show*, so what to hide can only be derived from
-/// the devices actually seen. A sweep taken before Bluetooth peripherals have
-/// enumerated sees few devices, finds nothing to hide, and would clear the
-/// whitelist — destroying the user's choices with a log line reading
-/// `hidden=[]`, which looks like "nothing needed hiding" rather than "could
-/// not tell". The caller therefore defers until every listed name has been
-/// seen, or until `MIGRATION_MAX_SWEEPS` sweeps have passed.
-fn migrate_shown_devices(cfg: &Config, discovered: &[String]) -> Migration {
-    if cfg.shown_devices.is_empty() {
-        return Migration::NotNeeded;
-    }
-    let missing: Vec<String> = cfg
-        .shown_devices
-        .iter()
-        .filter(|name| !discovered.contains(name))
-        .cloned()
-        .collect();
-    if !missing.is_empty() {
-        return Migration::Defer { missing };
-    }
-    Migration::Ready(
-        Box::new(converted(cfg, discovered)),
-        moved_names(cfg, discovered),
-    )
-}
-
-/// The same conversion without the completeness check, for the deadline case.
-fn converted(cfg: &Config, discovered: &[String]) -> Config {
-    let mut migrated = cfg.clone();
-    migrated.hidden_devices = cfg.hidden_devices.clone();
-    for name in moved_names(cfg, discovered) {
-        migrated.hidden_devices.push(name);
-    }
-    migrated.shown_devices = Vec::new();
-    migrated
-}
-
-/// Names discovered but absent from the whitelist, i.e. the ones to hide.
-fn moved_names(cfg: &Config, discovered: &[String]) -> Vec<String> {
-    let mut moved = Vec::new();
-    for name in discovered {
-        if !cfg.shown_devices.contains(name)
-            && !cfg.hidden_devices.contains(name)
-            && !moved.contains(name)
-        {
-            moved.push(name.clone());
-        }
-    }
-    moved
-}
-
-/// Runs `migrate_shown_devices` once, right after the very first discovery
-/// sweep — the earliest point a full device roster exists. `config::load`
-/// cannot perform this conversion itself: it never sees a device list.
-///
-/// Calls `load_config` instead of trusting `config_tx`'s current value: the
-/// settings window is a separate process (`settings::run`) that can write a
-/// newer config between this process's startup and this point, and
-/// `SettingsApp::persist` defends against the same staleness by re-reading
-/// immediately before its own save — this mirrors that. `load_config`/
-/// `save_config` are parameters (not `crate::config::load`/`save` called
-/// directly) so tests can point this at a temporary file instead of the
-/// real `config::config_path()`.
-fn migrate_shown_devices_once<L, S>(
-    registry: &DeviceRegistry,
-    config_tx: &watch::Sender<Config>,
-    load_config: &L,
-    save_config: &S,
-    sweeps: u32,
-) -> bool
-where
-    L: Fn() -> Config,
-    S: Fn(&Config) -> anyhow::Result<()>,
-{
-    let cfg = load_config();
-    let discovered: Vec<String> = registry
-        .snapshot()
-        .into_iter()
-        .map(|d| d.info.name)
-        .collect();
-
-    let (migrated, moved) = match migrate_shown_devices(&cfg, &discovered) {
-        Migration::NotNeeded => return true,
-        Migration::Defer { missing } => {
-            if sweeps < MIGRATION_MAX_SWEEPS {
-                tracing::debug!(
-                    ?missing,
-                    sweeps,
-                    "deferring shown_devices conversion until the roster accounts for every listed device"
-                );
-                return false;
-            }
-            // Deadline reached. Convert with what we have and say plainly which
-            // devices were never seen, so a wrong outcome is diagnosable rather
-            // than silent.
-            tracing::warn!(
-                never_seen = ?missing,
-                "converting shown_devices after {MIGRATION_MAX_SWEEPS} sweeps without seeing every listed device; \
-                 those devices will show until hidden again"
-            );
-            let moved = moved_names(&cfg, &discovered);
-            (converted(&cfg, &discovered), moved)
-        }
-        Migration::Ready(migrated, moved) => (*migrated, moved),
-    };
-
-    match save_config(&migrated) {
-        Ok(()) => {
-            tracing::info!(
-                hidden = ?moved,
-                "converted legacy shown_devices whitelist to hidden_devices"
-            );
-            let _ = config_tx.send(migrated);
-            true
-        }
-        Err(e) => {
-            tracing::error!("failed to save migrated shown_devices whitelist: {e}");
-            false
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -2163,113 +2026,6 @@ mod tests {
         // Past the cap.
         registry.prune_stale(last_seen + DISCONNECTED_RETENTION + Duration::from_secs(1));
         assert!(registry.snapshot().is_empty());
-    }
-
-    // --- migrate_shown_devices ------------------------------------------
-
-    fn ready(cfg: &Config, discovered: &[&str]) -> (Config, Vec<String>) {
-        let names: Vec<String> = discovered.iter().map(|s| (*s).to_string()).collect();
-        match migrate_shown_devices(cfg, &names) {
-            Migration::Ready(migrated, moved) => Some((*migrated, moved)),
-            _ => None,
-        }
-        .expect("expected Migration::Ready")
-    }
-
-    #[test]
-    fn migrate_shown_devices_converts_absent_names_to_hidden() {
-        let cfg = Config {
-            shown_devices: vec!["a".to_string()],
-            ..Config::default()
-        };
-        let (migrated, moved) = ready(&cfg, &["a", "b"]);
-        assert_eq!(migrated.hidden_devices, vec!["b".to_string()]);
-        assert!(migrated.shown_devices.is_empty());
-        assert_eq!(moved, vec!["b".to_string()]);
-    }
-
-    #[test]
-    fn migrate_shown_devices_empty_shown_is_noop() {
-        let cfg = Config::default();
-        assert_eq!(
-            migrate_shown_devices(&cfg, &["a".to_string(), "b".to_string()]),
-            Migration::NotNeeded
-        );
-    }
-
-    /// A sweep taken before Bluetooth peripherals enumerate sees a partial
-    /// roster. Converting then would clear the whitelist while finding
-    /// nothing to hide, and a cleared whitelist is what stops the conversion
-    /// running again — so the loss would be permanent.
-    #[test]
-    fn migrate_shown_devices_defers_while_a_listed_device_is_unseen() {
-        let cfg = Config {
-            shown_devices: vec!["mouse".to_string(), "keyboard".to_string()],
-            ..Config::default()
-        };
-        assert_eq!(
-            migrate_shown_devices(&cfg, &["mouse".to_string()]),
-            Migration::Defer {
-                missing: vec!["keyboard".to_string()]
-            }
-        );
-    }
-
-    #[test]
-    fn migrate_shown_devices_ready_once_every_listed_device_is_seen() {
-        let cfg = Config {
-            shown_devices: vec!["mouse".to_string(), "keyboard".to_string()],
-            ..Config::default()
-        };
-        let (migrated, moved) = ready(&cfg, &["mouse", "keyboard", "dupe"]);
-        assert_eq!(migrated.hidden_devices, vec!["dupe".to_string()]);
-        assert_eq!(moved, vec!["dupe".to_string()]);
-    }
-
-    /// The deadline path: `converted` is what the caller falls back to once
-    /// `MIGRATION_MAX_SWEEPS` sweeps have passed without a complete roster.
-    #[test]
-    fn converted_hides_only_what_was_actually_seen() {
-        let cfg = Config {
-            shown_devices: vec!["mouse".to_string(), "sold-headset".to_string()],
-            ..Config::default()
-        };
-        let migrated = converted(&cfg, &["mouse".to_string(), "dupe".to_string()]);
-        assert_eq!(migrated.hidden_devices, vec!["dupe".to_string()]);
-        assert!(migrated.shown_devices.is_empty());
-    }
-
-    /// The "runs once" guarantee: the already-converted config has an empty
-    /// whitelist, so a later sweep with a larger roster cannot hide a device
-    /// retroactively.
-    #[test]
-    fn migrate_shown_devices_second_call_with_larger_roster_adds_nothing() {
-        let cfg = Config {
-            shown_devices: vec!["a".to_string()],
-            ..Config::default()
-        };
-        let (migrated, _) = ready(&cfg, &["a"]);
-        assert!(migrated.hidden_devices.is_empty());
-
-        assert_eq!(
-            migrate_shown_devices(&migrated, &["a".to_string(), "b".to_string()]),
-            Migration::NotNeeded
-        );
-    }
-
-    #[test]
-    fn migrate_shown_devices_unions_existing_hidden_devices() {
-        let cfg = Config {
-            shown_devices: vec!["a".to_string()],
-            hidden_devices: vec!["headset".to_string()],
-            ..Config::default()
-        };
-        let (migrated, moved) = ready(&cfg, &["a", "b"]);
-        assert_eq!(
-            migrated.hidden_devices,
-            vec!["headset".to_string(), "b".to_string()]
-        );
-        assert_eq!(moved, vec!["b".to_string()]);
     }
 
     /// End-to-end wiring test: a real `Supervisor::spawn_with` run, with

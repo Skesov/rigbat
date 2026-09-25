@@ -86,7 +86,7 @@ pub struct Startup {
 
 /// Session-bus names that decide whether a tray icon can appear.
 #[derive(Debug, Clone, Copy)]
-pub struct SessionFacts {
+struct SessionFacts {
     pub tray_host: bool,
     pub tray_running: bool,
 }
@@ -94,14 +94,14 @@ pub struct SessionFacts {
 /// The udev rule in effect and the `(vendor, product)` pairs it grants;
 /// `ids` is `None` when the file could not be read.
 #[derive(Debug)]
-pub struct InstalledRule {
+struct InstalledRule {
     pub path: PathBuf,
     pub ids: Option<BTreeSet<(u16, u16)>>,
 }
 
 /// One supported device's hidraw node and the outcome of opening it read-write.
 #[derive(Debug)]
-pub struct NodeProbe {
+struct NodeProbe {
     pub device: String,
     pub usb_id: (u16, u16),
     pub dev_path: PathBuf,
@@ -110,7 +110,7 @@ pub struct NodeProbe {
 
 // ── Decisions ────────────────────────────────────────────────────────────────
 
-pub fn session_checks(session: anyhow::Result<SessionFacts>, startup: Startup) -> Vec<Check> {
+fn session_checks(session: anyhow::Result<SessionFacts>, startup: Startup) -> Vec<Check> {
     let facts = match session {
         Ok(facts) => facts,
         Err(e) => {
@@ -154,7 +154,7 @@ fn tray_start_fix(startup: Startup) -> String {
     }
 }
 
-pub fn startup_check(startup: Startup) -> Check {
+fn startup_check(startup: Startup) -> Check {
     match (startup.unit_enabled, startup.autostart_entry) {
         (true, true) => Check::warn(
             "both the systemd unit and the autostart entry start rigbat tray; the second one exits",
@@ -172,7 +172,7 @@ pub fn startup_check(startup: Startup) -> Check {
     }
 }
 
-pub fn bluez_check(bluez: anyhow::Result<bool>) -> Check {
+fn bluez_check(bluez: anyhow::Result<bool>) -> Check {
     match bluez {
         Ok(true) => Check::ok(format!("BlueZ present ({BLUEZ} on the system bus)")),
         Ok(false) => Check::warn(
@@ -186,7 +186,7 @@ pub fn bluez_check(bluez: anyhow::Result<bool>) -> Check {
     }
 }
 
-pub fn portal_check(portal: anyhow::Result<()>) -> Check {
+fn portal_check(portal: anyhow::Result<()>) -> Check {
     match portal {
         Ok(()) => Check::ok("xdg-desktop-portal Settings answers"),
         Err(e) => Check::warn(
@@ -196,7 +196,7 @@ pub fn portal_check(portal: anyhow::Result<()>) -> Check {
     }
 }
 
-pub fn hidraw_checks(nodes: &[NodeProbe], installed_rule: Option<&InstalledRule>) -> Vec<Check> {
+fn hidraw_checks(nodes: &[NodeProbe], installed_rule: Option<&InstalledRule>) -> Vec<Check> {
     if nodes.is_empty() {
         return vec![Check::ok("no supported USB HID device connected")];
     }
@@ -241,13 +241,13 @@ fn udev_fix(installed_rule: Option<&InstalledRule>, usb_id: (u16, u16)) -> Strin
     }
 }
 
-pub fn find_udev_rule(dirs: &[&Path]) -> Option<PathBuf> {
+fn find_udev_rule(dirs: &[&Path]) -> Option<PathBuf> {
     dirs.iter()
         .map(|dir| dir.join(UDEV_RULE))
         .find(|path| path.exists())
 }
 
-pub fn read_udev_rule(path: PathBuf) -> InstalledRule {
+fn read_udev_rule(path: PathBuf) -> InstalledRule {
     let ids = std::fs::read_to_string(&path)
         .ok()
         .map(|text| udev_rule_ids(&text));
@@ -256,7 +256,7 @@ pub fn read_udev_rule(path: PathBuf) -> InstalledRule {
 
 /// The `(vendor, product)` pairs a rules file matches on, from its
 /// `ATTRS{idVendor}=="…"` / `ATTRS{idProduct}=="…"` lines.
-pub fn udev_rule_ids(text: &str) -> BTreeSet<(u16, u16)> {
+fn udev_rule_ids(text: &str) -> BTreeSet<(u16, u16)> {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.starts_with('#'))
@@ -275,7 +275,7 @@ fn udev_attr(line: &str, key: &str) -> Option<u16> {
 }
 
 /// `config` is `config::read`'s result: `Ok(false)` for no file yet.
-pub fn config_check(path: Option<&Path>, config: anyhow::Result<bool>) -> Check {
+fn config_check(path: Option<&Path>, config: anyhow::Result<bool>) -> Check {
     let Some(path) = path else {
         return Check::warn(
             "no config directory (HOME unset?); settings cannot be saved",
@@ -295,7 +295,7 @@ pub fn config_check(path: Option<&Path>, config: anyhow::Result<bool>) -> Check 
     }
 }
 
-pub fn state_check(path: Option<&Path>, store: anyhow::Result<()>) -> Check {
+fn state_check(path: Option<&Path>, store: anyhow::Result<()>) -> Check {
     let Some(path) = path else {
         return Check::warn(
             "no state directory (HOME unset?); device inventory and history are off",
@@ -329,7 +329,7 @@ pub fn render(checks: &[Check]) -> String {
     out
 }
 
-pub fn exit_code(checks: &[Check]) -> i32 {
+fn exit_code(checks: &[Check]) -> i32 {
     i32::from(checks.iter().any(|c| c.status == Status::Fail))
 }
 

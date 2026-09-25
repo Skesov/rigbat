@@ -64,7 +64,7 @@ pub static FAMILY: hidraw::HidrawFamily = hidraw::HidrawFamily {
 
 pub struct EightBitDoBackend;
 
-pub struct EightBitDoSource {
+struct EightBitDoSource {
     info: DeviceInfo,
     dev_path: PathBuf, // /dev/hidrawN
     identity: hidraw::NodeIdentity,
@@ -182,7 +182,7 @@ fn poll_device(
 /// controller still sitting in the dock reports 100% with the charging bit
 /// set; that maps to `ChargeState::Charging`, not `Discharging` (which would
 /// be a lie) or `Full` (which would imply it is not connected).
-pub fn parse_battery_report(buf: &[u8]) -> Option<BatteryReading> {
+fn parse_battery_report(buf: &[u8]) -> Option<BatteryReading> {
     if buf.len() < MIN_REPORT_LEN || buf[0] != REPORT_ID {
         return None;
     }

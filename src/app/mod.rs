@@ -1,3 +1,4 @@
+mod migration;
 pub mod supervisor;
 
 use tokio::task::JoinSet;

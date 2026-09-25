@@ -416,3 +416,68 @@ fn focus_ring(ui: &egui::Ui, rect: egui::Rect, radius: f32) {
         egui::StrokeKind::Outside,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::egui_test::{assert_single_lines_without_overlap, fully_painted_text_at};
+
+    const SIZE: [f32; 2] = [CONTENT_MAX_WIDTH, 600.0];
+
+    /// Every widget that carries text, once, in a column as wide as the
+    /// settings window gives the General tab.
+    fn every_widget(ui: &mut egui::Ui) {
+        let texture = ui.ctx().load_texture(
+            "tile",
+            egui::ColorImage::filled([4, 4], egui::Color32::WHITE),
+            egui::TextureOptions::LINEAR,
+        );
+        tab_bar(ui, &["General".to_owned(), "Devices".to_owned()], 0);
+        group(ui, "Tray", Some("Group footer"), |rows| {
+            rows.block("Icon style", |ui| {
+                let width = tile_width(ui.available_width(), 2);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = TILE_GAP;
+                    tile(ui, width, true, &texture, 32.0, "Battery");
+                    tile(ui, width, false, &texture, 32.0, "Percent");
+                });
+            });
+            rows.row("Row title", subtitle("Row subtitle"), |ui| {
+                switch(ui, egui::Id::new("switch"), &mut true, "Row title")
+            });
+            rows.row("Plain row", none, |ui| {
+                trailing(ui, 120.0, |ui| ui.label("Trailing"))
+            });
+        });
+        footer(ui, "rigbat 1.0 ·", "Project page", "https://example.org");
+    }
+
+    #[test]
+    fn every_widget_paints_its_text_whole_on_one_line() {
+        let painted = fully_painted_text_at(SIZE, every_widget);
+
+        for text in [
+            "General",
+            "Devices",
+            "Tray",
+            "Group footer",
+            "Icon style",
+            "Battery",
+            "Percent",
+            "Row title",
+            "Row subtitle",
+            "Plain row",
+            "Trailing",
+            "rigbat 1.0 ·",
+            "Project page",
+        ] {
+            let lines = painted.iter().find(|p| p.text == text).map(|p| p.lines);
+            assert_eq!(
+                lines,
+                Some(1),
+                "{text:?} is cut off, missing or wrapped: {painted:?}"
+            );
+        }
+        assert_single_lines_without_overlap(&painted);
+    }
+}

@@ -32,14 +32,14 @@ const SIGNAL_DEBOUNCE: Duration = Duration::from_secs(5);
 
 pub struct BluezBackend;
 
-pub struct BluezSource {
+struct BluezSource {
     info: DeviceInfo,
     path: OwnedObjectPath,
     conn: zbus::Connection,
 }
 
 /// Selects the device name: Alias → Name → address from the object path.
-pub fn device_name(alias: Option<&str>, name: Option<&str>, addr: &str) -> String {
+fn device_name(alias: Option<&str>, name: Option<&str>, addr: &str) -> String {
     alias
         .filter(|s| !s.is_empty())
         .or_else(|| name.filter(|s| !s.is_empty()))

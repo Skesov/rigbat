@@ -6,12 +6,12 @@ use crate::domain::{BatteryReading, ChargeState, DeviceInfo, Transport, guess_ki
 
 use super::{BatteryBackend, BatterySource, Context, hidraw};
 
-pub struct SysfsSource {
+struct SysfsSource {
     info: DeviceInfo,
     base: PathBuf, // /sys/class/power_supply/<name>
 }
 
-pub fn parse_status(s: &str) -> ChargeState {
+fn parse_status(s: &str) -> ChargeState {
     match s.trim() {
         "Charging" => ChargeState::Charging,
         "Full" => ChargeState::Full,

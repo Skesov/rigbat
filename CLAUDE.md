@@ -101,8 +101,9 @@ src/
 ├── sources/       # BatterySource + BatteryBackend + Context (shared system bus) +
 │                 # supervise (bus-watcher retry); sysfs/bluez/steelseries/eightbitdo
 ├── discovery/     # discover_all + registry::backends()
-├── cli/           # output adapter: table / --json / --wide / --waybar
-├── tray/          # ksni items + state service for the dashboard
+├── cli/           # output adapter: table / --json / --wide; waybar.rs: --waybar line + loop
+├── tray/          # manager.rs (icon set + run loop), item.rs (SNI item + menu),
+│                 # resolve.rs (device per icon), launch.rs, state service for the dashboard
 ├── icon/          # IconRenderer (tiny-skia) + device-type corner glyph, shared by tray/dashboard
 ├── gui/           # shared egui theme for dashboard and settings
 ├── dashboard/     # eframe device overview (separate process, left click)
@@ -110,11 +111,13 @@ src/
 ├── appearance/    # theme from xdg-portal (light/dark)
 ├── notifications/ # low-battery desktop notifications (zbus)
 ├── session/       # logind PrepareForSleep → resume re-poll
-├── settings/      # eframe/egui settings window (separate process) + device table state
+├── settings/      # eframe/egui settings window (separate process): mod.rs shell,
+│                 # general_tab.rs, devices_tab.rs, devices.rs (table state), widgets.rs
 ├── autostart/     # ~/.config/autostart/rigbat.desktop + systemd user unit state
 ├── doctor/        # `rigbat doctor`: setup checks with a fix per problem
 ├── i18n/          # Lang, per-language Fluent loaders, locale detection (catalogues in /i18n)
-├── app/           # poll_once + Supervisor (owns discovery) + wiring
+├── app/           # poll_once + Supervisor (owns discovery) + wiring; migration.rs:
+│                 # one-time shown_devices → hidden_devices conversion
 ├── state/         # SQLite device inventory + reading history (XDG_STATE_HOME)
 └── config/        # XDG ~/.config/rigbat/config.json
 ```

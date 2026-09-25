@@ -177,7 +177,7 @@ impl Store {
     /// `readings` row whose device no longer exists (normally handled by
     /// the `ON DELETE CASCADE` foreign key already; see `SqliteStore::prune`
     /// for why this is checked again explicitly).
-    pub async fn prune(&self, now: i64) -> anyhow::Result<()> {
+    async fn prune(&self, now: i64) -> anyhow::Result<()> {
         self.call(move |db| db.prune(now)).await
     }
 }

@@ -5,7 +5,7 @@ use std::time::Instant;
 use tokio::sync::watch;
 use zbus::object_server::SignalEmitter;
 
-use super::manager::featured_id;
+use super::resolve::featured_id;
 use crate::config::Config;
 use crate::domain::{DeviceState, Estimate, TrayMode, TrayState, device_status, is_visible};
 use crate::ipc::{DeviceCard, Snapshot, TRAY_PATH};

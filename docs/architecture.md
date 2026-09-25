@@ -176,8 +176,8 @@ flows out through channels.
 ```text
 CLI:       main → discover_all() → poll_once() (poll all in parallel) → cli::print_*  → exit
 
-Waybar:    main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶ run_waybar loop
-                                                                    │ cli::render_waybar_line,
+Waybar:    main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶ cli::waybar::run
+                                                                    │ render_waybar_line,
                                                                     │ printed only when the line
                                                                     │ changes, no exit
            session (logind PrepareForSleep) ──RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
@@ -274,10 +274,10 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
   silently drops every device the view did not contain — which is exactly what made checkboxes
   reset themselves. An exclusion list is only ever edited by the one name a toggle mentions, so a
   partial view cannot damage what it cannot see. The old `shown_devices` whitelist still
-  deserializes and is converted once, by `app::supervisor` after a discovery sweep that has seen
-  every backend report in — never by `config::load`, which has no device roster to convert
-  against. If a backend is still missing after `MIGRATION_MAX_SWEEPS` sweeps, the conversion runs
-  anyway rather than blocking visibility forever.
+  deserializes and is converted once, by `app::migration` (driven by the supervisor) after a
+  discovery sweep that has seen every backend report in — never by `config::load`, which has no
+  device roster to convert against. If a backend is still missing after `MIGRATION_MAX_SWEEPS`
+  sweeps, the conversion runs anyway rather than blocking visibility forever.
 - `state` module (`rusqlite`, bundled SQLite): the device inventory (first seen, last seen,
   transport, kind) and a reading history collapsed to change points (`LAG()` over equal-percent
   runs). Schema version lives in `PRAGMA user_version`; WAL plus `busy_timeout` plus

@@ -127,7 +127,7 @@ fn estimate_discharge(
 /// 45 minutes, otherwise the nearest 15 minutes (minimum 15m). Never returns
 /// a value precise enough to look like `1h 47m` — that precision is not
 /// supported by a signal this noisy.
-pub fn round_coarse(d: Duration) -> Duration {
+fn round_coarse(d: Duration) -> Duration {
     let mins = d.as_secs() / 60;
     if mins < 45 {
         let rounded = ((mins + 7) / 15) * 15;

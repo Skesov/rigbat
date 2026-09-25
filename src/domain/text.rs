@@ -144,7 +144,7 @@ pub fn charge_value(
     }
 }
 
-pub fn presence_label(presence: Presence, lang: Lang) -> String {
+fn presence_label(presence: Presence, lang: Lang) -> String {
     let l = loader(lang);
     match presence {
         Presence::Online => fl!(l, "presence-online"),
