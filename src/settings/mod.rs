@@ -12,7 +12,6 @@ use eframe::egui;
 
 use crate::autostart;
 use crate::config::{self, Config};
-use crate::domain::{DeviceInfo, PollOutcome};
 use crate::gui;
 use crate::i18n::{fl, loader};
 use crate::state;
@@ -47,12 +46,12 @@ enum Tab {
 }
 
 /// One scan's raw result: the running tray's roster (or, with no tray, a
-/// discovery-and-poll pass), plus a fresh read of the persisted device
-/// inventory. `SettingsApp::apply_scan_result` merges the two into the
-/// Devices tab's table rows; `General`'s device list only needs the
-/// discovered half.
+/// discovery-and-poll pass; an error when the tray did not answer), plus a
+/// fresh read of the persisted device inventory.
+/// `SettingsApp::apply_scan_result` merges the two into the Devices tab's
+/// table rows.
 struct ScanResult {
-    discovered: Vec<(DeviceInfo, PollOutcome)>,
+    discovered: anyhow::Result<scan::Discovered>,
     records: Vec<state::DeviceRecord>,
 }
 
@@ -60,7 +59,10 @@ struct SettingsApp {
     config: Config,
     /// `None` when there is no home directory; every save then fails.
     config_path: Option<PathBuf>,
-    devices: Vec<DeviceInfo>,
+    /// The last scan that answered; kept when a later one fails.
+    discovered: scan::Discovered,
+    /// The last scan found a tray running that did not answer.
+    tray_unanswered: bool,
     /// Reflects `~/.config/autostart/rigbat.desktop` existence — not stored in Config.
     autostart_enabled: bool,
     /// Whether `rigbat.service` is enabled in the systemd user manager,
@@ -180,19 +182,21 @@ impl SettingsApp {
         }
     }
 
-    /// Applies a freshly completed scan's result. `self.devices` (the
-    /// General tab's picker) and `self.device_rows` (the Devices tab's
-    /// table) are both derived fresh; `hidden_devices` and
-    /// `device_overrides` are keyed by device name and are left exactly as
-    /// the user set them, whether or not the device set changed since the
-    /// previous scan.
+    /// Applies a freshly completed scan's result: `self.device_rows` (the
+    /// Devices tab's table) is the fresh inventory merged with the scan, or
+    /// with the last scan that answered when this one failed.
+    /// `hidden_devices` and `device_overrides` are keyed by device name and
+    /// are left exactly as the user set them, whether or not the device set
+    /// changed since the previous scan.
     fn apply_scan_result(&mut self, result: ScanResult) {
-        self.devices = result
-            .discovered
-            .iter()
-            .map(|(info, _)| info.clone())
-            .collect();
-        self.device_rows = devices::merge_devices(result.records, result.discovered);
+        match result.discovered {
+            Ok(discovered) => {
+                self.discovered = discovered;
+                self.tray_unanswered = false;
+            }
+            Err(_) => self.tray_unanswered = true,
+        }
+        self.device_rows = devices::merge_devices(result.records, self.discovered.clone());
         self.scanning = false;
         self.scan_rx = None;
     }
@@ -320,7 +324,8 @@ pub fn run() -> anyhow::Result<()> {
             let mut app = SettingsApp {
                 config,
                 config_path: config::config_path(),
-                devices: Vec::new(),
+                discovered: Vec::new(),
+                tray_unanswered: false,
                 autostart_enabled: autostart::is_enabled(),
                 systemd_service_enabled: autostart::systemd_service_enabled(),
                 rt,
@@ -347,6 +352,7 @@ pub fn run() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::config::DeviceSettings;
+    use crate::domain::{DeviceInfo, PollOutcome};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -368,7 +374,8 @@ mod tests {
         SettingsApp {
             config,
             config_path: None,
-            devices: Vec::new(),
+            discovered: Vec::new(),
+            tray_unanswered: false,
             autostart_enabled: false,
             systemd_service_enabled: false,
             rt: Arc::new(
@@ -404,10 +411,10 @@ mod tests {
     /// before it started merging in the store's half.
     fn scan_result(devices: Vec<DeviceInfo>) -> ScanResult {
         ScanResult {
-            discovered: devices
+            discovered: Ok(devices
                 .into_iter()
                 .map(|d| (d, PollOutcome::Failed))
-                .collect(),
+                .collect()),
             records: Vec::new(),
         }
     }
@@ -545,7 +552,28 @@ mod tests {
         // "headset" is not in this scan's result.
         app.apply_scan_result(scan_result(vec![device("mouse")]));
         assert_eq!(app.config.device_overrides, overrides);
-        assert!(!app.devices.iter().any(|d| d.name == "headset"));
+        assert!(!app.discovered.iter().any(|(d, _)| d.name == "headset"));
+    }
+
+    #[test]
+    fn a_scan_the_tray_did_not_answer_keeps_the_live_rows() {
+        let mut app = settings_app_with(Config::default());
+        app.apply_scan_result(scan_result(vec![device("mouse")]));
+
+        app.apply_scan_result(ScanResult {
+            discovered: Err(anyhow::anyhow!("no answer")),
+            records: Vec::new(),
+        });
+
+        let names: Vec<&str> = app
+            .device_rows
+            .iter()
+            .map(|r| r.device.name.as_str())
+            .collect();
+        assert_eq!(names, ["mouse"]);
+        assert!(app.tray_unanswered);
+        app.apply_scan_result(scan_result(vec![device("mouse")]));
+        assert!(!app.tray_unanswered);
     }
 }
 

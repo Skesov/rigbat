@@ -228,6 +228,10 @@ impl SettingsApp {
             );
             self.render_refresh_button(ui);
         });
+        if self.tray_unanswered {
+            let warn = ui.visuals().warn_fg_color;
+            ui.label(egui::RichText::new(fl!(l, "devices-tray-unanswered")).color(warn));
+        }
         ui.add_space(8.0);
 
         let filtered = devices::filter_rows(&self.device_rows, &self.device_search);
@@ -776,6 +780,29 @@ mod tests {
         for text in ["Название ⏷", "Заряд", "Замечено", "Действия", "мышь"]
         {
             assert!(painted.iter().any(|t| t == text), "{text:?}: {painted:?}");
+        }
+    }
+
+    #[test]
+    fn an_unanswered_tray_is_shown_above_the_table_in_every_language() {
+        for (lang, text) in [
+            ("en", "The running tray did not answer"),
+            ("ru", "Запущенный трей не ответил"),
+        ] {
+            let mut app = settings_app_with(Config {
+                language: Some(lang.to_owned()),
+                ..Config::default()
+            });
+            app.device_rows = rows_for(&["MX Anywhere 3"]);
+            app.tray_unanswered = true;
+
+            let painted = painted_text(|ui| app.render_devices_tab(ui));
+
+            assert!(
+                painted.iter().any(|t| t.starts_with(text)),
+                "{lang:?}: status missing; got {painted:?}"
+            );
+            assert!(painted.iter().any(|t| t == "MX Anywhere 3"), "{lang:?}");
         }
     }
 

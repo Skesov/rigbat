@@ -107,38 +107,45 @@ async fn reconcile(
 
     let mut touched = 0;
     for (key, view) in desired {
-        match items.live.get_mut(&key) {
-            Some(item) if item.view == view => {}
-            Some(item) => {
+        if let Some(item) = items.live.get_mut(&key) {
+            if item.handle.is_closed() {
+                tracing::warn!("tray icon for {key:?} stopped serving; recreating it");
+            } else if item.view == view {
+                continue;
+            } else {
                 let icon = items.icons.icons(&view.icon);
-                item.view = view.clone();
-                let _ = item
+                let next = view.clone();
+                let updated = item
                     .handle
                     .update(move |tray| {
-                        tray.view = view;
+                        tray.view = next;
                         tray.icon = icon;
                     })
                     .await;
+                if updated.is_some() {
+                    item.view = view;
+                    touched += 1;
+                    continue;
+                }
+                tracing::warn!("tray icon for {key:?} did not take an update; recreating it");
+            }
+            items.live.remove(&key);
+        }
+        let tray = RigbatTray {
+            key: key.clone(),
+            icon: items.icons.icons(&view.icon),
+            view: view.clone(),
+            config: config.clone(),
+            save_config,
+            refresh: refresh.clone(),
+        };
+        match tray.spawn().await {
+            Ok(handle) => {
+                items.live.insert(key, Item { handle, view });
                 touched += 1;
             }
-            None => {
-                let tray = RigbatTray {
-                    key: key.clone(),
-                    icon: items.icons.icons(&view.icon),
-                    view: view.clone(),
-                    config: config.clone(),
-                    save_config,
-                    refresh: refresh.clone(),
-                };
-                match tray.spawn().await {
-                    Ok(handle) => {
-                        items.live.insert(key, Item { handle, view });
-                        touched += 1;
-                    }
-                    Err(e) => {
-                        tracing::error!("failed to spawn tray icon for {key:?}: {e}");
-                    }
-                }
+            Err(e) => {
+                tracing::error!("failed to spawn tray icon for {key:?}: {e}");
             }
         }
     }
@@ -502,6 +509,52 @@ mod tests {
             let rows = menu(client, item).await;
             let toggles: Vec<i32> = rows.iter().take(3).map(|(_, _, t)| *t).collect();
             assert_eq!(toggles, [0, 0, 1]);
+        }
+
+        /// An item whose SNI service ended is spawned again, not left dead.
+        #[tokio::test]
+        async fn a_dead_item_is_recreated() {
+            if !isolated(module_path!(), "a_dead_item_is_recreated") {
+                return;
+            }
+            let _watcher = serve_fake_watcher().await;
+            let client = zbus::Connection::session().await.expect("private bus");
+
+            let mouse = make_info("mouse");
+            let state = |percent| make_state(vec![(mouse.clone(), Some(make_reading(percent)))]);
+            let (state_tx, state_rx) = watch::channel(state(80));
+            let (_theme_tx, theme_rx) = watch::channel(ColorScheme::Dark);
+            let (config_tx, _config_rx) = watch::channel(Config {
+                tray_mode: TrayMode::PerDevice,
+                ..Config::default()
+            });
+            let refresh = RefreshSignal::new();
+            let mut items = Items::new();
+            let mouse_id = sni_id(&mouse.id());
+
+            reconcile(
+                &mut items, &state_rx, &theme_rx, &config_tx, saved, &refresh,
+            )
+            .await;
+            until_ids(&client, &[&mouse_id]).await;
+
+            items.live[&Some(mouse.id())].handle.shutdown().await;
+            until_ids(&client, &[]).await;
+
+            state_tx.send_replace(state(79));
+            reconcile(
+                &mut items, &state_rx, &theme_rx, &config_tx, saved, &refresh,
+            )
+            .await;
+            until_ids(&client, &[&mouse_id]).await;
+
+            items.live[&Some(mouse.id())].handle.shutdown().await;
+            until_ids(&client, &[]).await;
+            reconcile(
+                &mut items, &state_rx, &theme_rx, &config_tx, saved, &refresh,
+            )
+            .await;
+            until_ids(&client, &[&mouse_id]).await;
         }
 
         /// A republished but unchanged state touches no item; a change

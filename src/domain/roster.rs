@@ -47,11 +47,19 @@ impl<'a> Roster<'a> {
     /// The device a single view (aggregate icon, `--waybar`) shows.
     ///
     /// The pin is by name and applies while a device of that name is visible;
-    /// among devices sharing the name, or with no pin, the first in roster
-    /// order wins, and that order puts online devices first.
+    /// among devices sharing the name the first in roster order wins, and that
+    /// order puts online devices first. Without a pin it is the online device
+    /// with the lowest charge, ties by roster order; with none online, the
+    /// first in roster order.
     pub fn featured(&self, primary: Option<&str>) -> Option<&'a DeviceState> {
         primary
             .and_then(|name| self.0.iter().find(|d| d.info.name == name))
+            .or_else(|| {
+                self.0
+                    .iter()
+                    .filter(|d| d.presence == Presence::Online)
+                    .min_by_key(|d| d.last_reading.map_or(u16::MAX, |r| u16::from(r.percent)))
+            })
             .or_else(|| self.0.first())
             .copied()
     }
@@ -206,6 +214,26 @@ mod tests {
         let devices = vec![online("mouse", now), online("keyboard", now)];
         let pick = featured_id(&devices, Some("mouse"), now).map(|id| id.name);
         assert_eq!(pick.as_deref(), Some("mouse"));
+    }
+
+    #[test]
+    fn featured_without_a_pin_is_the_online_device_with_the_lowest_charge() {
+        let now = BootTime::TEST_NOW;
+        let devices = vec![
+            device("alpha", Transport::Sysfs, Presence::Online, Some((80, now))),
+            device("zebra", Transport::Sysfs, Presence::Online, Some((30, now))),
+            device("mid", Transport::Sysfs, Presence::Online, Some((30, now))),
+            device(
+                "asleep",
+                Transport::Hidraw,
+                Presence::Unreachable,
+                Some((5, now)),
+            ),
+        ];
+        let pick = featured_id(&devices, None, now).map(|id| id.name);
+        assert_eq!(pick.as_deref(), Some("mid"), "ties go by roster order");
+        let pinned = featured_id(&devices, Some("alpha"), now).map(|id| id.name);
+        assert_eq!(pinned.as_deref(), Some("alpha"));
     }
 
     #[test]

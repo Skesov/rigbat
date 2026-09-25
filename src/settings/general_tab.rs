@@ -624,6 +624,6 @@ mod tests {
 
     #[test]
     fn aggregate_icon_hint_describes_the_automatic_choice() {
-        assert!(aggregate_icon_hint(None, Lang::En).contains("first connected"));
+        assert!(aggregate_icon_hint(None, Lang::En).contains("lowest charge"));
     }
 }

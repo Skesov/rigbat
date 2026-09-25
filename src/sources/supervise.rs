@@ -1,15 +1,12 @@
 //! Supervising retry loop for the bus watchers (`sources::bluez::watch_events`,
-//! `session::watch_resume`) and its exponential backoff. The policy is pure and
+//! `session::watch_resume`, the portal color-scheme watcher) and its exponential backoff. The policy is pure and
 //! synchronous, deliberately: the watchers need a live D-Bus connection to
 //! test, but growth, the cap, and the reset rule do not.
 
 use std::future::Future;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::Instant;
-
-use super::Context;
 
 /// Delay before the first retry after a watcher's attempt ends.
 const INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -65,23 +62,20 @@ impl Backoff {
     }
 }
 
-/// Spawns `attempt` under a retry loop that never gives up. Each attempt gets
-/// its connection from `ctx.system_bus()`, which re-dials a closed one; an
-/// attempt that ends, with an error or not, is retried after the backoff.
-/// Only the first failure of a streak logs a warning.
-pub fn supervise<F, Fut>(label: &'static str, ctx: Arc<Context>, mut attempt: F)
+/// Spawns `attempt` under a retry loop that never gives up: an attempt that
+/// ends, with an error or not, is retried after the backoff. Each attempt
+/// dials its own bus connection (for the system bus, `Context::system_bus`,
+/// which re-dials a closed one). Only the first failure of a streak logs a warning.
+pub fn supervise<F, Fut>(label: &'static str, mut attempt: F)
 where
-    F: FnMut(zbus::Connection) -> Fut + Send + 'static,
+    F: FnMut() -> Fut + Send + 'static,
     Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
 {
     tokio::spawn(async move {
         let mut backoff = Backoff::new();
         loop {
             let started = Instant::now();
-            let result = match ctx.system_bus().await {
-                Ok(conn) => attempt(conn).await,
-                Err(e) => Err(e),
-            };
+            let result = attempt().await;
             let detail = match &result {
                 Ok(()) => "stream ended".to_owned(),
                 Err(e) => format!("{e:#}"),
@@ -146,6 +140,21 @@ mod tests {
         let failures: Vec<u32> = steps.iter().map(|(_, f)| *f).collect();
         assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60]);
         assert_eq!(failures, [0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_attempt_that_ends_is_run_again() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        supervise("test watcher", move || {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(());
+                Ok(())
+            }
+        });
+        for _ in 0..3 {
+            rx.recv().await.expect("another attempt");
+        }
     }
 
     #[test]

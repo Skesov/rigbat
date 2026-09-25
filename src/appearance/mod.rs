@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use anyhow::Context as _;
 use futures_util::StreamExt;
 use tokio::sync::watch;
 
@@ -9,65 +10,39 @@ pub enum ColorScheme {
     Light,
 }
 
-/// Spawns a background task: reads color-scheme from xdg-portal and
-/// updates the watch on theme change. If the portal is unavailable, defaults to Dark.
-pub fn spawn() -> watch::Receiver<ColorScheme> {
-    let (tx, rx) = watch::channel(ColorScheme::Dark);
-
-    tokio::spawn(async move {
-        let settings = match ashpd::desktop::settings::Settings::new().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("xdg-portal settings unavailable: {e}; theme stays at its default");
-                return;
-            }
-        };
-
-        if let Ok(cs) = settings.color_scheme().await {
-            let scheme = map_scheme(cs);
-            tx.send_if_modified(|cur| {
-                if *cur != scheme {
-                    *cur = scheme;
-                    true
-                } else {
-                    false
-                }
-            });
+/// Reads the portal's color scheme into `tx`, then follows its changes until
+/// the signal stream ends. Takes its own connection: ashpd's shared one is
+/// never replaced once closed. Run under a retry loop, so a portal or bus
+/// restart does not freeze the theme.
+pub async fn follow_color_scheme(
+    conn: zbus::Connection,
+    tx: watch::Sender<ColorScheme>,
+) -> anyhow::Result<()> {
+    let settings = ashpd::desktop::settings::Settings::with_connection(conn)
+        .await
+        .context("xdg-portal settings")?;
+    if let Ok(cs) = settings.color_scheme().await {
+        set_scheme(&tx, map_scheme(cs));
+    }
+    let mut stream = settings
+        .receive_color_scheme_changed()
+        .await
+        .context("xdg-portal color-scheme signal")?;
+    while let Some(cs) = stream.next().await {
+        // Repeated portal signals (known COSMIC portal bug) must not wake the tray loop.
+        if set_scheme(&tx, map_scheme(cs)) {
+            tracing::debug!("color scheme -> {:?}", *tx.borrow());
         }
+    }
+    Ok(())
+}
 
-        let mut stream = match settings.receive_color_scheme_changed().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    "xdg-portal color-scheme signal unavailable: {e}; theme stays at its default"
-                );
-                return;
-            }
-        };
-
-        while let Some(cs) = stream.next().await {
-            let scheme = map_scheme(cs);
-            // Notify receivers only when the scheme actually changes; repeated
-            // portal signals (known COSMIC portal bug) must not wake the tray loop.
-            let changed = tx.send_if_modified(|cur| {
-                if *cur != scheme {
-                    *cur = scheme;
-                    true
-                } else {
-                    false
-                }
-            });
-            if changed {
-                tracing::debug!("color scheme -> {scheme:?}");
-            }
-            // All receivers gone (tray exited) — stop the task.
-            if tx.is_closed() {
-                break;
-            }
-        }
-    });
-
-    rx
+fn set_scheme(tx: &watch::Sender<ColorScheme>, scheme: ColorScheme) -> bool {
+    tx.send_if_modified(|cur| {
+        let changed = *cur != scheme;
+        *cur = scheme;
+        changed
+    })
 }
 
 /// What a window draws with: the session's scheme, accent and text scale.
@@ -262,5 +237,114 @@ mod tests {
         ));
         assert!(apply_change(&mut appearance, Change::TextScale(1.5)));
         assert_eq!(appearance.text_scale, 1.5);
+    }
+}
+
+#[cfg(test)]
+mod bus_tests {
+    use std::time::Duration;
+
+    use tokio::sync::{mpsc, watch};
+    use zbus::object_server::SignalEmitter;
+    use zbus::zvariant::{OwnedValue, Value};
+
+    use super::{ColorScheme, follow_color_scheme};
+    use crate::bus_test::{eventually, isolated};
+    use crate::sources::supervise::supervise;
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+    const PREFER_DARK: u32 = 1;
+    const PREFER_LIGHT: u32 = 2;
+
+    struct FakePortal {
+        scheme: u32,
+    }
+
+    #[zbus::interface(name = "org.freedesktop.portal.Settings")]
+    impl FakePortal {
+        fn read(&self, _namespace: &str, _key: &str) -> OwnedValue {
+            OwnedValue::from(self.scheme)
+        }
+
+        #[zbus(property)]
+        fn version(&self) -> u32 {
+            2
+        }
+
+        #[zbus(signal)]
+        async fn setting_changed(
+            emitter: &SignalEmitter<'_>,
+            namespace: &str,
+            key: &str,
+            value: Value<'_>,
+        ) -> zbus::Result<()>;
+    }
+
+    async fn until_scheme(rx: &watch::Receiver<ColorScheme>, want: ColorScheme) {
+        eventually(TIMEOUT, || async { (*rx.borrow() == want).then_some(()) }).await;
+    }
+
+    /// The watcher's connection closing ends its stream; the retry loop must
+    /// read the scheme again instead of leaving the theme frozen.
+    #[tokio::test]
+    async fn the_theme_follows_the_portal_across_a_lost_connection() {
+        if !isolated(
+            module_path!(),
+            "the_theme_follows_the_portal_across_a_lost_connection",
+        ) {
+            return;
+        }
+        let portal = zbus::connection::Builder::session()
+            .expect("private bus")
+            .name("org.freedesktop.portal.Desktop")
+            .expect("name")
+            .serve_at(
+                PORTAL_PATH,
+                FakePortal {
+                    scheme: PREFER_LIGHT,
+                },
+            )
+            .expect("path")
+            .build()
+            .await
+            .expect("fake portal");
+        let (tx, rx) = watch::channel(ColorScheme::Dark);
+        let (conns_tx, mut conns) = mpsc::unbounded_channel();
+        supervise("test color-scheme watcher", move || {
+            let (tx, conns_tx) = (tx.clone(), conns_tx.clone());
+            async move {
+                let conn = zbus::Connection::session().await?;
+                let _ = conns_tx.send(conn.clone());
+                follow_color_scheme(conn, tx).await
+            }
+        });
+        let watcher = conns.recv().await.expect("first attempt");
+        until_scheme(&rx, ColorScheme::Light).await;
+
+        let settings = portal
+            .object_server()
+            .interface::<_, FakePortal>(PORTAL_PATH)
+            .await
+            .expect("portal interface");
+        eventually(TIMEOUT, || async {
+            FakePortal::setting_changed(
+                settings.signal_emitter(),
+                "org.freedesktop.appearance",
+                "color-scheme",
+                Value::from(PREFER_DARK),
+            )
+            .await
+            .expect("SettingChanged");
+            (*rx.borrow() == ColorScheme::Dark).then_some(())
+        })
+        .await;
+
+        settings.get_mut().await.scheme = PREFER_LIGHT;
+        watcher
+            .close()
+            .await
+            .expect("closing the watcher's connection");
+        until_scheme(&rx, ColorScheme::Light).await;
     }
 }

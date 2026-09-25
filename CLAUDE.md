@@ -15,7 +15,7 @@ whose mouse is switched off is not a battery level. It keeps being polled and re
 answer. A device whose node the user may not open (`sources::AccessDenied`, typically a missing
 udev rule) reads `NoAccess` ("no access", pointing at `rigbat doctor`) instead of offline: it
 keeps its tray entry, never notifies, and is never featured over an online device. Tray: left click opens the dashboard (a row per device), right click the menu listing
-device status (in single-icon mode a checkmark per device pins the icon to it); device-type glyph, light/dark theme, display modes, time-remaining estimate, low-battery notifications
+device status (in single-icon mode a checkmark per device pins the icon to it; unpinned, it shows the online device with the lowest charge); device-type glyph, light/dark theme, display modes, time-remaining estimate, low-battery notifications
 (confirmed by two distinct readings), separate settings window with a device inventory table,
 per-device poll intervals/thresholds and aggregate-icon pin, config persistence. UI in English and
 Russian (Fluent, `i18n/`), switchable live; the CLI stays English. A second `rigbat tray` exits

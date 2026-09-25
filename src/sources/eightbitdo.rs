@@ -6,7 +6,7 @@
 //!
 //! Unlike `steelseries.rs`, this device is read-only and streaming: input report
 //! id `0x01`, 34 bytes, pushed continuously at 1000 Hz. There is no query to write
-//! and no response to wait for — a poll just reads the next report off the wire.
+//! and no response to wait for — a poll reads reports off the wire until the battery one.
 //! Battery sits in byte 14: bit 7 is the charging flag, bits 0-6 are the
 //! percentage directly (not bucketed). Firmware v1.02 sends 12-byte reports with
 //! no battery data; v1.03+ sends 34 — a short report means old firmware, not a
@@ -14,13 +14,17 @@
 //!
 //! This is the stream-only case of `CLAUDE.md`'s handle policy (see "Key
 //! decisions" there), not the request/response case `steelseries.rs` follows:
-//! open, read one report, close — do not hold the handle across polls.
+//! open, read until the battery report, close — do not hold the handle across polls.
 //!
 //! Discovery: [`FAMILY`] through `hidraw::discover`. DInput exposes a single HID
 //! interface, so no interface filter is applied — unlike SteelSeries, which has
 //! several interfaces on the same device and must pick the battery-reporting one.
 
-use std::{io::Read as _, os::unix::fs::OpenOptionsExt as _, path::PathBuf};
+use std::io::Read;
+use std::os::fd::AsFd;
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use nix::libc;
@@ -42,11 +46,11 @@ const MIN_REPORT_LEN: usize = 34;
 /// Offset of the battery byte in the input report: bit 7 charging, bits 0-6 percent.
 const BATTERY_BYTE_OFFSET: usize = 14;
 
-/// How long to wait for the next streaming report before giving up. The
-/// controller pushes reports every ~1 ms at 1000 Hz, so 200 ms is two orders
-/// of magnitude of slack over a healthy device; low enough that a
-/// switched-off or out-of-range controller does not stall a discovery sweep.
-const POLL_TIMEOUT_MS: u16 = 200;
+/// How long to wait for the battery report before giving up. The controller
+/// pushes reports every ~1 ms at 1000 Hz, so 200 ms is two orders of
+/// magnitude of slack over a healthy device; low enough that a switched-off
+/// or out-of-range controller does not stall a discovery sweep.
+const POLL_TIMEOUT: Duration = Duration::from_millis(200);
 
 // ── Device table ─────────────────────────────────────────────────────────────
 
@@ -120,15 +124,13 @@ impl BatterySource for EightBitDoSource {
     }
 }
 
-/// Opens the node, waits for one streaming report, parses it, and closes the
-/// handle again — see the module doc comment for why this does not hold the
-/// handle open across polls.
+/// Opens the node, reads until the battery report, and closes the handle
+/// again — see the module doc comment for why this does not hold the handle
+/// open across polls.
 fn poll_device(
     dev_path: &std::path::Path,
     identity: &hidraw::NodeIdentity,
 ) -> anyhow::Result<BatteryReading> {
-    use std::os::fd::AsFd as _;
-
     let mut file = hidraw::open_verified(
         std::path::Path::new(hidraw::SYSFS_HIDRAW),
         dev_path,
@@ -137,38 +139,52 @@ fn poll_device(
             .read(true)
             .custom_flags(libc::O_NONBLOCK),
     )?;
+    read_battery_report(&mut file, POLL_TIMEOUT)
+        .with_context(|| format!("reading {}", dev_path.display()))
+}
 
-    let mut poll_fds = [PollFd::new(file.as_fd(), PollFlags::POLLIN)];
-    let ready = poll(&mut poll_fds, PollTimeout::from(POLL_TIMEOUT_MS)).context("poll()")?;
-
-    if ready == 0 {
-        anyhow::bail!(
-            "controller is off or out of range (no report from {} within {POLL_TIMEOUT_MS}ms)",
-            dev_path.display()
-        );
-    }
-
-    let revents = poll_fds[0].revents().unwrap_or(PollFlags::empty());
-    if !revents.contains(PollFlags::POLLIN) {
-        anyhow::bail!(
-            "unexpected poll events {:?} from {}",
-            revents,
-            dev_path.display()
-        );
-    }
-
+/// Reads reports until the battery report or `timeout`: another report id
+/// may arrive first.
+fn read_battery_report<D: Read + AsFd>(
+    dev: &mut D,
+    timeout: Duration,
+) -> anyhow::Result<BatteryReading> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut short_battery_report = false;
     let mut buf = [0u8; 64];
-    let n = file.read(&mut buf).context("reading hidraw report")?;
-    if n == 0 {
-        anyhow::bail!("EOF reading from {}", dev_path.display());
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let ms = u16::try_from(remaining.as_millis()).unwrap_or(u16::MAX);
+        let revents = {
+            let mut poll_fds = [PollFd::new(dev.as_fd(), PollFlags::POLLIN)];
+            if poll(&mut poll_fds, PollTimeout::from(ms)).context("poll()")? == 0 {
+                if short_battery_report {
+                    anyhow::bail!(
+                        "no 34-byte battery report (old firmware sends 12-byte reports with no battery data)"
+                    );
+                }
+                anyhow::bail!(
+                    "controller is off or out of range (no battery report within {}ms)",
+                    timeout.as_millis()
+                );
+            }
+            poll_fds[0].revents().unwrap_or(PollFlags::empty())
+        };
+        if !revents.contains(PollFlags::POLLIN) {
+            anyhow::bail!("unexpected poll events {revents:?}");
+        }
+        let n = match dev.read(&mut buf) {
+            Ok(0) => anyhow::bail!("EOF"),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e).context("reading hidraw report"),
+        };
+        let report = &buf[..n];
+        if let Some(reading) = parse_battery_report(report) {
+            return Ok(reading);
+        }
+        short_battery_report |= report.first() == Some(&REPORT_ID);
     }
-
-    parse_battery_report(&buf[..n]).ok_or_else(|| {
-        anyhow::anyhow!(
-            "report from {} is not a 34-byte battery report (old firmware sends 12-byte reports with no battery data)",
-            dev_path.display()
-        )
-    })
 }
 
 // ── Pure functions ────────────────────────────────────────────────────────────
@@ -205,6 +221,57 @@ fn parse_battery_report(buf: &[u8]) -> Option<BatteryReading> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // read_battery_report
+
+    /// Keeps report boundaries, as a hidraw node does.
+    struct Datagrams(std::os::unix::net::UnixDatagram);
+
+    impl Read for Datagrams {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.recv(buf)
+        }
+    }
+
+    impl AsFd for Datagrams {
+        fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+            self.0.as_fd()
+        }
+    }
+
+    fn device_sending(reports: &[&[u8]]) -> (std::os::unix::net::UnixDatagram, Datagrams) {
+        let (device, host) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        for report in reports {
+            device.send(report).unwrap();
+        }
+        (device, Datagrams(host))
+    }
+
+    #[test]
+    fn a_report_of_another_id_is_skipped_until_the_battery_report() {
+        let mut other = captured_report(0x10);
+        other[0] = 0x03;
+        let (_device, mut host) = device_sending(&[&other, &captured_report(0x41)]);
+        let reading = read_battery_report(&mut host, POLL_TIMEOUT).unwrap();
+        assert_eq!(reading, BatteryReading::new(65, ChargeState::Discharging));
+    }
+
+    #[test]
+    fn old_firmware_reports_time_out_naming_the_firmware() {
+        let (_device, mut host) = device_sending(&[&[REPORT_ID; 12], &[REPORT_ID; 12]]);
+        let err = read_battery_report(&mut host, Duration::from_millis(20)).unwrap_err();
+        assert!(format!("{err:#}").contains("old firmware"), "{err:#}");
+    }
+
+    #[test]
+    fn a_silent_controller_times_out() {
+        let (_device, mut host) = device_sending(&[]);
+        let err = read_battery_report(&mut host, Duration::from_millis(20)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("off or out of range"),
+            "{err:#}"
+        );
+    }
 
     // parse_battery_report
 

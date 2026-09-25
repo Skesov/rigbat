@@ -6,8 +6,8 @@ System tray battery monitor for gaming peripherals.
 
 - Shows battery level of connected peripherals (mice, keyboards, headsets, controllers) in the system tray
 - Displays one tray icon for every device, or a single aggregate icon (switch in the settings
-  window); the aggregate icon shows the device pinned on the Devices tab, or the first connected
-  visible device when none is pinned
+  window); the aggregate icon shows the device pinned on the Devices tab, or the connected
+  visible device with the lowest charge when none is pinned
 - Left-click the tray icon for an overview: one card per device with its tray glyph, charge bar,
   status and time left, so you can tell which icon is which. Right-click opens the menu
 - Automatically discovers connected devices on startup — no manual configuration required

@@ -3,14 +3,15 @@ use anyhow::Context as _;
 /// Shared infrastructure handles a backend may need. Built once at the
 /// composition root and passed down; a backend that needs none ignores it.
 /// The connection is opened on first use, not at construction, so the CLI
-/// modes and hosts without a system bus pay nothing.
-#[derive(Default)]
+/// modes and hosts without a system bus pay nothing. Clones share the one
+/// connection slot, so a source that keeps a clone sees every reconnect.
+#[derive(Clone, Default)]
 pub struct Context {
     /// `Mutex<Option<_>>` rather than a `OnceCell`, deliberately: the cached
     /// connection has to be *replaceable*. See `system_bus`.
     // A memoized handle, not shared data: the lock serialises one dial.
     #[expect(clippy::disallowed_types)]
-    system_bus: tokio::sync::Mutex<Option<zbus::Connection>>,
+    system_bus: std::sync::Arc<tokio::sync::Mutex<Option<zbus::Connection>>>,
 }
 
 impl Context {

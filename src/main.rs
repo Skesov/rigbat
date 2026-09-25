@@ -375,7 +375,11 @@ async fn run_tray() {
             refresh.clone(),
         ));
     }
-    let theme_rx = appearance::spawn();
+    let (theme_tx, theme_rx) = tokio::sync::watch::channel(appearance::ColorScheme::Dark);
+    sources::supervise::supervise("color-scheme watcher", move || {
+        let tx = theme_tx.clone();
+        async move { appearance::follow_color_scheme(zbus::Connection::session().await?, tx).await }
+    });
     // Spawn the notifier after config_tx is available so it can receive the
     // notifications_enabled flag and per-device thresholds via a config receiver.
     crate::notifications::spawn(rx.clone(), config_tx.subscribe());

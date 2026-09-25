@@ -95,8 +95,10 @@ anyhow::Result<Vec<Box<dyn BatterySource>>>`. Finds devices and constructs sourc
   [checklists](../CONTRIBUTING.md#checklists). `Context` is the dependency container built at the
   composition root: it holds the process-wide system-bus connection (`sources/context.rs`),
   opened lazily on first use and re-dialled if it has since closed, so a `dbus-daemon` restart
-  does not strand the BlueZ backend for the life of the process. A backend that needs no
-  infrastructure ignores the parameter.
+  does not strand the BlueZ backend for the life of the process. Clones share that connection
+  slot: a `BluezSource` keeps one and asks it for the connection on every poll and subscription,
+  so a source outlives a reconnect instead of polling a closed connection. A backend that needs
+  no infrastructure ignores the parameter.
 - **`IconRenderer`** (`icon`): `render(status, kind, theme, mode, stale) -> Vec<ksni::Icon>`. The
   tray depends on this trait, not on the renderer, and reaches it through `icon::IconCache`, which
   renders each distinct `IconKey` (those five inputs) once and keeps only the keys an icon shows.
@@ -247,7 +249,9 @@ The settings window reads the same snapshot, which also lists hidden devices apa
 (`Snapshot::hidden`) and carries each device's locator, so its rows match inventory records. It
 has the tray re-poll on its Refresh button (`Refresh()`, then the next `StateChanged`, bounded at
 3 s, then `State()`), and polls devices itself only when nothing owns `org.rigbat.Tray`: a
-request/response device such as SteelSeries can interleave two processes' exchanges.
+request/response device such as SteelSeries can interleave two processes' exchanges. A tray that
+owns the name but does not answer fails the scan: the Devices tab keeps the rows of the last scan
+that answered and says the tray did not answer.
 
 The settings window is a separate process on purpose: it owns the winit event loop, and eframe is
 built with `default-features = false` (glow backend). The `accesskit` feature is on: its AT-SPI
@@ -289,15 +293,15 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
   reads would make the watcher's own `load()` feed an infinite loop.
 - Per-device overrides: `device_overrides: HashMap<name, DeviceSettings>` with optional poll
   interval and low threshold; `Config::effective_*` resolve override → global → built-in default.
-- `primary_device` pins the device the aggregate icon features; `None` means the first connected
-  visible device. It is set from the selected device's settings under the Devices tab's table — one
-  device at a time, so it is an action on a device rather than a column every row would carry — and
-  the General tab names the current choice beside the single-icon option instead of repeating the
-  control, plus a `Clear` button — the one action that needs no row, and therefore the way out of
-  a pin naming a device the inventory has no row for (retired before the inventory existed, or
-  deleted since). Forgetting a device clears its pin along with its inventory row.
-  In single-icon mode the tray menu sets it too: an `Automatic` checkmark clears it and a checkmark
-  per shown device pins that device.
+- `primary_device` pins the device the aggregate icon features; `None` means the connected visible
+  device with the lowest charge (ties by roster order). It is set from the selected device's
+  settings under the Devices tab's table — one device at a time, so it is an action on a device
+  rather than a column every row would carry — and the General tab names the current choice beside
+  the single-icon option instead of repeating the control, plus a `Clear` button — the one action
+  that needs no row, and therefore the way out of a pin naming a device the inventory has no row
+  for (retired before the inventory existed, or deleted since). Forgetting a device clears its pin
+  along with its inventory row. In single-icon mode the tray menu sets it too: an `Automatic`
+  checkmark clears it and a checkmark per shown device pins that device.
 - Visibility is recorded as **who to hide** (`hidden_devices`), not who to show. A whitelist has
   to be rebuilt from the devices visible at that moment, so editing it from a partial view
   silently drops every device the view did not contain — which is exactly what made checkboxes
@@ -314,7 +318,8 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
   `synchronous=NORMAL` (safe in WAL: power loss can drop the last commits, never corrupt the file)
   and a 2 MiB `journal_size_limit` keep the fsync count and the WAL file small. Inside a process
   the connection belongs to one dedicated thread (`state::Store`, an actor): callers send a
-  request and await a oneshot reply, and a reading is queued without waiting. A write the other
+  request and await a oneshot reply, and a reading is queued without waiting. A request that
+  panics is caught on that thread and fails only its caller. A write the other
   process holds can stall that thread for up to `busy_timeout`, never a tokio worker. The store is
   **optional**: if it cannot be opened, the error is logged and monitoring continues without it —
   history is a convenience, not a prerequisite for reading a battery.
@@ -378,11 +383,14 @@ without the device present.
 ## Side services
 
 - **appearance** — reads `org.freedesktop.appearance` color-scheme from xdg-desktop-portal and
-  publishes light/dark through a `watch` channel; the tray re-renders on change.
+  publishes light/dark through a `watch` channel; the tray re-renders on change. The tray runs it
+  under `sources::supervise`, each attempt on a fresh session connection (ashpd's shared one is
+  never replaced once closed), so a portal or bus restart does not freeze the theme.
 - **tray manager** — computes a `tray::item::View` per icon (title, tooltip, menu rows, `IconKey`)
   from the state, config, theme and the current time, and calls `ksni` `Handle::update` only for
   an icon whose view differs from the one it serves. ksni diffs properties itself, but only after
-  calling every getter, including the multi-size pixmap; the view comparison skips that.
+  calling every getter, including the multi-size pixmap; the view comparison skips that. An item
+  whose service has ended (closed handle, or an update that returns `None`) is spawned again.
 - **session** — listens to logind `PrepareForSleep`; on resume it fires the shared
   `RefreshSignal` so all sources re-poll and the manager re-discovers.
 - **bluez event watcher** — BlueZ is a push interface, so it is not polled for change detection.
@@ -395,9 +403,10 @@ without the device present.
   safety net.
 - **notifications** — a hand-rolled `zbus` `org.freedesktop.Notifications` proxy; an
   edge-triggered tracker fires once per low-battery crossing, using each device's effective
-  threshold, gated by `notifications_enabled`. It re-arms when the device charges, rises back
-  above the threshold, or goes offline — so a device hovering at the threshold notifies once,
-  not on every poll. A crossing must be confirmed by `LOW_CONFIRMATIONS` (2) _distinct_ readings
+  threshold, gated by `notifications_enabled`. It re-arms only when the device charges or reads
+  `REARM_MARGIN` (5) points above the threshold — so a device hovering at the threshold notifies
+  once, not on every dip. Going offline does not re-arm it; a device that leaves the roster is
+  forgotten. A crossing must be confirmed by `LOW_CONFIRMATIONS` (2) _distinct_ readings
   before it fires — distinctness keyed on `last_seen`, because a reading is what a poll adds to
   `TrayState`, and other changes republish it too. One bad sample from a noisy BLE device therefore costs nothing;
   a real low battery is announced one poll interval later than it used to be. The deliberate

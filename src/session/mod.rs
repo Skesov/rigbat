@@ -48,8 +48,9 @@ async fn watch_resume_inner(refresh: RefreshSignal, conn: zbus::Connection) -> a
 /// (containers, BSDs) just keeps retrying quietly in the background — this
 /// is an optimisation, never a dependency.
 pub fn watch_resume(refresh: RefreshSignal, ctx: Arc<Context>) {
-    supervise("resume watcher", ctx, move |conn| {
-        watch_resume_inner(refresh.clone(), conn)
+    supervise("resume watcher", move || {
+        let (refresh, ctx) = (refresh.clone(), ctx.clone());
+        async move { watch_resume_inner(refresh, ctx.system_bus().await?).await }
     });
 }
 

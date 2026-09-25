@@ -32,7 +32,8 @@ pub struct BluezBackend;
 struct BluezSource {
     info: DeviceInfo,
     path: OwnedObjectPath,
-    conn: zbus::Connection,
+    /// Asked for the connection on every use: a reconnect replaces it there.
+    ctx: Context,
     /// `Battery1` changes at `path`, subscribed on the first `pushed` call.
     changes: Option<zbus::MessageStream>,
 }
@@ -133,7 +134,7 @@ async fn discover_inner(ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySour
         sources.push(Box::new(BluezSource {
             info,
             path: path.clone(),
-            conn: conn.clone(),
+            ctx: ctx.clone(),
             changes: None,
         }));
     }
@@ -151,8 +152,9 @@ async fn discover_inner(ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySour
 /// Still an optimisation, never a dependency: the supervisor's periodic
 /// discovery sweep is the safety net while a watcher is down.
 pub fn watch_events(refresh: RefreshSignal, ctx: Arc<Context>) {
-    supervise("bluez event watcher", ctx, move |conn| {
-        watch_events_inner(refresh.clone(), conn, SIGNAL_DEBOUNCE)
+    supervise("bluez event watcher", move || {
+        let (refresh, ctx) = (refresh.clone(), ctx.clone());
+        async move { watch_events_inner(refresh, ctx.system_bus().await?, SIGNAL_DEBOUNCE).await }
     });
 }
 
@@ -387,8 +389,8 @@ impl BatterySource for BluezSource {
     }
 
     async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
-        // Check Connected property
-        let props_device = zbus::fdo::PropertiesProxy::builder(&self.conn)
+        let conn = self.ctx.system_bus().await?;
+        let props_device = zbus::fdo::PropertiesProxy::builder(&conn)
             .destination("org.bluez")
             .context("setting destination for Device1")?
             .path(self.path.as_ref())
@@ -430,7 +432,7 @@ impl BatterySource for BluezSource {
         loop {
             let changes = match &mut self.changes {
                 Some(changes) => changes,
-                None => match battery_changes(&self.conn, &self.path).await {
+                None => match battery_changes(&self.ctx, &self.path).await {
                     Ok(changes) => self.changes.insert(changes),
                     Err(e) => {
                         tracing::debug!(device = %self.info.name, "no Battery1 signals: {e:#}");
@@ -456,9 +458,10 @@ const BATTERY_IFACE: &str = "org.bluez.Battery1";
 
 /// `PropertiesChanged` of `Battery1` at one device's object path.
 async fn battery_changes(
-    conn: &zbus::Connection,
+    ctx: &Context,
     path: &OwnedObjectPath,
 ) -> anyhow::Result<zbus::MessageStream> {
+    let conn = ctx.system_bus().await?;
     let rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
         .sender("org.bluez")?
@@ -467,7 +470,7 @@ async fn battery_changes(
         .member("PropertiesChanged")?
         .arg(0, BATTERY_IFACE)?
         .build();
-    zbus::MessageStream::for_match_rule(rule, conn, None)
+    zbus::MessageStream::for_match_rule(rule, &conn, None)
         .await
         .context("subscribing to Battery1 PropertiesChanged")
 }
@@ -776,7 +779,7 @@ mod bus_tests {
         assert!(!watcher.is_finished());
     }
 
-    fn source(conn: &zbus::Connection, path: &str) -> BluezSource {
+    fn source(ctx: &Context, path: &str) -> BluezSource {
         BluezSource {
             info: DeviceInfo {
                 name: path.to_owned(),
@@ -785,9 +788,61 @@ mod bus_tests {
                 locator: None,
             },
             path: OwnedObjectPath::try_from(path).expect("object path"),
-            conn: conn.clone(),
+            ctx: ctx.clone(),
             changes: None,
         }
+    }
+
+    struct FakeDevice;
+
+    #[zbus::interface(name = "org.bluez.Device1")]
+    impl FakeDevice {
+        #[zbus(property)]
+        fn connected(&self) -> bool {
+            true
+        }
+    }
+
+    struct FakeBattery;
+
+    #[zbus::interface(name = "org.bluez.Battery1")]
+    impl FakeBattery {
+        #[zbus(property)]
+        fn percentage(&self) -> u8 {
+            64
+        }
+    }
+
+    /// A `dbus-daemon` restart closes the shared connection; the source must
+    /// poll through the one `Context` dials next, not the closed one it was built with.
+    #[tokio::test]
+    async fn a_poll_after_the_bus_reconnects_uses_the_new_connection() {
+        if !isolated(
+            module_path!(),
+            "a_poll_after_the_bus_reconnects_uses_the_new_connection",
+        ) {
+            return;
+        }
+        let bluez = fake_bluez().await;
+        bluez
+            .object_server()
+            .at(DEVICE, FakeDevice)
+            .await
+            .expect("Device1");
+        bluez
+            .object_server()
+            .at(DEVICE, FakeBattery)
+            .await
+            .expect("Battery1");
+        let ctx = Context::new();
+        let conn = ctx.system_bus().await.expect("private system bus");
+        let mut source = source(&ctx, DEVICE);
+        assert_eq!(source.poll().await.expect("first poll").percent, 64);
+
+        conn.close().await.expect("closing the connection");
+
+        let reading = source.poll().await.expect("a poll after the reconnect");
+        assert_eq!(reading.percent, 64);
     }
 
     fn next_push(
@@ -810,18 +865,16 @@ mod bus_tests {
             return;
         }
         let bluez = fake_bluez().await;
-        let conn = Context::new()
-            .system_bus()
-            .await
-            .expect("private system bus");
+        let ctx = Context::new();
+        let conn = ctx.system_bus().await.expect("private system bus");
         let refresh = RefreshSignal::new();
         let mut swept = refresh.sweep_waiter();
         let mut polled = refresh.waiter();
-        tokio::spawn(watch_events_inner(refresh, conn.clone(), DEBOUNCE));
+        tokio::spawn(watch_events_inner(refresh, conn, DEBOUNCE));
 
         // Subscriptions are made lazily; repeat until the watcher and both sources hear.
-        let mut device = next_push(source(&conn, DEVICE));
-        let mut other = next_push(source(&conn, OTHER));
+        let mut device = next_push(source(&ctx, DEVICE));
+        let mut other = next_push(source(&ctx, OTHER));
         let mut attempts = 0;
         let mut watcher_heard = false;
         while !(watcher_heard && device.is_finished() && other.is_finished()) {

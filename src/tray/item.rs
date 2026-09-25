@@ -544,7 +544,7 @@ mod tests {
         assert!(describe(&tray).contains(&"[ ] Automatic".to_owned()));
     }
 
-    /// The icon falls back to the first connected device, but the user did
+    /// The icon falls back to the automatic choice, but the user did
     /// not choose it, so nothing claims the choice.
     #[test]
     fn a_pin_to_a_device_that_is_not_shown_checks_nothing() {

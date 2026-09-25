@@ -29,18 +29,20 @@ pub enum Scan {
 }
 
 /// The running tray's roster, or what `poll_locally` finds when no tray runs.
-pub async fn scan_devices<F, Fut>(scan: Scan, poll_locally: F) -> Discovered
+/// Fails when a tray runs but does not answer: polling next to it is what
+/// this avoids, so there is nothing to show but what was shown before.
+pub async fn scan_devices<F, Fut>(scan: Scan, poll_locally: F) -> anyhow::Result<Discovered>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Discovered>,
 {
     match tray_roster(scan).await {
-        TrayRoster::Absent => poll_locally().await,
+        TrayRoster::Absent => Ok(poll_locally().await),
         TrayRoster::Unreadable(e) => {
             tracing::warn!("the running tray did not list its devices: {e:#}");
-            Vec::new()
+            Err(e)
         }
-        TrayRoster::Read(snapshot) => discovered(snapshot),
+        TrayRoster::Read(snapshot) => Ok(discovered(snapshot)),
     }
 }
 
@@ -259,7 +261,8 @@ mod bus_tests {
             polled.set(true);
             async { local_poll() }
         })
-        .await;
+        .await
+        .expect("a scan");
 
         assert!(!polled.get(), "polled the devices next to a running tray");
         let mut ids: Vec<_> = rows.into_iter().map(|(info, _)| info).collect();
@@ -289,10 +292,38 @@ mod bus_tests {
             std::future::pending::<()>().await;
         });
 
-        let rows = scan_devices(Scan::Refresh, || async { local_poll() }).await;
+        let rows = scan_devices(Scan::Refresh, || async { local_poll() })
+            .await
+            .expect("a scan");
 
         let names: Vec<_> = rows.into_iter().map(|(info, _)| info.name).collect();
         assert_eq!(names, ["keyboard", "mouse"]);
+    }
+
+    /// A tray that holds its name but does not answer is neither polled
+    /// around nor taken to have no devices.
+    #[tokio::test]
+    async fn a_tray_that_does_not_answer_fails_the_scan() {
+        if !isolated(module_path!(), "a_tray_that_does_not_answer_fails_the_scan") {
+            return;
+        }
+        let _silent_tray = zbus::connection::Builder::session()
+            .expect("private bus")
+            .name(TRAY_NAME)
+            .expect("name")
+            .build()
+            .await
+            .expect("claiming the tray name");
+
+        let polled = Cell::new(false);
+        let scanned = scan_devices(Scan::Read, || {
+            polled.set(true);
+            async { local_poll() }
+        })
+        .await;
+
+        assert!(!polled.get(), "polled the devices next to a running tray");
+        assert!(scanned.is_err(), "an unanswered scan read as {scanned:?}");
     }
 
     #[tokio::test]
@@ -305,7 +336,8 @@ mod bus_tests {
             polled.set(true);
             async { local_poll() }
         })
-        .await;
+        .await
+        .expect("a scan");
 
         assert!(polled.get());
         assert_eq!(rows, local_poll());

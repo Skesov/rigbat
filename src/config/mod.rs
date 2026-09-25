@@ -45,7 +45,7 @@ pub struct Config {
     /// Whether to show one tray icon per visible device or one aggregate icon.
     pub tray_mode: TrayMode,
     /// User-chosen device for the aggregate (PrimaryOnly) icon.
-    /// None = automatic (first connected among shown devices).
+    /// None = automatic (the connected shown device with the lowest charge).
     pub primary_device: Option<String>,
     /// Global poll interval in seconds. Applies to all devices unless overridden.
     pub poll_interval_secs: u64,

@@ -63,7 +63,7 @@ display-percent-in-icon = Percentage inside icon
 tray-per-device = One icon per device
 tray-per-device-hint = Choose which on the Devices tab.
 tray-primary-hint-pinned = The single icon shows { $name }. Change it on the Devices tab.
-tray-primary-hint-auto = The single icon shows the first connected device. Pin one on the Devices tab.
+tray-primary-hint-auto = The single icon shows the connected device with the lowest charge. Pin one on the Devices tab.
 button-clear = Clear
 
 group-battery = Battery
@@ -93,6 +93,7 @@ about-project-page = Project page
 device-search-hint = Search devices…
 devices-empty = No devices recorded yet. Connect a device, then press Refresh.
 devices-no-match = No devices match your search.
+devices-tray-unanswered = The running tray did not answer; showing the devices it listed last.
 
 col-name = Name
 col-type = Type

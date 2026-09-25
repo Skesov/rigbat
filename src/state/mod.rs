@@ -76,13 +76,17 @@ pub struct Store {
 
 impl Store {
     /// Moves `db` onto its own thread, which exits once every handle is dropped.
+    /// A job that panics fails only its own caller (its reply is dropped).
     pub fn start(mut db: SqliteStore) -> anyhow::Result<Self> {
         let (jobs, queue) = std::sync::mpsc::channel::<Job>();
         std::thread::Builder::new()
             .name("rigbat-state".into())
             .spawn(move || {
                 for job in queue {
-                    job(&mut db);
+                    let run = std::panic::AssertUnwindSafe(|| job(&mut db));
+                    if std::panic::catch_unwind(run).is_err() {
+                        tracing::error!("state store: a request panicked; serving the next one");
+                    }
                 }
             })
             .context("spawning the state store thread")?;
@@ -311,6 +315,24 @@ mod tests {
 
         let history = store.recent_readings(&mouse(), 10).await.unwrap();
         assert_eq!(history, [(1000, 80)]);
+
+        cleanup(&path);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_job_fails_its_caller_and_the_store_keeps_serving() {
+        #[expect(clippy::panic, reason = "simulates a bug inside a store job")]
+        fn explode(_: &mut SqliteStore) -> anyhow::Result<()> {
+            panic!("simulated store bug")
+        }
+        let path = scratch_db_path("panic");
+        let store = Store::start(SqliteStore::open(&path).unwrap()).unwrap();
+
+        assert!(store.call(explode).await.is_err());
+        let seen = store
+            .record_seen(vec![(mouse(), DeviceKind::Mouse)], 1000)
+            .await;
+        assert_eq!(seen.unwrap(), [Seen::Inserted]);
 
         cleanup(&path);
     }
