@@ -4,7 +4,7 @@ post_install() {
       systemctl --user enable --now rigbat.service
     Or use the "Startup" toggle in `rigbat settings` instead, not both.
 ==> USB HID devices (SteelSeries, 8BitDo) get access through the udev rule.
-    If one still shows offline, replug its USB receiver.
+    If one still shows "no access", replug its USB receiver.
 EOF
 }
 

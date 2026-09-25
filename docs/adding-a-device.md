@@ -64,26 +64,31 @@ Options, easiest first:
 
 ### Implement
 
-Copy `src/sources/steelseries.rs` as a template. It shows the full shape:
+Start from `src/sources/steelseries.rs` (request/response) or `src/sources/eightbitdo.rs`
+(stream-only), whichever matches how the device talks. Either shows the full shape:
 
-- a `DEVICES` table keyed by USB product id,
-- `discover()` that walks `/sys/class/hidraw` and matches vendor/product/interface through
-  `match_node`,
-- `poll()` that opens the node `O_NONBLOCK`, writes the query, waits with `nix::poll`
-  (so it never hangs), and parses the response,
+- a `pub static FAMILY: hidraw::HidrawFamily` — vendor id, a `models` table keyed by USB
+  product id, and the battery interface (`None` for a single-interface device),
+- `hidraw_family()` returning it, and `discover()` calling `hidraw::discover(&FAMILY)`, which
+  walks `/sys/class/hidraw` off the async runtime and matches vendor/product/interface,
+- `poll()` that opens the node through `hidraw::open_verified` with `O_NONBLOCK`, waits with
+  `nix::poll` (so it never hangs), and parses the report,
+- a handle policy chosen from the protocol: a request/response device keeps its handle for the
+  source's lifetime, a stream-only device opens per poll,
 - pure `parse_*` functions with unit tests.
 
-Then add a row to `backends()` in `src/discovery/registry.rs`, and the backend's `match_node`
-to `hidraw_matchers()` there so `rigbat doctor` checks the node's permissions.
+Then follow the [new HID vendor checklist](../CONTRIBUTING.md#new-hid-vendor): registration,
+the udev rule, the README and packaging, and `rigbat doctor` as the last step.
 
 ## Permissions
 
 Reading `/dev/hidraw*` requires a udev rule granting your user access — `/dev/hidraw*`
 nodes are root-only by default on most distros. `packaging/70-rigbat.rules` ships one
 line per supported USB HID device, scoped by vendor/product id; `sudo make
-udev-install` installs it (see the README's Permissions section). When you add a device
-to a vendor's `DEVICES` table, add a matching `ATTRS{idVendor}`/`ATTRS{idProduct}` line
-to `packaging/70-rigbat.rules` too.
+udev-install` installs it (see the README's Permissions section). When you add a model
+to a backend's `FAMILY`, add a matching `ATTRS{idVendor}`/`ATTRS{idProduct}` line
+to `packaging/70-rigbat.rules` too; `cargo test` fails until the two agree, and
+`rigbat doctor` reports an installed rule that predates the model as outdated.
 
 For a quick local check while reverse-engineering, without installing the rule, a
 development-only shortcut works:

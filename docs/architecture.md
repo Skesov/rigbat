@@ -74,8 +74,13 @@ translated.
   queues discarded reports into the kernel's ring and nothing is written to deadlock. A new
   backend determines which kind it is before choosing.
 - **`BatteryBackend`** (`sources`): `async fn discover(&self, ctx: &discovery::Context) ->
-Vec<Box<dyn BatterySource>>`. Finds devices and constructs sources. Backends are listed in
-  `discovery::registry::backends()`. `Context` is the dependency container built at the
+anyhow::Result<Vec<Box<dyn BatterySource>>>`. Finds devices and constructs sources; `Err` is a
+  failed sweep, distinct from `Ok(vec![])`. A hidraw backend also returns its `HidrawFamily`
+  (vendor, models, battery interface) from `hidraw_family()`: the shared discovery in
+  `sources::hidraw`, `rigbat doctor` and the udev rule test all read that one table. Backends are
+  listed in `discovery::registry::backends()`; what a backend must guarantee is the
+  [backend contract](../CONTRIBUTING.md#backend-contract), and the steps to add one are its
+  [checklists](../CONTRIBUTING.md#checklists). `Context` is the dependency container built at the
   composition root: it holds the process-wide system-bus connection (`discovery/context.rs`),
   opened lazily on first use and re-dialled if it has since closed, so a `dbus-daemon` restart
   does not strand the BlueZ backend for the life of the process. A backend that needs no
@@ -212,8 +217,10 @@ window communicates with the tray only through `config.json`.
 It does hold a tokio runtime, but nothing on the UI thread ever enters it: device discovery is
 spawned onto it and the result arrives over an `mpsc` channel drained with `try_recv` at the top
 of the frame, so the "Refresh" button cannot block the event loop. The runtime is dropped when the
-window closes; that is safe because no `spawn_blocking` is reachable from `discover_all` — an
-in-flight scan is plain async work and is simply cancelled.
+window closes. Dropping it cancels the async part of an in-flight scan but waits for its
+`spawn_blocking` calls — the hidraw backends' sysfs walk and every hidraw `poll` run there — so
+each blocking call a backend makes is bounded: a sysfs read, or a `nix::poll` with the
+backend's timeout (at most 1 s).
 
 ## Configuration and persistence
 

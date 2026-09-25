@@ -1,9 +1,9 @@
 # udev rule granting the logged-in user read/write access to the USB HID devices
 # rigbat supports, via systemd-logind's per-seat ACL mechanism (TAG+="uaccess").
 #
-# One line is needed per supported device. When adding a device to a vendor
-# backend's DEVICES table (see CONTRIBUTING.md), add the matching
-# ATTRS{idVendor}/ATTRS{idProduct} line here too.
+# One line is needed per supported device. When adding a model to a hidraw
+# backend's FAMILY table (see CONTRIBUTING.md), add the matching
+# ATTRS{idVendor}/ATTRS{idProduct} line here too; cargo test fails until they agree.
 #
 # Filename note: this file must sort lexically *before*
 # /usr/lib/udev/rules.d/73-seat-late.rules — that file runs the builtin which

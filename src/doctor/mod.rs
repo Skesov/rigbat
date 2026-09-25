@@ -4,6 +4,7 @@
 //! Probes gather facts; pure functions turn facts into [`Check`]s, so every
 //! decision and its wording is testable without a bus or a device.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -13,6 +14,7 @@ use zbus::names::BusName;
 use crate::autostart;
 use crate::discovery::registry;
 use crate::ipc;
+use crate::sources::hidraw;
 use crate::state;
 
 const SNI_WATCHER: &str = "org.kde.StatusNotifierWatcher";
@@ -89,10 +91,19 @@ pub struct SessionFacts {
     pub tray_running: bool,
 }
 
+/// The udev rule in effect and the `(vendor, product)` pairs it grants;
+/// `ids` is `None` when the file could not be read.
+#[derive(Debug)]
+pub struct InstalledRule {
+    pub path: PathBuf,
+    pub ids: Option<BTreeSet<(u16, u16)>>,
+}
+
 /// One supported device's hidraw node and the outcome of opening it read-write.
 #[derive(Debug)]
 pub struct NodeProbe {
     pub device: String,
+    pub usb_id: (u16, u16),
     pub dev_path: PathBuf,
     pub open: std::io::Result<()>,
 }
@@ -185,7 +196,7 @@ pub fn portal_check(portal: anyhow::Result<()>) -> Check {
     }
 }
 
-pub fn hidraw_checks(nodes: &[NodeProbe], installed_rule: Option<&Path>) -> Vec<Check> {
+pub fn hidraw_checks(nodes: &[NodeProbe], installed_rule: Option<&InstalledRule>) -> Vec<Check> {
     if nodes.is_empty() {
         return vec![Check::ok("no supported USB HID device connected")];
     }
@@ -196,8 +207,8 @@ pub fn hidraw_checks(nodes: &[NodeProbe], installed_rule: Option<&Path>) -> Vec<
             match &node.open {
                 Ok(()) => Check::ok(format!("{what} opens read-write")),
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Check::fail(
-                    format!("{what}: permission denied, the device will show offline"),
-                    udev_fix(installed_rule),
+                    format!("{what}: permission denied, the device will show \"no access\""),
+                    udev_fix(installed_rule, node.usb_id),
                 ),
                 Err(e) => Check::warn(
                     format!("{what}: cannot open: {e}"),
@@ -208,11 +219,20 @@ pub fn hidraw_checks(nodes: &[NodeProbe], installed_rule: Option<&Path>) -> Vec<
         .collect()
 }
 
-fn udev_fix(installed_rule: Option<&Path>) -> String {
+fn udev_fix(installed_rule: Option<&InstalledRule>, usb_id: (u16, u16)) -> String {
     match installed_rule {
+        Some(InstalledRule {
+            path,
+            ids: Some(ids),
+        }) if !ids.contains(&usb_id) => format!(
+            "{} is outdated, it has no line for {:04x}:{:04x}: reinstall it with sudo make udev-install (from the source tree) or update the rigbat package, then replug the device",
+            path.display(),
+            usb_id.0,
+            usb_id.1
+        ),
         Some(rule) => format!(
             "{} is installed but not applied: sudo udevadm control --reload-rules && sudo udevadm trigger, then replug the device",
-            rule.display()
+            rule.path.display()
         ),
         None => format!(
             "{UDEV_RULE} is not installed in {}: sudo make udev-install (from the source tree), then replug the device",
@@ -225,6 +245,33 @@ pub fn find_udev_rule(dirs: &[&Path]) -> Option<PathBuf> {
     dirs.iter()
         .map(|dir| dir.join(UDEV_RULE))
         .find(|path| path.exists())
+}
+
+pub fn read_udev_rule(path: PathBuf) -> InstalledRule {
+    let ids = std::fs::read_to_string(&path)
+        .ok()
+        .map(|text| udev_rule_ids(&text));
+    InstalledRule { path, ids }
+}
+
+/// The `(vendor, product)` pairs a rules file matches on, from its
+/// `ATTRS{idVendor}=="…"` / `ATTRS{idProduct}=="…"` lines.
+pub fn udev_rule_ids(text: &str) -> BTreeSet<(u16, u16)> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| {
+            let vendor = udev_attr(line, "idVendor")?;
+            let product = udev_attr(line, "idProduct")?;
+            Some((vendor, product))
+        })
+        .collect()
+}
+
+fn udev_attr(line: &str, key: &str) -> Option<u16> {
+    let (_, rest) = line.split_once(&format!("ATTRS{{{key}}}==\""))?;
+    let (value, _) = rest.split_once('"')?;
+    u16::from_str_radix(value, 16).ok()
 }
 
 /// `config` is `config::read`'s result: `Ok(false)` for no file yet.
@@ -323,17 +370,21 @@ async fn probe_portal() -> anyhow::Result<()> {
 }
 
 fn probe_hidraw_nodes() -> Vec<NodeProbe> {
-    let Ok(entries) = std::fs::read_dir("/sys/class/hidraw") else {
+    let sysfs_root = Path::new(hidraw::SYSFS_HIDRAW);
+    let Ok(entries) = std::fs::read_dir(sysfs_root) else {
         return Vec::new();
     };
-    let matchers = registry::hidraw_matchers();
+    let families = registry::hidraw_families();
     let mut nodes: Vec<NodeProbe> = entries
         .flatten()
         .filter_map(|entry| {
             let node = entry.file_name().to_string_lossy().into_owned();
-            matchers.iter().find_map(|matches| matches(&node).ok())
+            families
+                .iter()
+                .find_map(|family| family.match_node(sysfs_root, &node).ok())
         })
         .map(|dev| NodeProbe {
+            usb_id: (dev.identity.vendor, dev.identity.product),
             open: std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -361,9 +412,10 @@ async fn gather() -> Vec<Check> {
     ));
 
     let rule_dirs = UDEV_RULE_DIRS.map(Path::new);
+    let installed_rule = find_udev_rule(&rule_dirs).map(read_udev_rule);
     checks.extend(hidraw_checks(
         &probe_hidraw_nodes(),
-        find_udev_rule(&rule_dirs).as_deref(),
+        installed_rule.as_ref(),
     ));
 
     let config_path = crate::config::config_path();
@@ -407,6 +459,7 @@ mod tests {
     fn node(open: std::io::Result<()>) -> NodeProbe {
         NodeProbe {
             device: "SteelSeries Aerox 5 Wireless".to_owned(),
+            usb_id: (0x1038, 0x1852),
             dev_path: PathBuf::from("/dev/hidraw5"),
             open,
         }
@@ -547,16 +600,68 @@ mod tests {
         assert!(fix.contains("/etc/udev/rules.d"), "{fix}");
     }
 
+    fn installed_rule(ids: Option<&[(u16, u16)]>) -> InstalledRule {
+        InstalledRule {
+            path: PathBuf::from("/etc/udev/rules.d/70-rigbat.rules"),
+            ids: ids.map(|ids| ids.iter().copied().collect()),
+        }
+    }
+
+    fn denied_fix(rule: &InstalledRule) -> String {
+        let checks = hidraw_checks(&[node(Err(ErrorKind::PermissionDenied.into()))], Some(rule));
+        assert_eq!(statuses(&checks), [Status::Fail]);
+        checks[0].fix.clone().unwrap()
+    }
+
     #[test]
     fn denied_node_with_rule_fails_with_the_reload_command() {
-        let rule = Path::new("/etc/udev/rules.d/70-rigbat.rules");
-        let checks = hidraw_checks(&[node(Err(ErrorKind::PermissionDenied.into()))], Some(rule));
-        let fix = checks[0].fix.as_deref().unwrap();
+        let fix = denied_fix(&installed_rule(Some(&[(0x1038, 0x1852)])));
         assert!(
             fix.starts_with("/etc/udev/rules.d/70-rigbat.rules is installed"),
             "{fix}"
         );
         assert!(fix.contains("udevadm trigger"), "{fix}");
+    }
+
+    #[test]
+    fn denied_node_missing_from_the_installed_rule_asks_to_reinstall_it() {
+        let fix = denied_fix(&installed_rule(Some(&[(0x2DC8, 0x6012)])));
+        assert!(
+            fix.starts_with("/etc/udev/rules.d/70-rigbat.rules is outdated"),
+            "{fix}"
+        );
+        assert!(fix.contains("1038:1852"), "{fix}");
+        assert!(fix.contains("sudo make udev-install"), "{fix}");
+        assert!(!fix.contains("udevadm trigger"), "{fix}");
+    }
+
+    #[test]
+    fn denied_node_with_an_unreadable_rule_keeps_the_reload_command() {
+        let fix = denied_fix(&installed_rule(None));
+        assert!(fix.contains("udevadm trigger"), "{fix}");
+    }
+
+    #[test]
+    fn udev_rule_ids_reads_uncommented_vendor_product_pairs() {
+        let text = "# ATTRS{idVendor}==\"dead\", ATTRS{idProduct}==\"beef\"\n\
+             SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"1038\", ATTRS{idProduct}==\"1852\", TAG+=\"uaccess\"\n\
+             SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"2dc8\", TAG+=\"uaccess\"\n";
+        assert_eq!(udev_rule_ids(text), BTreeSet::from([(0x1038, 0x1852)]));
+    }
+
+    #[test]
+    fn shipped_udev_rule_grants_exactly_the_supported_hidraw_devices() {
+        let shipped = udev_rule_ids(include_str!("../../packaging/70-rigbat.rules"));
+        let supported: BTreeSet<(u16, u16)> = registry::hidraw_families()
+            .iter()
+            .flat_map(|family| family.usb_ids())
+            .collect();
+        let missing: Vec<_> = supported.difference(&shipped).collect();
+        let stale: Vec<_> = shipped.difference(&supported).collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "packaging/70-rigbat.rules lacks {missing:04x?} and grants unsupported {stale:04x?}"
+        );
     }
 
     #[test]

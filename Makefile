@@ -67,7 +67,7 @@ udev-install: ## Install the udev rule for USB HID devices (needs root: sudo mak
 	udevadm control --reload-rules
 	udevadm trigger
 	@echo "Installed $(UDEV_DEST). A device already plugged in has been re-triggered;"
-	@echo "if it still shows offline, replug it."
+	@echo "if it still shows \"no access\", replug it."
 
 service: install ## Install the systemd user unit (implies install)
 	@mkdir -p $(UNIT_DIR)

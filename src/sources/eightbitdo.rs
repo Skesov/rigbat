@@ -16,11 +16,9 @@
 //! decisions" there), not the request/response case `steelseries.rs` follows:
 //! open, read one report, close — do not hold the handle across polls.
 //!
-//! Discovery: `/sys/class/hidraw/hidrawN/device/uevent` contains
-//! `HID_ID=0003:VVVVVVVV:PPPPPPPP`, matched against `DEVICES` the same way the
-//! SteelSeries backend does. DInput exposes a single HID interface, so no
-//! interface filter is applied here — unlike SteelSeries, which has several
-//! interfaces on the same device and must pick the battery-reporting one.
+//! Discovery: [`FAMILY`] through `hidraw::discover`. DInput exposes a single HID
+//! interface, so no interface filter is applied — unlike SteelSeries, which has
+//! several interfaces on the same device and must pick the battery-reporting one.
 
 use std::{io::Read as _, os::unix::fs::OpenOptionsExt as _, path::PathBuf};
 
@@ -28,13 +26,11 @@ use anyhow::Context as _;
 use nix::libc;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
-use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind, Transport};
+use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
 
 use super::{BatteryBackend, BatterySource, hidraw};
 
 // ── Protocol constants ────────────────────────────────────────────────────────
-
-const VENDOR_ID: u16 = 0x2DC8;
 
 /// Input report id carrying the 34-byte streaming report with battery data.
 const REPORT_ID: u8 = 0x01;
@@ -54,17 +50,15 @@ const POLL_TIMEOUT_MS: u16 = 200;
 
 // ── Device table ─────────────────────────────────────────────────────────────
 
-struct EightBitDoDevice {
-    product_id: u16,
-    name: &'static str,
-    kind: DeviceKind,
-}
-
-const DEVICES: &[EightBitDoDevice] = &[EightBitDoDevice {
-    product_id: 0x6012,
-    name: "8BitDo Ultimate 2 Wireless",
-    kind: DeviceKind::Controller,
-}];
+pub static FAMILY: hidraw::HidrawFamily = hidraw::HidrawFamily {
+    vendor: 0x2DC8,
+    models: &[hidraw::HidrawModel {
+        product: 0x6012,
+        name: "8BitDo Ultimate 2 Wireless",
+        kind: DeviceKind::Controller,
+    }],
+    interface: None,
+};
 
 // ── Backend ──────────────────────────────────────────────────────────────────
 
@@ -82,83 +76,26 @@ impl BatteryBackend for EightBitDoBackend {
         "eightbitdo"
     }
 
+    fn hidraw_family(&self) -> Option<&'static hidraw::HidrawFamily> {
+        Some(&FAMILY)
+    }
+
     async fn discover(
         &self,
         _ctx: &crate::discovery::Context,
     ) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
-        // The walk is `std::fs` on a sysfs tree: fast, but still blocking,
-        // and it runs on the same runtime as every source task. Off-thread for
-        // the same reason `poll` is (R35): how long a sysfs read takes is the
-        // kernel's business, not rigbat's.
-        tokio::task::spawn_blocking(discover_inner)
-            .await
-            .context("spawn_blocking")?
+        let devices = hidraw::discover(&FAMILY).await?;
+        Ok(devices
+            .into_iter()
+            .map(|device| -> Box<dyn BatterySource> {
+                Box::new(EightBitDoSource {
+                    info: device.info,
+                    dev_path: device.dev_path,
+                    identity: device.identity,
+                })
+            })
+            .collect())
     }
-}
-
-fn discover_inner() -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
-    let hidraw_root = std::path::Path::new("/sys/class/hidraw");
-
-    if !hidraw_root.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut sources: Vec<Box<dyn BatterySource>> = Vec::new();
-
-    let entries = std::fs::read_dir(hidraw_root).context("reading /sys/class/hidraw")?;
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!("skipping hidraw entry: {e}");
-                continue;
-            }
-        };
-
-        // match_node returns Err for non-matching nodes — this is normal, silently skip.
-        if let Ok(node) = match_node(&entry.file_name().to_string_lossy()) {
-            sources.push(Box::new(EightBitDoSource {
-                info: node.info,
-                dev_path: node.dev_path,
-                identity: node.identity,
-            }));
-        }
-    }
-
-    Ok(sources)
-}
-
-/// The device behind `/sys/class/hidraw/<node_name>`, if it is a supported
-/// model. Err if the node does not match or cannot be read.
-pub fn match_node(node_name: &str) -> anyhow::Result<hidraw::HidrawDevice> {
-    let uevent_path = format!("/sys/class/hidraw/{node_name}/device/uevent");
-    let uevent =
-        std::fs::read_to_string(&uevent_path).with_context(|| format!("reading {uevent_path}"))?;
-
-    let identity = hidraw::NodeIdentity::from_uevent(&uevent, node_name)
-        .with_context(|| format!("no parsable HID_ID in {uevent_path}"))?;
-    let (vendor, product) = (identity.vendor, identity.product);
-
-    if vendor != VENDOR_ID {
-        anyhow::bail!("vendor 0x{vendor:04X} != 0x{VENDOR_ID:04X}");
-    }
-
-    let device_desc = DEVICES
-        .iter()
-        .find(|d| d.product_id == product)
-        .with_context(|| format!("product 0x{product:04X} not in device table"))?;
-
-    Ok(hidraw::HidrawDevice {
-        info: DeviceInfo {
-            name: device_desc.name.to_owned(),
-            kind: device_desc.kind,
-            transport: Transport::Hidraw,
-            locator: Some(identity.locator.clone()),
-        },
-        dev_path: PathBuf::from(format!("/dev/{node_name}")),
-        identity,
-    })
 }
 
 // ── Source ───────────────────────────────────────────────────────────────────

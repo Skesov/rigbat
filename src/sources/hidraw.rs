@@ -1,10 +1,11 @@
-//! Shared sysfs helpers for the backends that identify a device through its
-//! HID `uevent`.
+//! Shared discovery for the backends that talk to `/dev/hidraw*`.
 //!
-//! The two hidraw backends find their devices the same way — walk
-//! `/sys/class/hidraw`, read each node's `device/uevent`, match the vendor and
-//! product — so the parsing lives here rather than once per backend. The sysfs
-//! backend reuses `stable_locator` against the same file, reached through
+//! A hidraw backend declares a [`HidrawFamily`] — vendor, model table, battery
+//! interface — and this module walks `/sys/class/hidraw`, matches each node's
+//! `device/uevent` against it, and hands back the matched nodes. The same
+//! family drives `rigbat doctor`'s permission check and the udev rule drift
+//! test, so a model exists in exactly one table. The sysfs backend reuses
+//! `stable_locator` against the same file, reached through
 //! `<power_supply>/device`, because a HID-backed power supply is the same
 //! device seen from the other side.
 
@@ -16,7 +17,7 @@ use std::{
 use anyhow::Context as _;
 use nix::sys::stat::{fstat, major, minor};
 
-use crate::domain::DeviceInfo;
+use crate::domain::{DeviceInfo, DeviceKind, Transport};
 use crate::sources::AccessDenied;
 
 pub const SYSFS_HIDRAW: &str = "/sys/class/hidraw";
@@ -27,6 +28,115 @@ pub struct HidrawDevice {
     pub dev_path: PathBuf,
     /// Who owned the node when discovery matched it — checked again at every open.
     pub identity: NodeIdentity,
+}
+
+/// One supported model: its USB product id and how rigbat names it.
+/// `name` is part of the device's identity and of config keys — never rename one.
+pub struct HidrawModel {
+    pub product: u16,
+    pub name: &'static str,
+    pub kind: DeviceKind,
+}
+
+/// The devices one hidraw backend supports.
+pub struct HidrawFamily {
+    pub vendor: u16,
+    pub models: &'static [HidrawModel],
+    /// The USB interface that carries battery data; `None` accepts any, for a
+    /// device with a single HID interface.
+    pub interface: Option<u8>,
+}
+
+impl HidrawFamily {
+    /// `(vendor, product)` of every model, as the udev rule must list them.
+    #[cfg(test)]
+    pub fn usb_ids(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        self.models.iter().map(|model| (self.vendor, model.product))
+    }
+
+    /// Every node under `sysfs_root` that is one of this family's devices.
+    /// A missing root is an empty result, not an error: no hidraw driver, no devices.
+    pub fn discover_in(&self, sysfs_root: &Path) -> anyhow::Result<Vec<HidrawDevice>> {
+        if !sysfs_root.exists() {
+            return Ok(Vec::new());
+        }
+        let entries = std::fs::read_dir(sysfs_root)
+            .with_context(|| format!("reading {}", sysfs_root.display()))?;
+        let mut devices = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    tracing::warn!("skipping hidraw entry: {e}");
+                    continue;
+                }
+            };
+            if let Ok(device) = self.match_node(sysfs_root, &entry.file_name().to_string_lossy()) {
+                devices.push(device);
+            }
+        }
+        Ok(devices)
+    }
+
+    /// The device behind `<sysfs_root>/<node_name>`. Err when the node is not
+    /// one of this family's battery interfaces or cannot be read.
+    pub fn match_node(&self, sysfs_root: &Path, node_name: &str) -> anyhow::Result<HidrawDevice> {
+        let device_dir = sysfs_root.join(node_name).join("device");
+        let uevent_path = device_dir.join("uevent");
+        let uevent = std::fs::read_to_string(&uevent_path)
+            .with_context(|| format!("reading {}", uevent_path.display()))?;
+        let identity = NodeIdentity::from_uevent(&uevent, node_name)
+            .with_context(|| format!("no parsable HID_ID in {}", uevent_path.display()))?;
+
+        if identity.vendor != self.vendor {
+            anyhow::bail!("vendor 0x{:04X} != 0x{:04X}", identity.vendor, self.vendor);
+        }
+        let model = self
+            .models
+            .iter()
+            .find(|model| model.product == identity.product)
+            .with_context(|| format!("product 0x{:04X} not in device table", identity.product))?;
+
+        if let Some(wanted) = self.interface {
+            let real = std::fs::canonicalize(&device_dir)
+                .with_context(|| format!("canonicalizing {}", device_dir.display()))?;
+            let real = real.to_string_lossy();
+            let iface = parse_usb_interface(&real)
+                .with_context(|| format!("parsing USB interface from {real}"))?;
+            if iface != wanted {
+                anyhow::bail!("interface {iface} != {wanted} (battery interface)");
+            }
+        }
+
+        Ok(HidrawDevice {
+            info: DeviceInfo {
+                name: model.name.to_owned(),
+                kind: model.kind,
+                transport: Transport::Hidraw,
+                locator: Some(identity.locator.clone()),
+            },
+            dev_path: PathBuf::from("/dev").join(node_name),
+            identity,
+        })
+    }
+}
+
+/// [`HidrawFamily::discover_in`] on the live sysfs, off the async runtime: the
+/// walk is blocking `std::fs`, and how long a sysfs read takes is the kernel's business.
+pub async fn discover(family: &'static HidrawFamily) -> anyhow::Result<Vec<HidrawDevice>> {
+    tokio::task::spawn_blocking(|| family.discover_in(Path::new(SYSFS_HIDRAW)))
+        .await
+        .context("spawn_blocking")?
+}
+
+/// The USB interface number from a canonical sysfs path: the last segment of
+/// the form `<port>:1.N` gives N. Example: `"/sys/devices/…/7-1.1:1.3/…"` → `Some(3)`.
+pub fn parse_usb_interface(real_path: &str) -> Option<u8> {
+    real_path.split('/').rev().find_map(|seg| {
+        // A segment with no ':' is not an interface, even if it reads "1.N".
+        let (_, after_colon) = seg.rsplit_once(':')?;
+        after_colon.strip_prefix("1.")?.parse::<u8>().ok()
+    })
 }
 
 /// Ties a node to one physical device; the node number itself is recycled on replug.
@@ -394,6 +504,193 @@ mod tests {
         assert_eq!(parse_dev_numbers("243"), None);
     }
 
+    // ── discovery against a fake sysfs tree ──────────────────────────────────
+
+    /// `class/hidrawN/device` links into `devices/…/1-1:1.<iface>/…`, as on a real system.
+    struct FakeSysfs {
+        root: PathBuf,
+    }
+
+    impl FakeSysfs {
+        fn new(test_name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "rigbat-hidraw-discover-{test_name}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("class")).expect("create fake sysfs");
+            Self { root }
+        }
+
+        fn class(&self) -> PathBuf {
+            self.root.join("class")
+        }
+
+        fn add(&self, node: &str, iface: u8, vendor: u16, product: u16, uniq: &str) {
+            let device = self
+                .root
+                .join(format!("devices/usb1/1-1/1-1:1.{iface}/{node}-hid"));
+            std::fs::create_dir_all(&device).expect("create fake HID device");
+            let uevent = format!(
+                "DRIVER=hid-generic\n\
+                 HID_ID=0003:0000{vendor:04X}:0000{product:04X}\n\
+                 HID_PHYS=usb-0000:13:00.0-1.1/input{iface}\n\
+                 HID_UNIQ={uniq}\n"
+            );
+            std::fs::write(device.join("uevent"), uevent).expect("write uevent");
+            let node_dir = self.class().join(node);
+            std::fs::create_dir_all(&node_dir).expect("create fake hidraw node");
+            std::os::unix::fs::symlink(&device, node_dir.join("device")).expect("link device");
+        }
+    }
+
+    impl Drop for FakeSysfs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    use crate::sources::{eightbitdo, steelseries};
+
+    fn summary(devices: &[HidrawDevice]) -> Vec<(String, Option<String>, PathBuf)> {
+        let mut out: Vec<_> = devices
+            .iter()
+            .map(|d| {
+                (
+                    d.info.name.clone(),
+                    d.info.locator.clone(),
+                    d.dev_path.clone(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn discover_in_keeps_each_backend_to_its_own_devices() {
+        let sysfs = FakeSysfs::new("families");
+        sysfs.add("hidraw1", 0, 0x1038, 0x1852, "");
+        sysfs.add("hidraw3", 3, 0x1038, 0x1852, "");
+        sysfs.add("hidraw5", 0, 0x2DC8, 0x6012, "A1B2C3D4E5");
+        sysfs.add("hidraw7", 0, 0x046D, 0xC547, "");
+
+        let mice = steelseries::FAMILY.discover_in(&sysfs.class()).unwrap();
+        assert_eq!(
+            summary(&mice),
+            [(
+                "SteelSeries Aerox 5 Wireless".to_owned(),
+                Some("usb-0000:13:00.0-1.1/input3".to_owned()),
+                PathBuf::from("/dev/hidraw3"),
+            )]
+        );
+        assert_eq!(mice[0].info.kind, DeviceKind::Mouse);
+        assert_eq!(mice[0].info.transport, Transport::Hidraw);
+
+        let pads = eightbitdo::FAMILY.discover_in(&sysfs.class()).unwrap();
+        assert_eq!(
+            summary(&pads),
+            [(
+                "8BitDo Ultimate 2 Wireless".to_owned(),
+                Some("A1B2C3D4E5".to_owned()),
+                PathBuf::from("/dev/hidraw5"),
+            )]
+        );
+        assert_eq!(pads[0].info.kind, DeviceKind::Controller);
+        assert_eq!(
+            pads[0].identity,
+            NodeIdentity {
+                vendor: 0x2DC8,
+                product: 0x6012,
+                locator: "A1B2C3D4E5".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn match_node_rejects_another_interface_of_a_supported_model() {
+        let sysfs = FakeSysfs::new("interface");
+        sysfs.add("hidraw1", 0, 0x1038, 0x1852, "");
+        let err = steelseries::FAMILY
+            .match_node(&sysfs.class(), "hidraw1")
+            .err()
+            .expect("interface 0 is not the battery interface");
+        assert!(format!("{err:#}").contains("interface 0 != 3"), "{err:#}");
+    }
+
+    #[test]
+    fn match_node_without_an_interface_filter_accepts_any_interface() {
+        let sysfs = FakeSysfs::new("any-interface");
+        sysfs.add("hidraw2", 2, 0x2DC8, 0x6012, "");
+        assert!(
+            eightbitdo::FAMILY
+                .match_node(&sysfs.class(), "hidraw2")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn match_node_rejects_another_vendor_and_an_unlisted_product() {
+        let sysfs = FakeSysfs::new("vendor");
+        sysfs.add("hidraw4", 3, 0x046D, 0x1852, "");
+        sysfs.add("hidraw6", 3, 0x1038, 0x1853, "");
+        let class = sysfs.class();
+        let vendor = steelseries::FAMILY.match_node(&class, "hidraw4").err();
+        let product = steelseries::FAMILY.match_node(&class, "hidraw6").err();
+        assert!(
+            format!("{vendor:?}").contains("vendor 0x046D"),
+            "{vendor:?}"
+        );
+        assert!(
+            format!("{product:?}").contains("product 0x1853"),
+            "{product:?}"
+        );
+    }
+
+    #[test]
+    fn discover_in_without_a_hidraw_class_finds_nothing() {
+        let sysfs = FakeSysfs::new("no-class");
+        let missing = sysfs.root.join("absent");
+        assert!(
+            steelseries::FAMILY
+                .discover_in(&missing)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    // parse_usb_interface
+
+    #[test]
+    fn parse_usb_interface_extracts_interface_3() {
+        assert_eq!(
+            parse_usb_interface(
+                "/sys/devices/pci0000:00/0000:00:14.0/usb7/7-1/7-1.1/7-1.1:1.3/0003:1038:1852.0018/hidraw/hidraw0"
+            ),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn parse_usb_interface_extracts_interface_0() {
+        assert_eq!(
+            parse_usb_interface(
+                "/sys/devices/pci0000:00/0000:00:14.0/usb1/1-2/1-2:1.0/hidraw/hidraw1"
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn parse_usb_interface_no_segment_returns_none() {
+        assert_eq!(parse_usb_interface("/sys/devices/platform/hidraw2"), None);
+    }
+
+    #[test]
+    fn parse_usb_interface_ignores_a_bare_segment_without_the_colon() {
+        assert_eq!(parse_usb_interface("/sys/devices/1.0/hidraw/hidraw2"), None);
+    }
+
     mod props {
         use super::*;
         use proptest::prelude::*;
@@ -439,6 +736,34 @@ mod tests {
             #[test]
             fn stable_locator_is_never_empty(uevent in any::<String>(), node in ".+") {
                 prop_assert!(!stable_locator(&uevent, &node).is_empty());
+            }
+
+            #[test]
+            fn parse_usb_interface_never_panics(path in any::<String>()) {
+                let _ = parse_usb_interface(&path);
+            }
+
+            #[test]
+            fn parse_usb_interface_needs_a_config_colon(path in "(/[0-9.-]{1,5}){0,6}") {
+                prop_assert_eq!(parse_usb_interface(&path), None);
+            }
+
+            #[test]
+            fn parse_usb_interface_round_trips_a_sysfs_path(
+                bus in 1u8..=16,
+                port in "[1-9](\\.[1-9]){0,3}",
+                iface in any::<u8>(),
+                vendor in any::<u16>(),
+                product in any::<u16>(),
+                seq in any::<u16>(),
+                node in any::<u16>(),
+            ) {
+                let path = format!(
+                    "/sys/devices/pci0000:00/0000:00:14.0/usb{bus}/{bus}-{port}/\
+                     {bus}-{port}:1.{iface}/0003:{vendor:04X}:{product:04X}.{seq:04X}/\
+                     hidraw/hidraw{node}"
+                );
+                prop_assert_eq!(parse_usb_interface(&path), Some(iface));
             }
         }
     }

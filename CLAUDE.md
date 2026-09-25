@@ -51,7 +51,7 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
   open one (the toggle) and exits.
 - `rigbat doctor` — one-shot setup check (`doctor::run`): session bus, tray host, running tray,
   systemd unit + autostart both enabled, BlueZ, portal, read-write access to each supported
-  hidraw node (via `discovery::registry::hidraw_matchers`), config and state DB. Prints
+  hidraw node (via `discovery::registry::hidraw_families`), config and state DB. Prints
   `ok`/`warn`/`fail` with a fix per problem; exits 1 on any `fail`, warnings do not fail.
 - `rigbat settings` — GTK-free eframe/egui settings window in a SEPARATE process (the tray spawns
   it). It edits `config.json`; the tray applies changes via the file watch. Its device list is

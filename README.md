@@ -118,7 +118,7 @@ The package installs system-wide what the `make` targets put in your home direct
 `/usr/bin/rigbat`, the udev rule (`/usr/lib/udev/rules.d/70-rigbat.rules`), the systemd user
 unit (`/usr/lib/systemd/user/rigbat.service`), the desktop entry and the icon. Do not mix it
 with `make install`/`make service`: remove those first with `make uninstall`. If a USB device
-still shows offline after installing, replug its receiver.
+still shows "no access" after installing, replug its receiver.
 
 ## Run as a systemd user service
 
@@ -165,7 +165,7 @@ install`/`make service` never need root; only this step does, since it writes to
 
 Bluetooth and sysfs (kernel power_supply) devices need no rule — only USB HID access is
 gated by permissions. A device already plugged in when you run `udev-install` is
-re-triggered automatically; if it still shows `offline`, replug it.
+re-triggered automatically; if it still shows `no access`, replug it.
 
 ### 8BitDo Ultimate 2 Wireless
 

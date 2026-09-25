@@ -43,5 +43,10 @@ impl std::error::Error for AccessDenied {}
 #[async_trait::async_trait]
 pub trait BatteryBackend: Send + Sync {
     fn name(&self) -> &'static str;
+    /// The models a backend opens through `/dev/hidraw*`: what `rigbat doctor`
+    /// probes and what the shipped udev rule must grant.
+    fn hidraw_family(&self) -> Option<&'static hidraw::HidrawFamily> {
+        None
+    }
     async fn discover(&self, ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>>;
 }
