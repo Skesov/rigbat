@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use eframe::egui;
 
@@ -168,7 +169,8 @@ impl SettingsApp {
     }
 
     /// The collapsed row's value and note: the dashboard's words for a
-    /// connected device, when it was last seen for any other.
+    /// connected device, when it was last seen for any other. The estimate and
+    /// the reading's age exist only when a running tray was read.
     fn device_value(
         &self,
         row: &DeviceRow,
@@ -206,7 +208,10 @@ impl SettingsApp {
         );
         let low = matches!(status, PrimaryStatus::Low { .. });
         let online = row.presence == Presence::Online;
-        let note = status_note(row.presence, None, None, lang);
+        let seen_ago = row
+            .read_at
+            .map(|at| Duration::from_secs(u64::try_from(now.saturating_sub(at)).unwrap_or(0)));
+        let note = status_note(row.presence, row.remaining, seen_ago, lang);
         (
             gui::charge_value_text(visuals, &colors, text, low, online),
             note,
@@ -535,7 +540,8 @@ mod tests {
     use super::*;
     use crate::config::{self, Config};
     use crate::domain::{
-        BatteryReading, CHARGING_SIGN, ChargeState, DeviceKind, LOW_SIGN, Transport, state_label,
+        BatteryReading, CHARGING_SIGN, ChargeState, DeviceKind, LOW_SIGN, Transport, format_age,
+        format_coarse, state_label,
     };
     use crate::egui_test::{
         assert_no_overlap, click_at, fully_painted_text_at, painted_text_at, run_frame,
@@ -564,6 +570,8 @@ mod tests {
             kind,
             charge: charge.map(|(percent, state)| BatteryReading::new(percent, state)),
             presence,
+            remaining: None,
+            read_at: None,
             first_seen: store_id.map(|_| state::now_unix() - 30 * DAY),
             last_seen: store_id.map(|_| state::now_unix() - 2 * DAY),
         }
@@ -571,13 +579,16 @@ mod tests {
 
     fn keyboard() -> DeviceRow {
         let charge = Some((39, ChargeState::Discharging));
-        device_row(
-            "NuPhy Air75 V2",
-            DeviceKind::Keyboard,
-            Presence::Online,
-            charge,
-            Some(1),
-        )
+        DeviceRow {
+            remaining: Some(Duration::from_secs(7 * 3600)),
+            ..device_row(
+                "NuPhy Air75 V2",
+                DeviceKind::Keyboard,
+                Presence::Online,
+                charge,
+                Some(1),
+            )
+        }
     }
 
     fn earbuds() -> DeviceRow {
@@ -624,13 +635,16 @@ mod tests {
                 None,
                 Some(4),
             ),
-            device_row(
-                "MX Anywhere 3",
-                DeviceKind::Mouse,
-                Presence::Unreachable,
-                None,
-                Some(5),
-            ),
+            DeviceRow {
+                read_at: Some(state::now_unix() - 2 * 3600),
+                ..device_row(
+                    "MX Anywhere 3",
+                    DeviceKind::Mouse,
+                    Presence::Unreachable,
+                    None,
+                    Some(5),
+                )
+            },
             earbuds(),
         ]
     }
@@ -674,16 +688,21 @@ mod tests {
             let painted = fully_painted_text_at(TEST_SIZE, |ui| app.render_devices_tab(ui));
 
             let l = loader(lang);
+            let estimate = format_coarse(Duration::from_secs(7 * 3600), lang);
+            let age = format_age(Duration::from_secs(2 * 3600), lang);
             let mut expected: Vec<String> = [
                 "devices-connected",
                 "devices-seen-before",
                 "button-refresh",
-                "presence-no-access",
-                "presence-unreachable",
                 "note-no-access",
             ]
             .map(|id| l.get(id))
             .into();
+            let offline = PrimaryStatus::Offline;
+            expected.extend([
+                charge_value(Presence::NoAccess, None, None, offline, lang),
+                charge_value(Presence::Unreachable, None, None, offline, lang),
+            ]);
             expected.extend(every_state().into_iter().map(|row| row.device.name));
             expected.extend([
                 "39%".to_owned(),
@@ -691,6 +710,8 @@ mod tests {
                 format!("{CHARGING_SIGN} 40%"),
                 format!("100% · {}", state_label(ChargeState::Full, lang)),
                 seen_ago(lang),
+                fl!(l, "note-remaining", estimate = estimate.as_str()),
+                fl!(l, "note-last-reading", age = age.as_str()),
             ]);
             expected.extend(
                 every_state()

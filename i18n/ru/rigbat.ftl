@@ -106,10 +106,11 @@ devices-seen-before = Замечены раньше
 device-seen-ago = замечено { $age }
 device-show-in-tray = Показывать в трее
 
-presence-online = На связи
-presence-unreachable = Недоступно
-presence-disconnected = Отключено
-presence-no-access = Нет доступа
+# Lowercase, as after "name: "; `charge_value` capitalises a word that starts its own slot.
+presence-online = на связи
+presence-unreachable = недоступно
+presence-disconnected = отключено
+presence-no-access = нет доступа
 
 device-pin = Показывать на общем значке
 device-pin-hint = Действует, когда в трее один значок на все устройства.

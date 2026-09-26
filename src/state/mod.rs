@@ -158,6 +158,16 @@ impl Store {
         self.call(move |db| db.recent_readings(&id, cap)).await
     }
 
+    /// The newest stored reading for `id` and its unix time, heartbeat rows
+    /// included. `None` if it has none, or no `devices` row.
+    pub async fn latest_reading(
+        &self,
+        id: &DeviceId,
+    ) -> anyhow::Result<Option<(i64, BatteryReading)>> {
+        let id = id.clone();
+        self.call(move |db| db.latest_reading(&id)).await
+    }
+
     /// Every device this store has ever recorded, in no particular order
     /// stronger than "stable enough for a UI to sort".
     pub async fn list_devices(&self) -> anyhow::Result<Vec<DeviceRecord>> {

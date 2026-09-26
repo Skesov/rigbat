@@ -523,8 +523,8 @@ mod tests {
                 "[ ] Ear: ⚡ 40% #audio-headset",
                 "[ ] MX__Master: 62% · ~3h left #input-mouse",
                 "[ ] Pad: 100% · full #input-gaming",
-                "[ ] mouse: No access · run rigbat doctor #input-mouse",
-                "[ ] NuPhy: Unreachable · last reading 2h ago #input-keyboard",
+                "[ ] mouse: no access · run rigbat doctor #input-mouse",
+                "[ ] NuPhy: unreachable · last reading 2h ago #input-keyboard",
             ])
         );
     }
@@ -559,7 +559,7 @@ mod tests {
             with_tail(&[
                 "[ ] Automatic",
                 "[x] MX: 40% #input-mouse",
-                "[ ] MX: Unreachable · last reading just now #input-mouse",
+                "[ ] MX: unreachable · last reading just now #input-mouse",
             ])
         );
     }
@@ -578,8 +578,8 @@ mod tests {
                 "Ear: ⚡ 40% #audio-headset",
                 "MX__Master: 62% · ~3h left #input-mouse",
                 "Pad: 100% · full #input-gaming",
-                "mouse: No access · run rigbat doctor #input-mouse",
-                "NuPhy: Unreachable · last reading 2h ago #input-keyboard",
+                "mouse: no access · run rigbat doctor #input-mouse",
+                "NuPhy: unreachable · last reading 2h ago #input-keyboard",
             ])
         );
     }
@@ -661,7 +661,7 @@ mod tests {
             devices: vec![no_access("mouse")],
         };
         let tray = tray_for(Some(key("mouse")), state);
-        let expected = "mouse: No access · run rigbat doctor";
+        let expected = "mouse: no access · run rigbat doctor";
 
         assert_eq!(tray.tool_tip().title, expected);
         assert!(

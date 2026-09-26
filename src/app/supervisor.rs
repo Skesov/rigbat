@@ -161,13 +161,6 @@ struct DeviceEntry {
     /// point where the percent differs from the previous one is kept — see
     /// `push_reading`.
     battery_history: Vec<(BootTime, u8)>,
-    /// Name of the `BatteryBackend` that last (re)discovered this device —
-    /// how `reconcile` decides whether a vanished entry is safe to retire.
-    /// Not derived from `DeviceId`/`transport`: `Transport::Hidraw` is
-    /// shared by both the `steelseries` and `eightbitdo` backends, so
-    /// transport alone cannot answer "which backend owns this device" (see
-    /// C2 investigation notes on `reconcile`).
-    backend: &'static str,
 }
 
 impl DeviceEntry {
@@ -211,7 +204,7 @@ fn push_history_point(history: &mut Vec<(BootTime, u8)>, now: BootTime, percent:
     }
 }
 
-/// Rebuilds a freshly (re)discovered device's in-memory change-point history
+/// Rebuilds a newly-added device's in-memory change-point history
 /// from the state store, so `domain::estimate` has data to work with without
 /// waiting out a fresh `MIN_WINDOW` after every tray restart. `store.
 /// recent_readings` already returns change points, most-recent-first,
@@ -220,8 +213,7 @@ fn push_history_point(history: &mut Vec<(BootTime, u8)>, now: BootTime, percent:
 /// increase partway through the persisted history still clears what came
 /// before it, exactly as it would live.
 ///
-/// Each stored wall-clock timestamp is converted once, by its age, to a
-/// `BootTime` — negative for a reading from before this boot.
+/// Each stored wall-clock timestamp is converted once, by `boot_time_at`.
 async fn seed_history(
     store: &state::Store,
     id: &DeviceId,
@@ -237,8 +229,7 @@ async fn seed_history(
     };
     let mut history = Vec::new();
     for (at, percent) in rows.into_iter().rev() {
-        let age_secs = now_unix.saturating_sub(at).max(0) as u64;
-        let Some(at) = now.checked_sub(Duration::from_secs(age_secs)) else {
+        let Some(at) = boot_time_at(at, now, now_unix) else {
             continue;
         };
         push_history_point(&mut history, at, percent);
@@ -246,10 +237,41 @@ async fn seed_history(
     history
 }
 
+/// The device's newest stored reading, so a restart does not blank what the
+/// last run knew. `None` without one, or on a store error.
+async fn latest_reading(
+    store: &state::Store,
+    id: &DeviceId,
+    now: BootTime,
+    now_unix: i64,
+) -> Option<(BootTime, BatteryReading)> {
+    let (at, reading) = store.latest_reading(id).await.unwrap_or_else(|e| {
+        tracing::warn!(device = %id.name, "state store: failed to load the latest reading: {e:#}");
+        None
+    })?;
+    Some((boot_time_at(at, now, now_unix)?, reading))
+}
+
+/// A stored wall-clock time as a `BootTime`, by its age — negative for a
+/// reading from before this boot.
+fn boot_time_at(at_unix: i64, now: BootTime, now_unix: i64) -> Option<BootTime> {
+    let age_secs = u64::try_from(now_unix.saturating_sub(at_unix)).unwrap_or(0);
+    now.checked_sub(Duration::from_secs(age_secs))
+}
+
+/// Whether a `Disconnected` entry seen at `last_seen` has outlived
+/// `DISCONNECTED_RETENTION`. One that never produced a reading has nothing to
+/// retain.
+fn outlived(last_seen: Option<BootTime>, now: BootTime) -> bool {
+    last_seen.is_none_or(|t| now.saturating_duration_since(t) > DISCONNECTED_RETENTION)
+}
+
 /// Live set of discovered devices and their polling tasks, keyed by identity.
 /// `order` preserves discovery order so the tray roster is stable across polls.
 /// A device that leaves discovery keeps its entry (see `reconcile`) — only
-/// `tasks` loses the id, so `entries` can outlive `tasks` for a given id.
+/// `tasks` loses the id, so `entries` can outlive `tasks` for a given id. A
+/// device restored from the store at startup (`restore_retained`) is such an
+/// entry from the start: `Disconnected`, no task, until a sweep finds it.
 struct DeviceRegistry {
     order: Vec<DeviceId>,
     entries: HashMap<DeviceId, DeviceEntry>,
@@ -266,6 +288,11 @@ struct DeviceRegistry {
 struct SourceTask {
     handle: AbortHandle,
     generation: u64,
+    /// The `BatteryBackend` that found the device — whose failed sweep must
+    /// not retire it. Not derived from `DeviceId`/`transport`:
+    /// `Transport::Hidraw` is shared by the `steelseries` and `eightbitdo`
+    /// backends.
+    backend: &'static str,
 }
 
 /// `generation` drops a message a retired task queued before its replacement was spawned.
@@ -307,11 +334,24 @@ impl DeviceRegistry {
             .is_some_and(|task| task.generation == generation)
     }
 
-    fn spawn(&mut self, src: Box<dyn BatterySource>, id: DeviceId, ctx: &SourceCtx) {
+    fn spawn(
+        &mut self,
+        src: Box<dyn BatterySource>,
+        id: DeviceId,
+        backend: &'static str,
+        ctx: &SourceCtx,
+    ) {
         self.last_generation = self.last_generation.wrapping_add(1);
         let generation = self.last_generation;
         let handle = spawn_source_task(src, id.clone(), generation, ctx);
-        self.tasks.insert(id, SourceTask { handle, generation });
+        self.tasks.insert(
+            id,
+            SourceTask {
+                handle,
+                generation,
+                backend,
+            },
+        );
     }
 
     /// Applies a poll outcome to a device that is still registered. A result
@@ -360,7 +400,7 @@ impl DeviceRegistry {
     /// is skipped for both the upsert pass and the vanished-device pass
     /// below: polling only demotes a device after `OFFLINE_AFTER_FAILURES`
     /// consecutive misses, and a single failed discovery sweep must not be
-    /// more trigger-happy than that. `entries[id].backend` — not
+    /// more trigger-happy than that. `tasks[id].backend` — not
     /// `DeviceId`/`transport` — is what answers "which backend owns this
     /// id": `Transport::Hidraw` is shared by both the `steelseries` and
     /// `eightbitdo` backends, so transport cannot make that call.
@@ -486,9 +526,8 @@ impl DeviceRegistry {
                     // OFFLINE_AFTER_FAILURES.
                     entry.presence = Presence::Unreachable;
                     entry.consecutive_failures = OFFLINE_AFTER_FAILURES;
-                    entry.backend = name;
                 }
-                self.spawn(src, id, ctx);
+                self.spawn(src, id, name, ctx);
             } else {
                 // Still healthy — drop the transient handle, task keeps running.
                 drop(src);
@@ -503,34 +542,34 @@ impl DeviceRegistry {
                 // task proves it Online again.
                 tracing::info!(device = %src.device().name, "device reappeared");
                 slot.get_mut().info = src.device().clone();
-                slot.get_mut().backend = name;
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
                 tracing::info!(device = %src.device().name, "device appeared");
-                // First time this run: rebuild its change-point history
-                // from the store, if there is one, so an estimate can
-                // fire without waiting out a fresh window — see
-                // `seed_history`. A device reappearing after
-                // `Disconnected` reuses the Occupied arm above and keeps
-                // whatever history it already has in memory instead.
-                let battery_history = match &self.store {
-                    Some(store) => seed_history(store, &id, now_boot, now_unix).await,
-                    None => Vec::new(),
+                // First time this run: start from what the store remembers
+                // — the last reading until the first poll answers, and the
+                // change-point history so an estimate need not wait out a
+                // fresh window. A device reappearing after `Disconnected`
+                // reuses the Occupied arm above and keeps its memory instead.
+                let (latest, battery_history) = match &self.store {
+                    Some(store) => (
+                        latest_reading(store, &id, now_boot, now_unix).await,
+                        seed_history(store, &id, now_boot, now_unix).await,
+                    ),
+                    None => (None, Vec::new()),
                 };
                 slot.insert(DeviceEntry {
                     info: src.device().clone(),
-                    last_reading: None,
-                    last_seen: None,
+                    last_reading: latest.map(|(_, r)| r),
+                    last_seen: latest.map(|(at, _)| at),
                     presence: Presence::Unreachable,
                     consecutive_failures: 0,
                     battery_history,
-                    backend: name,
                 });
                 self.order.push(id.clone());
             }
         }
 
-        self.spawn(src, id, ctx);
+        self.spawn(src, id, name, ctx);
         rename
     }
 
@@ -547,11 +586,7 @@ impl DeviceRegistry {
             .tasks
             .iter()
             .filter(|(id, task)| !fresh_ids.contains(id) && task.handle.is_finished())
-            .filter(|(id, _)| {
-                self.entries
-                    .get(*id)
-                    .is_some_and(|e| !succeeded_backends.contains(&e.backend))
-            })
+            .filter(|(_, task)| !succeeded_backends.contains(&task.backend))
             .map(|(id, _)| id.clone())
             .collect();
         for id in crashed {
@@ -571,18 +606,11 @@ impl DeviceRegistry {
     fn retire_vanished(&mut self, fresh_ids: &[DeviceId], succeeded_backends: &[&'static str]) {
         let vanished: Vec<DeviceId> = self
             .tasks
-            .keys()
-            .filter(|id| !fresh_ids.contains(id))
-            .filter(|id| {
-                // No entry for a tracked task should not happen (entries and
-                // tasks are always inserted together in `admit`), but retiring is
-                // the pre-fix behaviour and the safer default if it ever
-                // does.
-                self.entries
-                    .get(id)
-                    .is_none_or(|e| succeeded_backends.contains(&e.backend))
+            .iter()
+            .filter(|(id, task)| {
+                !fresh_ids.contains(id) && succeeded_backends.contains(&task.backend)
             })
-            .cloned()
+            .map(|(id, _)| id.clone())
             .collect();
         for id in vanished {
             self.disconnect(&id);
@@ -634,15 +662,59 @@ impl DeviceRegistry {
         let stale: Vec<DeviceId> = self
             .entries
             .iter()
-            .filter(|(_, e)| e.presence == Presence::Disconnected)
-            .filter(|(_, e)| match e.last_seen {
-                None => true,
-                Some(t) => now.saturating_duration_since(t) > DISCONNECTED_RETENTION,
-            })
+            .filter(|(_, e)| e.presence == Presence::Disconnected && outlived(e.last_seen, now))
             .map(|(id, _)| id.clone())
             .collect();
         for id in stale {
             self.forget(&id);
+        }
+    }
+
+    /// Adds each inventory device no sweep has found yet whose stored reading
+    /// is within `DISCONNECTED_RETENTION`, as `Disconnected` with that
+    /// reading: a device that dropped before a restart reads the same as one
+    /// that dropped while the tray ran, and ages out the same way. A later
+    /// sweep that finds it takes the reappeared path in `admit`.
+    async fn restore_retained(&mut self) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let records = match store.list_devices().await {
+            Ok(records) => records,
+            Err(e) => {
+                tracing::warn!("state store: failed to list devices to restore: {e:#}");
+                return;
+            }
+        };
+        let now_boot = crate::clock::now();
+        let now_unix = state::now_unix();
+        for record in records {
+            let id = record.device;
+            if self.entries.contains_key(&id) {
+                continue;
+            }
+            let latest = latest_reading(&store, &id, now_boot, now_unix).await;
+            if outlived(latest.map(|(at, _)| at), now_boot) {
+                continue;
+            }
+            let battery_history = seed_history(&store, &id, now_boot, now_unix).await;
+            self.entries.insert(
+                id.clone(),
+                DeviceEntry {
+                    info: DeviceInfo {
+                        name: id.name.clone(),
+                        kind: record.kind,
+                        transport: id.transport,
+                        locator: id.locator.clone(),
+                    },
+                    last_reading: latest.map(|(_, r)| r),
+                    last_seen: latest.map(|(at, _)| at),
+                    presence: Presence::Disconnected,
+                    consecutive_failures: 0,
+                    battery_history,
+                },
+            );
+            self.order.push(id);
         }
     }
 
@@ -702,6 +774,7 @@ async fn manager_task<F, Fut, L, S>(
     let mut registry = DeviceRegistry::new(store);
 
     let renames = registry.reconcile(discover().await, &ctx).await;
+    registry.restore_retained().await;
     // Sent even when unchanged: consumers wait on it as "the first sweep is in".
     watch_tx.send_replace(TrayState {
         devices: registry.snapshot(),
@@ -1271,9 +1344,6 @@ mod tests {
                 presence,
                 consecutive_failures,
                 battery_history: Vec::new(),
-                // Arbitrary: none of this helper's callers exercise
-                // `reconcile`'s backend-ownership retire logic.
-                backend: "test",
             },
         );
     }
@@ -1293,6 +1363,8 @@ mod tests {
         let task = SourceTask {
             handle: tokio::spawn(std::future::pending::<()>()).abort_handle(),
             generation: registry.last_generation,
+            // Arbitrary: no caller exercises backend-ownership retirement.
+            backend: "test",
         };
         registry.tasks.insert(id.clone(), task);
     }
@@ -1403,7 +1475,12 @@ mod tests {
             Some(crate::clock::now()),
             0,
         );
-        registry.spawn(Box::new(ReassignedSource { info: a.clone() }), a.id(), &ctx);
+        registry.spawn(
+            Box::new(ReassignedSource { info: a.clone() }),
+            a.id(),
+            "test",
+            &ctx,
+        );
 
         let msg = timeout(std::time::Duration::from_secs(5), mpsc_rx.recv())
             .await
@@ -1449,7 +1526,12 @@ mod tests {
         let mut registry = DeviceRegistry::new(None);
         let a = device("a");
         insert_entry(&mut registry, &a, Presence::Unreachable, None, None, 0);
-        registry.spawn(Box::new(DeniedSource { info: a.clone() }), a.id(), &ctx);
+        registry.spawn(
+            Box::new(DeniedSource { info: a.clone() }),
+            a.id(),
+            "test",
+            &ctx,
+        );
 
         let msg = timeout(std::time::Duration::from_secs(5), mpsc_rx.recv())
             .await
@@ -1969,7 +2051,7 @@ mod tests {
     /// `steelseries` and `eightbitdo` both report `Transport::Hidraw` (see
     /// `src/sources/steelseries.rs` and `src/sources/eightbitdo.rs`), so
     /// `DeviceId`/`transport` cannot answer "which backend owns this
-    /// device" — this is why `DeviceEntry` tracks `backend` explicitly.
+    /// device" — this is why `SourceTask` tracks `backend` explicitly.
     /// One backend failing must not affect the other's retirement, even
     /// though both produce devices with the same `Transport` value.
     #[tokio::test]
@@ -2342,6 +2424,151 @@ mod tests {
         let entry = registry.entries.get(&id).expect("device entry present");
         let percents: Vec<u8> = entry.battery_history.iter().map(|&(_, p)| p).collect();
         assert_eq!(percents, vec![80, 79, 78]);
+
+        cleanup_store(&path);
+    }
+
+    const HOUR: i64 = 60 * 60;
+
+    /// A store holding one device and its reading taken `age_secs` ago, as a
+    /// previous run left it.
+    async fn store_with_reading(
+        test_name: &str,
+        info: &DeviceInfo,
+        percent: u8,
+        age_secs: i64,
+    ) -> (state::Store, std::path::PathBuf) {
+        let (store, path) = open_scratch_store(test_name);
+        let at = state::now_unix() - age_secs;
+        store
+            .record_seen(vec![(info.id(), info.kind)], at)
+            .await
+            .expect("record_seen");
+        store.record_reading(&info.id(), reading_discharging(percent), at);
+        (store, path)
+    }
+
+    fn age_of(device: &DeviceState) -> Duration {
+        let seen = device.last_seen.expect("a restored reading has a time");
+        crate::clock::now().saturating_duration_since(seen)
+    }
+
+    /// A device switched off before a restart: no sweep finds it, and it
+    /// still shows, dimmed, with the age of its last reading.
+    #[tokio::test]
+    async fn a_restart_restores_a_recent_reading_of_an_undiscovered_device() {
+        let keyboard = device("keyboard");
+        let (store, path) = store_with_reading("restore-recent", &keyboard, 64, 2 * HOUR).await;
+
+        let (tx, _config_rx) = config_channel(Config::default());
+        let (mut rx, _refresh) = Supervisor::spawn_with(
+            tx,
+            || async { vec![ok_sweep("sysfs", vec![])] },
+            no_migration_load,
+            no_migration_save,
+            Some(store),
+        );
+        let state = wait_for_devices(&mut rx).await;
+
+        assert_eq!(state.devices.len(), 1, "{:?}", state.devices);
+        let restored = &state.devices[0];
+        assert_eq!(restored.presence, Presence::Disconnected);
+        assert_eq!(restored.last_reading, Some(reading_discharging(64)));
+        let age = age_of(restored);
+        assert!(
+            age >= Duration::from_secs(2 * 3600) && age < Duration::from_secs(2 * 3600 + 60),
+            "age {age:?}"
+        );
+        assert!(crate::domain::is_visible(
+            restored,
+            |_| true,
+            crate::clock::now()
+        ));
+
+        cleanup_store(&path);
+    }
+
+    #[tokio::test]
+    async fn a_restart_does_not_restore_a_reading_past_the_retention() {
+        let keyboard = device("keyboard");
+        let (store, path) = store_with_reading("restore-old", &keyboard, 64, 25 * HOUR).await;
+        let (_tx, config_rx) = config_channel(Config::default());
+        let ctx = source_ctx(config_rx);
+        let mut registry = DeviceRegistry::new(Some(store));
+
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![])], &ctx)
+            .await;
+        registry.restore_retained().await;
+
+        assert_eq!(registry.snapshot(), []);
+
+        cleanup_store(&path);
+    }
+
+    #[tokio::test]
+    async fn a_discovered_device_shows_its_stored_reading_until_its_first_poll() {
+        let mouse = device("mouse");
+        let (store, path) = store_with_reading("restore-discovered", &mouse, 70, HOUR).await;
+        let (_tx, config_rx) = config_channel(Config::default());
+        let ctx = source_ctx(config_rx);
+        let mut registry = DeviceRegistry::new(Some(store));
+
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![ok_source(&mouse, 65)])], &ctx)
+            .await;
+
+        let before = &registry.snapshot()[0];
+        assert_eq!(before.presence, Presence::Unreachable);
+        assert_eq!(before.last_reading, Some(reading_discharging(70)));
+        assert!(age_of(before) >= Duration::from_secs(3600));
+
+        record_live(&mut registry, &mouse.id(), Some(reading_discharging(65)));
+
+        let after = &registry.snapshot()[0];
+        assert_eq!(after.presence, Presence::Online);
+        assert_eq!(after.last_reading, Some(reading_discharging(65)));
+        assert!(age_of(after) < Duration::from_secs(60));
+
+        cleanup_store(&path);
+    }
+
+    /// A restored entry has no task; the sweep that finds the device gives it
+    /// one, and losing it again retires it like any other.
+    #[tokio::test]
+    async fn a_restored_device_is_polled_once_a_sweep_finds_it() {
+        let mouse = device("mouse");
+        let (store, path) = store_with_reading("restore-handover", &mouse, 70, HOUR).await;
+        let (_tx, config_rx) = config_channel(Config::default());
+        let ctx = source_ctx(config_rx);
+        let mut registry = DeviceRegistry::new(Some(store));
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![])], &ctx)
+            .await;
+        registry.restore_retained().await;
+        assert!(!registry.tasks.contains_key(&mouse.id()));
+
+        registry
+            .reconcile(vec![err_sweep("sysfs", "bus hiccup")], &ctx)
+            .await;
+        assert_eq!(registry.snapshot()[0].presence, Presence::Disconnected);
+
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![ok_source(&mouse, 65)])], &ctx)
+            .await;
+        assert!(registry.tasks.contains_key(&mouse.id()));
+        assert_eq!(
+            registry.snapshot()[0].last_reading,
+            Some(reading_discharging(70))
+        );
+        record_live(&mut registry, &mouse.id(), Some(reading_discharging(65)));
+        assert_eq!(registry.snapshot()[0].presence, Presence::Online);
+
+        registry
+            .reconcile(vec![ok_sweep("sysfs", vec![])], &ctx)
+            .await;
+        assert!(!registry.tasks.contains_key(&mouse.id()));
+        assert_eq!(registry.snapshot()[0].presence, Presence::Disconnected);
 
         cleanup_store(&path);
     }

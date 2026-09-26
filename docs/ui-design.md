@@ -350,6 +350,13 @@ The value (`charge_value`) and the note (`status_note`), English:
 
 - A retained reading shows the presence word, not a stale percentage; the note carries its age.
 - The note says only what the value does not.
+- **Case.** A presence word is capitalised only where it starts its own slot — the value column of
+  the dashboard and the Devices tab (`Unreachable`, `⚠ Unreachable`). After `name: ` in the tray
+  menu row and tooltip (`device_line`) it stays lowercase: `mouse: no access · run rigbat doctor`.
+  State words are lowercase everywhere (`100% · full`). The catalogues hold the lowercase form;
+  `charge_value` capitalises it, in every language.
+- The Devices tab shows the tray's note for a connected device (`~7h left`, `last reading 2h
+ago`) when it reads a running tray; its own poll, without one, has no estimate and no note.
 - Estimates are coarse (`format_coarse`: `~Nm`, `~Nh`, `>Nd`); ages likewise (`format_age`: "just
   now", `Nm ago`, `Nh ago`, `Nd ago`), so aged text changes at most every `AGE_STEP`.
 - **Width.** Text is painted whole, on one line, at the narrowest window, in every language.

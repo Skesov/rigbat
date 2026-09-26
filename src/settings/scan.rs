@@ -17,7 +17,18 @@ const STATE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a Refresh waits for the tray's re-poll before reading what is there.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(3);
 
-pub type Discovered = Vec<(DeviceInfo, PollOutcome)>;
+/// One device a scan found. The estimate and the reading's time come from a
+/// running tray; a local poll has neither.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScannedDevice {
+    pub info: DeviceInfo,
+    pub outcome: PollOutcome,
+    pub remaining: Option<Duration>,
+    /// Unix seconds.
+    pub read_at: Option<i64>,
+}
+
+pub type Discovered = Vec<ScannedDevice>;
 
 /// What a scan asks of a running tray.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,15 +45,24 @@ pub enum Scan {
 pub async fn scan_devices<F, Fut>(scan: Scan, poll_locally: F) -> anyhow::Result<Discovered>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Discovered>,
+    Fut: Future<Output = Vec<(DeviceInfo, PollOutcome)>>,
 {
     match tray_roster(scan).await {
-        TrayRoster::Absent => Ok(poll_locally().await),
+        TrayRoster::Absent => Ok(poll_locally()
+            .await
+            .into_iter()
+            .map(|(info, outcome)| ScannedDevice {
+                info,
+                outcome,
+                remaining: None,
+                read_at: None,
+            })
+            .collect()),
         TrayRoster::Unreadable(e) => {
             tracing::warn!("the running tray did not list its devices: {e:#}");
             Err(e)
         }
-        TrayRoster::Read(snapshot) => Ok(discovered(snapshot)),
+        TrayRoster::Read(snapshot) => Ok(discovered(snapshot, crate::state::now_unix())),
     }
 }
 
@@ -94,20 +114,21 @@ async fn repoll(tray: &Tray1Proxy<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn discovered(snapshot: Snapshot) -> Discovered {
+fn discovered(snapshot: Snapshot, now_unix: i64) -> Discovered {
     let mut rows: Discovered = snapshot
         .devices
         .into_iter()
         .chain(snapshot.hidden)
-        .filter_map(row)
+        .filter_map(|card| row(card, now_unix))
         .collect();
-    rows.sort_by_cached_key(|(info, outcome)| roster_order(&info.name, outcome.presence()));
+    rows.sort_by_cached_key(|row| roster_order(&row.info.name, row.outcome.presence()));
     rows
 }
 
-/// A card as the outcome a local poll would have given; a disconnected device
-/// is one discovery did not find, so it is no row at all.
-fn row(card: DeviceCard) -> Option<(DeviceInfo, PollOutcome)> {
+/// A card as the outcome a local poll would have given, plus what only the
+/// tray knows; a disconnected device is one discovery did not find, so it is
+/// no row at all.
+fn row(card: DeviceCard, now_unix: i64) -> Option<ScannedDevice> {
     let outcome = match card.presence {
         Presence::Online => match (card.percent, card.charge) {
             (Some(percent), Some(state)) => {
@@ -125,7 +146,15 @@ fn row(card: DeviceCard) -> Option<(DeviceInfo, PollOutcome)> {
         transport: card.transport,
         locator: card.locator,
     };
-    Some((info, outcome))
+    let read_at = card
+        .seen_secs_ago
+        .map(|ago| now_unix.saturating_sub(i64::try_from(ago).unwrap_or(i64::MAX)));
+    Some(ScannedDevice {
+        info,
+        outcome,
+        remaining: card.remaining_secs.map(Duration::from_secs),
+        read_at,
+    })
 }
 
 #[cfg(test)]
@@ -162,11 +191,14 @@ mod tests {
             hidden: vec![card("denied", Presence::NoAccess, None)],
         };
 
-        let rows = discovered(snapshot);
+        let rows = discovered(snapshot, 1_000_000);
 
         let outcomes: Vec<(&str, Option<&str>, PollOutcome)> = rows
             .iter()
-            .map(|(info, outcome)| (info.name.as_str(), info.locator.as_deref(), *outcome))
+            .map(|row| {
+                let info = &row.info;
+                (info.name.as_str(), info.locator.as_deref(), row.outcome)
+            })
             .collect();
         assert_eq!(
             outcomes,
@@ -178,6 +210,44 @@ mod tests {
                 ),
                 ("denied", Some("denied-serial"), PollOutcome::NoAccess),
                 ("retained", Some("retained-serial"), PollOutcome::Failed),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_trays_estimate_and_reading_time_carry_through() {
+        let now_unix = 1_000_000;
+        let snapshot = Snapshot {
+            display_mode: DisplayMode::IconOnly,
+            devices: vec![
+                DeviceCard {
+                    remaining_secs: Some(7 * 3600),
+                    seen_secs_ago: Some(0),
+                    ..card("online", Presence::Online, Some(80))
+                },
+                DeviceCard {
+                    seen_secs_ago: Some(2 * 3600),
+                    ..card("retained", Presence::Unreachable, Some(40))
+                },
+            ],
+            hidden: vec![],
+        };
+
+        let rows = discovered(snapshot, now_unix);
+
+        let times: Vec<(&str, Option<Duration>, Option<i64>)> = rows
+            .iter()
+            .map(|row| (row.info.name.as_str(), row.remaining, row.read_at))
+            .collect();
+        assert_eq!(
+            times,
+            [
+                (
+                    "online",
+                    Some(Duration::from_secs(7 * 3600)),
+                    Some(now_unix)
+                ),
+                ("retained", None, Some(now_unix - 2 * 3600)),
             ]
         );
     }
@@ -207,7 +277,7 @@ mod bus_tests {
         }
     }
 
-    fn local_poll() -> Discovered {
+    fn local_poll() -> Vec<(DeviceInfo, PollOutcome)> {
         vec![(device("local"), PollOutcome::Failed)]
     }
 
@@ -265,7 +335,7 @@ mod bus_tests {
         .expect("a scan");
 
         assert!(!polled.get(), "polled the devices next to a running tray");
-        let mut ids: Vec<_> = rows.into_iter().map(|(info, _)| info).collect();
+        let mut ids: Vec<_> = rows.into_iter().map(|row| row.info).collect();
         ids.sort_by(|a, b| a.name.cmp(&b.name));
         assert_eq!(ids, [device("keyboard"), device("mouse")]);
     }
@@ -296,7 +366,7 @@ mod bus_tests {
             .await
             .expect("a scan");
 
-        let names: Vec<_> = rows.into_iter().map(|(info, _)| info.name).collect();
+        let names: Vec<_> = rows.into_iter().map(|row| row.info.name).collect();
         assert_eq!(names, ["keyboard", "mouse"]);
     }
 
@@ -340,6 +410,13 @@ mod bus_tests {
         .expect("a scan");
 
         assert!(polled.get());
-        assert_eq!(rows, local_poll());
+        let polled_rows: Vec<_> = rows
+            .into_iter()
+            .map(|row| (row.info, row.outcome, row.remaining, row.read_at))
+            .collect();
+        assert_eq!(
+            polled_rows,
+            [(device("local"), PollOutcome::Failed, None, None)]
+        );
     }
 }

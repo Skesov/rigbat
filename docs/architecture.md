@@ -330,6 +330,14 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
   store (`seed_history`, `HISTORY_CAP` = 20 change points, most recent first). Each stored
   wall-clock timestamp becomes a `BootTime` once, by its age; `BootTime` is signed, so a reading
   from before this boot keeps its place.
+- The retained reading survives a restart too. A newly-discovered device starts `Unreachable`
+  with its newest stored reading (heartbeat rows included) until its first poll answers. After
+  the first sweep, `restore_retained` adds every inventory device that sweep did not find and
+  whose newest reading is within `DISCONNECTED_RETENTION`, as `Disconnected`: an entry with no
+  source task, exactly like a device that dropped while the tray ran, so it renders dimmed, ages
+  out through `prune_stale`, and a later sweep that finds it takes the reappeared path. The
+  backend that owns a device is recorded on its task (`SourceTask::backend`), not its entry, so
+  an entry without a task has nothing for the retire and crash checks to consult.
 - Retention: `state::spawn_retention` prunes readings older than `RETENTION_SECS` (14 days) every
   `RETENTION_INTERVAL` (1 h), and drops readings orphaned by a deleted device. Inventory rows are
   never pruned on age — a device you own but have not switched on for a month must still be in the

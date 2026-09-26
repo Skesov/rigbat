@@ -714,6 +714,7 @@ mod tests {
             let l = loader(lang);
             let age = format_age(Duration::from_secs(2 * 3600), lang);
             let estimate = format_coarse(Duration::from_secs(7 * 3600), lang);
+            let offline = PrimaryStatus::Offline;
             let expected = [
                 "MX Anywhere 3".to_owned(),
                 "Nothing Ear (2)".to_owned(),
@@ -723,8 +724,8 @@ mod tests {
                 format!("{LOW_SIGN} 15%"),
                 format!("{CHARGING_SIGN} 40%"),
                 format!("100% · {}", state_label(ChargeState::Full, lang)),
-                fl!(l, "presence-disconnected"),
-                fl!(l, "presence-no-access"),
+                charge_value(Presence::Disconnected, None, None, offline, lang),
+                charge_value(Presence::NoAccess, None, None, offline, lang),
                 fl!(l, "note-remaining", estimate = estimate.as_str()),
                 fl!(l, "note-last-reading", age = age.as_str()),
                 fl!(l, "note-no-access"),

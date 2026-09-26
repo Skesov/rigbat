@@ -107,10 +107,11 @@ devices-seen-before = Seen before
 device-seen-ago = seen { $age }
 device-show-in-tray = Show in tray
 
-presence-online = Online
-presence-unreachable = Unreachable
-presence-disconnected = Disconnected
-presence-no-access = No access
+# Lowercase, as after "name: "; `charge_value` capitalises a word that starts its own slot.
+presence-online = online
+presence-unreachable = unreachable
+presence-disconnected = disconnected
+presence-no-access = no access
 
 device-pin = Show on the single icon
 device-pin-hint = Applies when the tray shows one icon for all devices.

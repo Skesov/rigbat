@@ -431,7 +431,12 @@ mod tests {
         ScanResult {
             discovered: Ok(devices
                 .into_iter()
-                .map(|d| (d, PollOutcome::Failed))
+                .map(|info| scan::ScannedDevice {
+                    info,
+                    outcome: PollOutcome::Failed,
+                    remaining: None,
+                    read_at: None,
+                })
                 .collect()),
             records: Vec::new(),
         }
@@ -580,7 +585,7 @@ mod tests {
         // "headset" is not in this scan's result.
         app.apply_scan_result(scan_result(vec![device("mouse")]));
         assert_eq!(app.config.device_overrides, overrides);
-        assert!(!app.discovered.iter().any(|(d, _)| d.name == "headset"));
+        assert!(!app.discovered.iter().any(|s| s.info.name == "headset"));
     }
 
     #[test]

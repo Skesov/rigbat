@@ -269,6 +269,16 @@ fn state_to_str(s: ChargeState) -> &'static str {
     }
 }
 
+/// The reverse of `state_to_str`; `None` as for `transport_from_str`.
+fn state_from_str(s: &str) -> Option<ChargeState> {
+    match s {
+        "discharging" => Some(ChargeState::Discharging),
+        "charging" => Some(ChargeState::Charging),
+        "full" => Some(ChargeState::Full),
+        _ => None,
+    }
+}
+
 /// Finds the `devices.id` for a `DeviceId`, using `IS` rather than `=` for
 /// `locator` so a `None` locator matches a `NULL` column the same way two
 /// `DeviceId`s with `locator: None` are equal in Rust. SQLite's `UNIQUE`
@@ -454,6 +464,31 @@ impl SqliteStore {
             out.push(row.context("reading a history row")?);
         }
         Ok(out)
+    }
+
+    pub(super) fn latest_reading(
+        &self,
+        id: &DeviceId,
+    ) -> anyhow::Result<Option<(i64, BatteryReading)>> {
+        let conn = &self.conn;
+        let Some(device_id) =
+            find_device_id(conn, id).context("looking up device row for the latest reading")?
+        else {
+            return Ok(None);
+        };
+        let last: Option<(i64, i64, String)> = conn
+            .query_row(
+                "SELECT at, percent, state FROM readings
+                  WHERE device_id = ?1 ORDER BY at DESC LIMIT 1",
+                params![device_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .context("reading the latest stored reading")?;
+        Ok(last.and_then(|(at, percent, state)| {
+            let percent = u8::try_from(percent.clamp(0, 100)).unwrap_or(0);
+            Some((at, BatteryReading::new(percent, state_from_str(&state)?)))
+        }))
     }
 
     pub(super) fn list_devices(&self) -> anyhow::Result<Vec<DeviceRecord>> {
@@ -969,6 +1004,30 @@ mod tests {
         let store = SqliteStore::open(&path).unwrap();
         let capped = store.recent_readings(&a, 3).unwrap();
         assert_eq!(capped, vec![(500, 75), (400, 76), (300, 77)]);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn latest_reading_is_the_newest_row_heartbeat_included() {
+        let path = scratch_db_path("latest");
+        let mut store = SqliteStore::open(&path).unwrap();
+        let a = id("mouse", Transport::Sysfs, Some("a"));
+        let b = id("keyboard", Transport::Sysfs, Some("b"));
+        seen(&mut store, &a, DeviceKind::Mouse, 0);
+        seen(&mut store, &b, DeviceKind::Keyboard, 0);
+        assert_eq!(store.latest_reading(&a).unwrap(), None);
+
+        let full = BatteryReading::new(100, ChargeState::Full);
+        for at in [0, READING_HEARTBEAT_SECS] {
+            store.record_reading(&a, full, at).unwrap();
+        }
+
+        assert_eq!(
+            store.latest_reading(&a).unwrap(),
+            Some((READING_HEARTBEAT_SECS, full))
+        );
+        assert_eq!(store.latest_reading(&b).unwrap(), None);
 
         cleanup(&path);
     }

@@ -1,11 +1,11 @@
 //! Human-facing text for a device's state: the charge-state word, a coarse
-//! age, and the one-line entry the tray menu, the CLI table and the settings
-//! window all render.
+//! age, the value and note the dashboard and the Devices tab render, the line
+//! the tray menu and tooltip render, and the entry `--waybar` prints.
 //!
-//! In `domain` rather than in `tray` because three surfaces render the same
-//! sentence and none of them owns it: when it lived in `tray`, both `cli` and
-//! `settings` imported one adapter from another, which is the one direction
-//! the layering forbids. Pure — `now` and `lang` are always parameters.
+//! In `domain` rather than in any one surface because several render the same
+//! words and none of them owns them: an adapter importing another adapter is
+//! the one direction the layering forbids. Pure — `now` and `lang` are always
+//! parameters.
 
 use std::time::Duration;
 
@@ -54,7 +54,7 @@ pub fn format_age(age: Duration, lang: Lang) -> String {
     }
 }
 
-/// Formats a device entry string for the CLI table and the waybar tooltip.
+/// Formats a device entry string for the `--waybar` tooltip.
 ///
 /// `Online` renders the live reading. `Unreachable`/`Disconnected` render the
 /// retained reading with its age (e.g. "88%  offline (2h ago)"), or plain
@@ -120,14 +120,34 @@ pub fn format_device_entry(state: &DeviceState, now: BootTime, lang: Lang) -> St
 pub const CHARGING_SIGN: char = '\u{26A1}';
 pub const LOW_SIGN: char = '\u{26A0}';
 
-/// The charge as one short value: the dashboard's right-hand column and the
-/// tray menu's row. A low level carries a sign as well as a color.
+/// Where a value is shown, which decides the case of a presence word: one
+/// that starts its own slot is capitalised, one after `name: ` is not.
+#[derive(Clone, Copy)]
+enum Slot {
+    Own,
+    AfterName,
+}
+
+/// The charge as one short value in its own slot: the dashboard's and the
+/// Devices tab's right-hand column. A low level carries a sign as well as a
+/// color.
 pub fn charge_value(
     presence: Presence,
     percent: Option<u8>,
     charge: Option<ChargeState>,
     status: PrimaryStatus,
     lang: Lang,
+) -> String {
+    value_text(presence, percent, charge, status, lang, Slot::Own)
+}
+
+fn value_text(
+    presence: Presence,
+    percent: Option<u8>,
+    charge: Option<ChargeState>,
+    status: PrimaryStatus,
+    lang: Lang,
+    slot: Slot,
 ) -> String {
     let text = match (presence, percent) {
         (Presence::Online, None) => "—".to_owned(),
@@ -138,13 +158,23 @@ pub fn charge_value(
             }
             _ => format!("{p}%"),
         },
-        (presence, _) => presence_label(presence, lang),
+        (presence, _) => match slot {
+            Slot::Own => capitalised(&presence_label(presence, lang)),
+            Slot::AfterName => presence_label(presence, lang),
+        },
     };
     if matches!(status, PrimaryStatus::Low { .. }) {
         format!("{LOW_SIGN} {text}")
     } else {
         text
     }
+}
+
+fn capitalised(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 fn presence_label(presence: Presence, lang: Lang) -> String {
@@ -178,7 +208,7 @@ pub fn status_note(
     }
 }
 
-/// A dashboard row on one line: name, `charge_value`, then `status_note`.
+/// A tray menu row and tooltip: name, the value, then `status_note`.
 pub fn device_line(
     device: &DeviceState,
     status: PrimaryStatus,
@@ -186,12 +216,13 @@ pub fn device_line(
     lang: Lang,
 ) -> String {
     let reading = device.last_reading;
-    let value = charge_value(
+    let value = value_text(
         device.presence,
         reading.map(|r| r.percent),
         reading.map(|r| r.state),
         status,
         lang,
+        Slot::AfterName,
     );
     let remaining = match device.estimate {
         Estimate::Remaining(left) => Some(left),
@@ -491,6 +522,69 @@ mod tests {
             format_age(Duration::from_secs(3 * 86400), Lang::Ru),
             "3 д назад"
         );
+    }
+
+    // --- presence words ------------------------------------------------------
+
+    #[test]
+    fn a_presence_word_is_capitalised_in_its_own_slot_and_not_after_a_name() {
+        let seen = BootTime::TEST_NOW;
+        let now = seen + Duration::from_secs(2 * 3600);
+        let r = BatteryReading::new(88, ChargeState::Discharging);
+        let unreachable = state("NuPhy", Presence::Unreachable, Some(r), Some(seen));
+        let denied = state("mouse", Presence::NoAccess, None, None);
+        let offline = PrimaryStatus::Offline;
+        let low = PrimaryStatus::Low { percent: 5 };
+        for (lang, text, expected) in [
+            (
+                Lang::En,
+                charge_value(Presence::Unreachable, Some(88), None, offline, Lang::En),
+                "Unreachable",
+            ),
+            (
+                Lang::En,
+                charge_value(Presence::Disconnected, Some(5), None, low, Lang::En),
+                "\u{26A0} Disconnected",
+            ),
+            (
+                Lang::En,
+                charge_value(
+                    Presence::Online,
+                    Some(100),
+                    Some(ChargeState::Full),
+                    PrimaryStatus::Ok { percent: 100 },
+                    Lang::En,
+                ),
+                "100% · full",
+            ),
+            (
+                Lang::Ru,
+                charge_value(Presence::NoAccess, None, None, offline, Lang::Ru),
+                "Нет доступа",
+            ),
+            (
+                Lang::En,
+                device_line(&denied, offline, now, Lang::En),
+                "mouse: no access · run rigbat doctor",
+            ),
+            (
+                Lang::En,
+                device_line(&unreachable, offline, now, Lang::En),
+                "NuPhy: unreachable · last reading 2h ago",
+            ),
+            (
+                Lang::Ru,
+                device_line(&denied, offline, now, Lang::Ru),
+                "mouse: нет доступа · запустите rigbat doctor",
+            ),
+            (
+                Lang::Ru,
+                device_line(&unreachable, low, now, Lang::Ru),
+                "NuPhy: \u{26A0} недоступно · последние данные 2 ч назад",
+            ),
+        ] {
+            assert_eq!(text, expected, "{lang:?}");
+        }
     }
 
     #[test]

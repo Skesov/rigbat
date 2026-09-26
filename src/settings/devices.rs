@@ -5,7 +5,8 @@
 
 use std::time::Duration;
 
-use crate::domain::{BatteryReading, DeviceId, DeviceInfo, DeviceKind, PollOutcome, Presence};
+use super::scan::ScannedDevice;
+use crate::domain::{BatteryReading, DeviceId, DeviceKind, Presence};
 use crate::domain::{format_age, roster_order};
 use crate::i18n::Lang;
 use crate::state::DeviceRecord;
@@ -25,6 +26,10 @@ pub struct DeviceRow {
     pub kind: DeviceKind,
     pub charge: Option<BatteryReading>,
     pub presence: Presence,
+    /// The running tray's remaining-time estimate.
+    pub remaining: Option<Duration>,
+    /// Unix seconds of the running tray's last reading.
+    pub read_at: Option<i64>,
     /// Unix seconds. `None` for a device with no inventory row yet.
     pub first_seen: Option<i64>,
     /// Unix seconds. `None` for a device with no inventory row yet.
@@ -32,15 +37,12 @@ pub struct DeviceRow {
 }
 
 /// Merges every inventory record with the current discovery scan into one
-/// row per `DeviceId`. The discovered half supplies `presence` and
-/// `charge`: a device the scan found is `Online` (poll succeeded),
+/// row per `DeviceId`. The discovered half supplies `presence`, `charge`,
+/// `remaining` and `read_at`: a device the scan found is `Online` (poll succeeded),
 /// `Unreachable` (poll failed) or `NoAccess` regardless of what the inventory last
 /// recorded; a device the scan did not find stays `Disconnected`, keeping
 /// whatever the inventory last knew about it.
-pub fn merge_devices(
-    records: Vec<DeviceRecord>,
-    discovered: Vec<(DeviceInfo, PollOutcome)>,
-) -> Vec<DeviceRow> {
+pub fn merge_devices(records: Vec<DeviceRecord>, discovered: Vec<ScannedDevice>) -> Vec<DeviceRow> {
     let mut rows: Vec<DeviceRow> = records
         .into_iter()
         .map(|r| DeviceRow {
@@ -49,25 +51,31 @@ pub fn merge_devices(
             kind: r.kind,
             charge: None,
             presence: Presence::Disconnected,
+            remaining: None,
+            read_at: None,
             first_seen: Some(r.first_seen),
             last_seen: Some(r.last_seen),
         })
         .collect();
 
-    for (info, outcome) in discovered {
-        let (reading, presence) = (outcome.reading(), outcome.presence());
-        let id = info.id();
+    for scanned in discovered {
+        let (reading, presence) = (scanned.outcome.reading(), scanned.outcome.presence());
+        let id = scanned.info.id();
         match rows.iter_mut().find(|r| r.device == id) {
             Some(row) => {
                 row.charge = reading;
                 row.presence = presence;
+                row.remaining = scanned.remaining;
+                row.read_at = scanned.read_at;
             }
             None => rows.push(DeviceRow {
                 store_id: None,
                 device: id,
-                kind: info.kind,
+                kind: scanned.info.kind,
                 charge: reading,
                 presence,
+                remaining: scanned.remaining,
+                read_at: scanned.read_at,
                 first_seen: None,
                 last_seen: None,
             }),
@@ -260,7 +268,7 @@ mod escape_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::Transport;
+    use crate::domain::{DeviceInfo, PollOutcome, Transport};
 
     fn id(name: &str, transport: Transport, locator: Option<&str>) -> DeviceId {
         DeviceId {
@@ -304,6 +312,15 @@ mod tests {
         BatteryReading::new(percent, crate::domain::ChargeState::Discharging)
     }
 
+    fn scanned(info: DeviceInfo, outcome: PollOutcome) -> ScannedDevice {
+        ScannedDevice {
+            info,
+            outcome,
+            remaining: None,
+            read_at: None,
+        }
+    }
+
     fn row(name: &str, transport: Transport, locator: Option<&str>) -> DeviceRow {
         DeviceRow {
             store_id: None,
@@ -311,6 +328,8 @@ mod tests {
             kind: DeviceKind::Mouse,
             charge: None,
             presence: Presence::Online,
+            remaining: None,
+            read_at: None,
             first_seen: None,
             last_seen: None,
         }
@@ -333,7 +352,7 @@ mod tests {
     fn merge_devices_discovered_only_has_no_store_id() {
         let rows = merge_devices(
             vec![],
-            vec![(
+            vec![scanned(
                 info("mouse", DeviceKind::Mouse, Transport::Sysfs, None),
                 PollOutcome::Reading(reading(80)),
             )],
@@ -349,7 +368,7 @@ mod tests {
     fn merge_devices_discovered_poll_failure_is_unreachable() {
         let rows = merge_devices(
             vec![],
-            vec![(
+            vec![scanned(
                 info("mouse", DeviceKind::Mouse, Transport::Sysfs, None),
                 PollOutcome::Failed,
             )],
@@ -362,7 +381,7 @@ mod tests {
     fn merge_devices_discovered_access_denial_is_no_access() {
         let rows = merge_devices(
             vec![record(1, "mouse", Transport::Hidraw, 100, 200)],
-            vec![(
+            vec![scanned(
                 info("mouse", DeviceKind::Mouse, Transport::Hidraw, None),
                 PollOutcome::NoAccess,
             )],
@@ -376,7 +395,7 @@ mod tests {
     fn merge_devices_matching_device_gets_presence_and_charge_from_discovery() {
         let rows = merge_devices(
             vec![record(1, "mouse", Transport::Sysfs, 100, 200)],
-            vec![(
+            vec![scanned(
                 info("mouse", DeviceKind::Mouse, Transport::Sysfs, None),
                 PollOutcome::Reading(reading(55)),
             )],
@@ -391,10 +410,27 @@ mod tests {
     }
 
     #[test]
+    fn merge_devices_carries_the_trays_estimate_and_reading_time() {
+        let rows = merge_devices(
+            vec![record(1, "mouse", Transport::Sysfs, 100, 200)],
+            vec![ScannedDevice {
+                remaining: Some(Duration::from_secs(7 * 3600)),
+                read_at: Some(150),
+                ..scanned(
+                    info("mouse", DeviceKind::Mouse, Transport::Sysfs, None),
+                    PollOutcome::Reading(reading(55)),
+                )
+            }],
+        );
+        assert_eq!(rows[0].remaining, Some(Duration::from_secs(7 * 3600)));
+        assert_eq!(rows[0].read_at, Some(150));
+    }
+
+    #[test]
     fn merge_devices_same_name_different_transport_stays_two_rows() {
         let rows = merge_devices(
             vec![record(1, "mouse", Transport::Sysfs, 100, 200)],
-            vec![(
+            vec![scanned(
                 info("mouse", DeviceKind::Mouse, Transport::Bluetooth, None),
                 PollOutcome::Reading(reading(10)),
             )],
