@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0](https://github.com/Skesov/rigbat/compare/v0.2.0...v0.3.0) (2026-09-26)
+
+
+### Features
+
+* **icon:** status by shape, not colour alone; one set of kind glyphs ([6b52f6c](https://github.com/Skesov/rigbat/commit/6b52f6c7fbea6f29042efab1a46cc0d966335e00))
+* remember readings across a restart; estimate on the Devices tab ([e497334](https://github.com/Skesov/rigbat/commit/e497334b35a92bd7b128230f7da7a50e31f011c1))
+* **settings:** Appearance tab with a System / Light / Dark window theme ([3871bc3](https://github.com/Skesov/rigbat/commit/3871bc3048a5c06e87dcc8f77da66f2320e33741))
+* **sources:** wireless headsets over hidraw ([3901bcb](https://github.com/Skesov/rigbat/commit/3901bcbd9318c88de5f87de1962950ba4e0e1e08))
+
+
+### Documentation
+
+* **readme:** add screenshots, install options and badges ([949e10d](https://github.com/Skesov/rigbat/commit/949e10dcd1c669b0b7c7071f401b079437baed6a))
+* **readme:** screenshots of the current windows, including Appearance ([74e2855](https://github.com/Skesov/rigbat/commit/74e2855f41b84bf54a5222e063770dbebc239145))
+
 ## [0.2.0](https://github.com/Skesov/rigbat/compare/v0.1.0...v0.2.0) (2026-09-25)
 
 
