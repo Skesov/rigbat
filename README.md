@@ -7,8 +7,8 @@
 System tray battery monitor for gaming peripherals on Linux.
 
 <p align="center">
-  <img src="docs/screenshots/dashboard.png" width="386"
-       alt="The device overview: an 8BitDo controller at 82%, a NuPhy keyboard at 100% and a SteelSeries mouse at 65%, each with a charge bar">
+  <img src="docs/screenshots/dashboard.png" width="380"
+       alt="The device overview: an 8BitDo controller and a NuPhy keyboard at 100% and a SteelSeries mouse at 65%, each with its device glyph and a charge bar">
 </p>
 
 ## What it does
@@ -213,14 +213,19 @@ icon, the default low-battery threshold (5–50%, default 20), the default poll 
 1 h, default 1 min), low-battery notifications, whether rigbat starts with the session, and the
 language (`System` follows `LANG`).
 
+<p align="center">
+  <img src="docs/screenshots/general.png" width="720"
+       alt="The General tab: the one-icon-per-device switch, the low battery threshold, the poll interval, notifications, start with session and language">
+</p>
+
 **Appearance** — how it looks: the theme of the settings window and the device overview
 (`System`, `Light` or `Dark`; the tray icon always follows the system, whose panel it sits on),
 the colour palette for charge states (Catppuccin, Everforest, GNOME or Nord), and the tray icon's
 display mode.
 
 <p align="center">
-  <img src="docs/screenshots/general.png" width="726"
-       alt="The General tab: icon style tiles, the one-icon-per-device switch, colour palette tiles with Catppuccin, Everforest, GNOME and Nord, and the low battery threshold">
+  <img src="docs/screenshots/appearance.png" width="720"
+       alt="The Appearance tab: the window theme, colour palette tiles for Catppuccin, Everforest, GNOME and Nord, and the tray icon style tiles">
 </p>
 
 **Devices** — every device rigbat has ever seen on this machine, in two groups: `Connected now`,
@@ -234,7 +239,7 @@ your Bluetooth settings, for instance — keeps its row, its history and its per
 rigbat recognises the hardware, not the label.
 
 <p align="center">
-  <img src="docs/screenshots/devices.png" width="726"
+  <img src="docs/screenshots/devices.png" width="720"
        alt="The Devices tab: three connected devices with their charge and a show-in-tray switch, and four devices seen before with when they were last seen">
 </p>
 
