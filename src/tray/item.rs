@@ -615,6 +615,25 @@ mod tests {
         );
     }
 
+    /// The icon sits on the system's panel, so the windows' theme never reaches it.
+    #[test]
+    fn the_icon_scheme_ignores_the_window_theme() {
+        for theme in crate::domain::WindowTheme::ALL {
+            let cfg = Config {
+                theme,
+                ..Config::default()
+            };
+            for scheme in [ColorScheme::Dark, ColorScheme::Light] {
+                let view = View::new(None, &every_row_shape(), &cfg, scheme, crate::clock::now());
+                assert_eq!(
+                    view.icon.theme,
+                    crate::icon::Theme::new(Palette::default(), scheme),
+                    "{theme:?} over {scheme:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn menu_follows_the_configured_language() {
         let cfg = Config {

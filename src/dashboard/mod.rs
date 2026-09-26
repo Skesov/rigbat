@@ -15,7 +15,8 @@ use zbus::fdo::{DBusProxy, NameOwnerChangedStream};
 
 use crate::config;
 use crate::domain::{
-    BootTime, Palette, Presence, PrimaryStatus, charge_value, roster_order, status_note,
+    BootTime, Palette, Presence, PrimaryStatus, WindowTheme, charge_value, roster_order,
+    status_note,
 };
 use crate::gui::{self, GLYPH_COLUMN, ROW_HEIGHT, StatusColors, kind_glyph, secondary_text};
 use crate::i18n::{Lang, fl, loader};
@@ -120,7 +121,7 @@ pub fn run() -> anyhow::Result<()> {
     let tray = live.as_ref().map(|(tray, _, _)| tray.clone());
 
     let config = config::load();
-    let (lang, palette) = (config.lang(), config.palette);
+    let (lang, palette, theme) = (config.lang(), config.palette, config.theme);
     let text_scale = appearance.borrow().text_scale;
     let size = window_size(first.as_ref().map_or(0, |s| s.devices.len()));
     let options = eframe::NativeOptions {
@@ -137,8 +138,7 @@ pub fn run() -> anyhow::Result<()> {
         "rigbat-dashboard",
         options,
         Box::new(move |cc| {
-            gui::apply(&cc.egui_ctx, &appearance.borrow());
-            gui::follow(&handle, cc.egui_ctx.clone(), appearance);
+            follow_appearance(&handle, &cc.egui_ctx, appearance, theme);
             let _ = window.set(cc.egui_ctx.clone());
             if close_pending.load(Ordering::SeqCst) {
                 cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -157,6 +157,21 @@ pub fn run() -> anyhow::Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// The theme is read once, at launch.
+fn follow_appearance(
+    rt: &tokio::runtime::Handle,
+    ctx: &egui::Context,
+    appearance: tokio::sync::watch::Receiver<crate::appearance::Appearance>,
+    theme: WindowTheme,
+) {
+    gui::follow(
+        rt,
+        ctx.clone(),
+        appearance,
+        tokio::sync::watch::channel(theme).1,
+    );
 }
 
 async fn close_running() {
@@ -1012,6 +1027,41 @@ mod tests {
 
         let _pending = start_refresh(&mut d, Instant::now() - REFRESH_SPINNER_LIMIT);
         assert!(!d.refresh_in_flight(), "the limit ends it");
+    }
+
+    #[test]
+    fn a_forced_theme_overrides_the_portal_scheme() {
+        use crate::appearance::{Appearance, ColorScheme};
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime");
+        for (theme, dark) in [
+            (WindowTheme::System, true),
+            (WindowTheme::Light, false),
+            (WindowTheme::Dark, true),
+        ] {
+            let (_portal, appearance) = tokio::sync::watch::channel(Appearance {
+                scheme: ColorScheme::Dark,
+                ..Appearance::default()
+            });
+            let ctx = egui::Context::default();
+            follow_appearance(rt.handle(), &ctx, appearance, theme);
+            let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+
+            assert_eq!(ctx.global_style().visuals.dark_mode, dark, "{theme:?}");
+            let status = gui::status_colors(&ctx.global_style().visuals, Palette::Nord);
+            let scheme = if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            };
+            assert_eq!(
+                status,
+                gui::status_colors(&scheme, Palette::Nord),
+                "{theme:?}: the palette follows the forced scheme"
+            );
+        }
     }
 }
 

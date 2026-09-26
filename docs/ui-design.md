@@ -7,19 +7,19 @@ comes from is in [`architecture.md`](architecture.md#data-flow-per-surface).
 
 ## Principles
 
-| Principle                                | What the code does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Where                                                                                   |
-| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Follow the session, never theme it       | Both windows take the scheme, accent and text scale from xdg-desktop-portal and re-apply every change live. The accent becomes egui's selection colour; the text scale becomes the zoom factor and grows the window size. The tray icon follows the scheme. The one colour setting, the palette, picks status colours inside the scheme; window surfaces and text stay the session's ([Palettes](#palettes)).                                                                                      | `src/gui/mod.rs`, `src/appearance/mod.rs`, `src/palette.rs`                             |
-| Cap the content width                    | Both settings tabs are a centred column at most `CONTENT_MAX_WIDTH` wide (`page`); a wider window adds margin, not longer rows. The dashboard has a fixed width.                                                                                                                                                                                                                                                                                                                                   | `src/settings/widgets.rs`                                                               |
-| One trailing control per row             | `Rows::row` takes exactly one `control`. A secondary action on the same setting sits in the subtitle as a small button (the pin's "Clear" in the Tray group, a device override's "↺").                                                                                                                                                                                                                                                                                                             | `src/settings/widgets.rs`, `src/settings/general_tab.rs`, `src/settings/devices_tab.rs` |
-| Status text carries a sign, not only hue | `charge_value` prefixes a low reading with `LOW_SIGN` (⚠) and a charging one with `CHARGING_SIGN` (⚡). The dashboard also colours a low value; the tray menu has no colour and relies on the sign. The tray icon draws the same signs as shapes in every display mode (`status_mark`: a bolt, a warning triangle), so charging and low differ from an ordinary reading in a single colour.                                                                                                        | `src/domain/text.rs`, `src/icon/mod.rs`                                                 |
-| Same words on every surface              | The dashboard row, the Devices tab row, the tray menu row and the tray tooltip are built from `charge_value` and `status_note` (`device_line` joins them); a device's kind is the same 7 × 7 silhouette (`icon::kind_glyph`) in the tray icon's corner and in both windows (`gui::kind_glyph` paints it as a mesh); both windows use one value style (`gui::charge_value_text`). Devices are ordered by `roster_order`: online first, then by name, ignoring case.                                 | `src/domain/text.rs`, `src/domain/roster.rs`, `src/gui/mod.rs`                          |
-| A low reading never gets quieter         | A retained (not live) reading is dimmed by `palette::DIM` on the tray icon's fill and the dashboard bar, and the tray icon marks it with a dashed outline or dotted digits ([Tray icon](#tray-icon)) — except when it is low, which renders exactly as a live one.                                                                                                                                                                                                                                 | `src/icon/mod.rs`, `src/dashboard/mod.rs`                                               |
-| Contrast is measured, not eyeballed      | `palette::contrast_ratio` (WCAG 2.1) backs tests: secondary text (`gui::secondary_text`, one rule for both windows) ≥ 4.5:1 on the panel and the group fill, text on the accent ≥ 4.5:1 (`readable_on` picks black or white). egui's weak text colour misses 4.5:1 on dark, so secondary text is the body colour at a smaller size. Palette colours pass through `palette::readable`: text ≥ 4.5:1, bars and icon marks ≥ 3:1 as graphical objects, dimmed included ([Readability](#readability)). | `src/palette.rs`, `src/gui/mod.rs`, `src/settings/widgets.rs`, `src/icon/mod.rs`        |
-| Custom widgets are accessible widgets    | `switch`, `tile`, the tabs and an expander row report a role and label through `widget_info` (checkbox, radio button, selectable label, collapsing header with its expanded state), take keyboard focus and draw a focus ring. A glyph-only button announces a word ("↺" is "Use the default"). Both windows export an AT-SPI tree through eframe's `accesskit` feature.                                                                                                                           | `src/settings/widgets.rs`, `Cargo.toml`                                                 |
+| Principle                                | What the code does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Where                                                                                   |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Follow the session, never theme it       | Both windows take the scheme, accent and text scale from xdg-desktop-portal and re-apply every change live. The accent becomes egui's selection colour; the text scale becomes the zoom factor and grows the window size. The one override, the windows' theme (`WindowTheme`, System by default), forces egui's stock light or dark visuals and the palette's matching scheme (`Appearance::with_theme`); accent and text scale stay the portal's. The tray icon always follows the portal's scheme: it sits on the system's panel. The palette picks status colours inside the scheme; window surfaces and text are egui's for that scheme ([Palettes](#palettes)). | `src/gui/mod.rs`, `src/appearance/mod.rs`, `src/palette.rs`                             |
+| Cap the content width                    | Every settings tab is a centred column at most `CONTENT_MAX_WIDTH` wide (`page`); a wider window adds margin, not longer rows. The dashboard has a fixed width.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | `src/settings/widgets.rs`                                                               |
+| One trailing control per row             | `Rows::row` takes exactly one `control`. A secondary action on the same setting sits in the subtitle as a small button (the pin's "Clear" in the Tray group, a device override's "↺").                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | `src/settings/widgets.rs`, `src/settings/general_tab.rs`, `src/settings/devices_tab.rs` |
+| Status text carries a sign, not only hue | `charge_value` prefixes a low reading with `LOW_SIGN` (⚠) and a charging one with `CHARGING_SIGN` (⚡). The dashboard also colours a low value; the tray menu has no colour and relies on the sign. The tray icon draws the same signs as shapes in every display mode (`status_mark`: a bolt, a warning triangle), so charging and low differ from an ordinary reading in a single colour.                                                                                                                                                                                                                                                                           | `src/domain/text.rs`, `src/icon/mod.rs`                                                 |
+| Same words on every surface              | The dashboard row, the Devices tab row, the tray menu row and the tray tooltip are built from `charge_value` and `status_note` (`device_line` joins them); a device's kind is the same 7 × 7 silhouette (`icon::kind_glyph`) in the tray icon's corner and in both windows (`gui::kind_glyph` paints it as a mesh); both windows use one value style (`gui::charge_value_text`). Devices are ordered by `roster_order`: online first, then by name, ignoring case.                                                                                                                                                                                                    | `src/domain/text.rs`, `src/domain/roster.rs`, `src/gui/mod.rs`                          |
+| A low reading never gets quieter         | A retained (not live) reading is dimmed by `palette::DIM` on the tray icon's fill and the dashboard bar, and the tray icon marks it with a dashed outline or dotted digits ([Tray icon](#tray-icon)) — except when it is low, which renders exactly as a live one.                                                                                                                                                                                                                                                                                                                                                                                                    | `src/icon/mod.rs`, `src/dashboard/mod.rs`                                               |
+| Contrast is measured, not eyeballed      | `palette::contrast_ratio` (WCAG 2.1) backs tests: secondary text (`gui::secondary_text`, one rule for both windows) ≥ 4.5:1 on the panel and the group fill, text on the accent ≥ 4.5:1 (`readable_on` picks black or white). egui's weak text colour misses 4.5:1 on dark, so secondary text is the body colour at a smaller size. Palette colours pass through `palette::readable`: text ≥ 4.5:1, bars and icon marks ≥ 3:1 as graphical objects, dimmed included ([Readability](#readability)).                                                                                                                                                                    | `src/palette.rs`, `src/gui/mod.rs`, `src/settings/widgets.rs`, `src/icon/mod.rs`        |
+| Custom widgets are accessible widgets    | `switch`, `tile`, the tabs and an expander row report a role and label through `widget_info` (checkbox, radio button, selectable label, collapsing header with its expanded state), take keyboard focus and draw a focus ring. A glyph-only button announces a word ("↺" is "Use the default"). Both windows export an AT-SPI tree through eframe's `accesskit` feature.                                                                                                                                                                                                                                                                                              | `src/settings/widgets.rs`, `Cargo.toml`                                                 |
 
-Without a portal, windows use `Appearance::default`: dark scheme, no accent, text scale 1.0. A
-portal reporting no preference maps to dark (`map_scheme`).
+Without a portal, windows use `Appearance::default`: dark scheme, no accent, text scale 1.0; a
+forced theme still applies. A portal reporting no preference maps to dark (`map_scheme`).
 
 ## Tokens
 
@@ -108,8 +108,9 @@ selection colour with the accent (`gui::apply`). Status colours come from the pa
 
 #### Palettes
 
-`palette` in `config.json` (`domain::Palette`, default `catppuccin`), picked on the General tab.
-Light or dark still follows the portal; the palette picks the colours inside it. The tables are
+`palette` in `config.json` (`domain::Palette`, default `catppuccin`), picked on the Appearance tab.
+Light or dark is the windows' theme in the windows and the portal's scheme on the tray icon; the
+palette picks the colours inside it. The tables are
 `palette::swatches`, in colours each palette's authors publish (one role substituted, see below):
 
 | Palette    | Scheme | bg        | fg        | charging  | low       | warn      | track     |
@@ -126,7 +127,7 @@ Light or dark still follows the portal; the palette picks the colours inside it.
 - **Surfaces stay the session's.** Windows keep egui's system-derived surfaces and text, so they
   look native next to other apps. The palette sets the status colours (charging, low, warn), the
   neutral for an ordinary reading, the bar track and the tray icon's colours. Its `bg` is painted
-  only behind the swatches of the General tab's palette tiles.
+  only behind the swatches of the Appearance tab's palette tiles.
 - **One dim factor.** `palette::DIM` (0.70) dims the icon's retained fill, the offline icon, and a
   dashboard bar and track that are not live. A low reading never dims.
 - **Substitutions.** Everforest light charging is the palette's aqua `#35a77c`, not its green
@@ -212,7 +213,7 @@ The settings building blocks live in `src/settings/widgets.rs`.
 | `footer(ui, text, link, url)`         | One centred secondary line ending in a link                                                                                                             | Version and project page at the bottom of General                       |
 
 Stock egui widgets fill the other roles inside a row: `egui::ComboBox` for a list of values (poll
-interval, language), `egui::Slider` with a unit suffix inside `trailing` for a range (low-battery
+interval, language, theme), `egui::Slider` with a unit suffix inside `trailing` for a range (low-battery
 threshold), `ui.small_button` for a secondary action in a subtitle, `ui.button` for an action.
 The poll interval and the threshold are the same control wherever they appear: `interval_combo`
 over the one `POLL_INTERVAL_PRESETS` list and `threshold_slider`, both in
@@ -241,16 +242,21 @@ Patterns from `src/settings/general_tab.rs`:
 ### Settings window
 
 `rigbat settings`, a separate process (`src/settings/`). A decorated window titled "rigbat —
-settings" (`settings-title`, retitled when the language changes), a `tab_bar` over two views
-(`Tab::General`, `Tab::Devices`), panel margin `PANEL_MARGIN`. `rigbat settings devices` (or
-`general`) opens on that tab.
+settings" (`settings-title`, retitled when the language changes), a `tab_bar` over three views
+(`Tab::General`, `Tab::Appearance`, `Tab::Devices`), panel margin `PANEL_MARGIN`.
+`rigbat settings appearance` (or `general`, `devices`) opens on that tab.
 
-- **General** (`src/settings/general_tab.rs`): groups Tray (icon style tiles, drawn in the chosen
-  palette; one icon per device), Appearance (palette tiles, each the palette's name over its `fg`,
-  `charging`, `warn` and `low` on its own `bg` for the current scheme; footer saying light or
-  dark follows the system), Battery (low-battery threshold; check every; notifications; footer on
-  defaults), System (start with session; language), then the `footer`. The column scrolls as a
-  whole.
+- **General** (`src/settings/general_tab.rs`), behaviour: groups Tray (one icon per device),
+  Battery (low-battery threshold; check every; notifications; footer on defaults), System (start
+  with session; language), then the `footer`. The column scrolls as a whole.
+- **Appearance** (`src/settings/appearance_tab.rs`), look: groups Windows (a theme combo box,
+  System / Light / Dark, its subtitle saying it covers this window and the device overview while
+  the tray icon follows the system), Colours (palette tiles, each the palette's name over its
+  `fg`, `charging`, `warn` and `low` on its own `bg` for the window's scheme; footer naming where
+  the colours show), Tray icon (icon style tiles, drawn in the chosen palette). The settings
+  window restyles as soon as the theme is saved (`SettingsApp::follow_theme` feeds `gui::follow`);
+  the dashboard reads the theme when it opens. "One icon per device" stays on General: it is
+  behaviour, not look.
 - **Devices** (`src/settings/devices_tab.rs`): a toolbar (a search field past
   `SEARCH_MIN_DEVICES`, Refresh on the right), the unanswered-tray line in the warning colour,
   then two groups of `Rows::expander` rows in `roster_order`: "Connected now" (in the current
@@ -329,7 +335,7 @@ Rendered by `TinySkiaRenderer` behind the `IconRenderer` port (`src/icon/mod.rs`
   modes the digits are drawn after the glyph and win the overlap.
 - COSMIC shows no hover tooltip, so the SNI title names the device (`Tray::title`) and the glyph
   identifies its kind. The tooltip carries `device_line` for hosts that show it.
-- The General tab's style tiles are rendered by the same renderer in the chosen palette
+- The Appearance tab's style tiles are rendered by the same renderer in the chosen palette
   (`render_style_previews`), so a preview cannot drift from the real icon.
 
 ## Text
@@ -388,13 +394,14 @@ Window tests run headless on `src/egui_test.rs` and assert what was painted, not
   `assert_no_overlap` checks only overlap.
 - A surface test lists every string it expects, then loops over `Lang::ALL`: each must appear with
   `lines == 1`. Examples: `general_tab_text_is_whole_on_one_line_in_every_language`,
+  `appearance_tab_text_is_whole_on_one_line_in_every_language`,
   `device_rows_are_whole_on_one_line_in_every_language`,
   `an_expanded_row_paints_its_settings_in_every_language`,
   `every_row_state_renders_whole_on_one_line_in_every_language`,
   `every_widget_paints_its_text_whole_on_one_line`. Subtitles may wrap, so they are checked for
   being painted whole, not for one line.
-- Test sizes are the real constraints: both settings tabs at the `WINDOW_MIN_SIZE` width
-  (`GENERAL_TAB_TEST_SIZE`, `TEST_SIZE` in `devices_tab`), the widgets at `CONTENT_MAX_WIDTH`, the
+- Test sizes are the real constraints: every settings tab at the `WINDOW_MIN_SIZE` width
+  (`GENERAL_TAB_TEST_SIZE`, `TEST_SIZE` in `appearance_tab` and `devices_tab`), the widgets at `CONTENT_MAX_WIDTH`, the
   dashboard at its own `wanted_size()`.
 - Interaction: `run_frame` lays the page out, `ctx.read_response` finds a widget by its global id
   (`switch_id`, `device_switch_id`, an expander's row id), `click_at` or a key event drives it, and
@@ -410,6 +417,11 @@ Window tests run headless on `src/egui_test.rs` and assert what was painted, not
   `a_switch_knob_takes_its_colours_from_the_theme`,
   `apply_sets_theme_zoom_and_accent_in_both_styles`, `every_sign_is_in_the_bundled_fonts`,
   `the_reset_glyph_is_in_the_bundled_fonts`.
+- The theme: `a_forced_theme_wins_over_the_portal_until_it_is_system_again` and
+  `a_theme_fixed_at_launch_still_follows_the_portal` (`gui::follow`),
+  `choosing_light_restyles_the_window_over_a_dark_portal` (settings),
+  `a_forced_theme_overrides_the_portal_scheme` (dashboard),
+  `the_icon_scheme_ignores_the_window_theme` (tray).
 - Kind glyphs are meshes, not text: `egui_test::painted_kind_glyphs` recognises each painted glyph
   by its cells (`every_kind_paints_the_tray_icon_glyph_whole` in the dashboard and the Devices
   tab; `the_window_glyph_is_the_tray_bitmap_on_whole_pixels`).

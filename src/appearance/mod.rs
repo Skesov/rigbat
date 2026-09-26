@@ -4,6 +4,8 @@ use anyhow::Context as _;
 use futures_util::StreamExt;
 use tokio::sync::watch;
 
+use crate::domain::WindowTheme;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorScheme {
     Dark,
@@ -51,6 +53,18 @@ pub struct Appearance {
     pub scheme: ColorScheme,
     pub accent: Option<[u8; 3]>,
     pub text_scale: f32,
+}
+
+impl Appearance {
+    /// The portal's look with `theme`'s scheme forced over it; accent and text scale stay.
+    pub fn with_theme(self, theme: WindowTheme) -> Self {
+        let scheme = match theme {
+            WindowTheme::System => self.scheme,
+            WindowTheme::Light => ColorScheme::Light,
+            WindowTheme::Dark => ColorScheme::Dark,
+        };
+        Self { scheme, ..self }
+    }
 }
 
 impl Default for Appearance {
@@ -222,6 +236,28 @@ mod tests {
         assert_eq!(clamp_text_scale(0.5), 0.75);
         assert_eq!(clamp_text_scale(3.0), 2.0);
         assert_eq!(clamp_text_scale(f64::NAN), 1.0);
+    }
+
+    #[test]
+    fn a_window_theme_overrides_only_the_scheme() {
+        let portal = Appearance {
+            scheme: ColorScheme::Dark,
+            accent: Some([1, 2, 3]),
+            text_scale: 1.25,
+        };
+        assert_eq!(portal.with_theme(WindowTheme::System), portal);
+        assert_eq!(
+            portal.with_theme(WindowTheme::Light),
+            Appearance {
+                scheme: ColorScheme::Light,
+                ..portal
+            }
+        );
+        let light = Appearance {
+            scheme: ColorScheme::Light,
+            ..portal
+        };
+        assert_eq!(light.with_theme(WindowTheme::Dark), portal);
     }
 
     #[test]

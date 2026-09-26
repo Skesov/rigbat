@@ -31,9 +31,20 @@ pub fn painted_text_at(size: [f32; 2], contents: impl FnMut(&mut egui::Ui)) -> V
 
 /// Strings drawn whole, not cut by their clip rectangle.
 pub fn fully_painted_text_at(size: [f32; 2], contents: impl FnMut(&mut egui::Ui)) -> Vec<Painted> {
-    text_at(size, contents, |drawn, visible| {
-        visible.width() + 0.5 >= drawn.width() && visible.height() + 0.5 >= drawn.height()
-    })
+    text_at(size, contents, whole)
+}
+
+/// Every string one frame's `output` painted whole.
+pub fn painted(output: &egui::FullOutput) -> Vec<Painted> {
+    let mut painted = Vec::new();
+    for clipped in &output.shapes {
+        collect_text(&clipped.shape, clipped.clip_rect, &whole, &mut painted);
+    }
+    painted
+}
+
+fn whole(drawn: egui::Rect, visible: egui::Rect) -> bool {
+    visible.width() + 0.5 >= drawn.width() && visible.height() + 0.5 >= drawn.height()
 }
 
 /// Two frames, because some widgets size themselves from the previous frame. The root clip rectangle is the screen, so text laid out past the

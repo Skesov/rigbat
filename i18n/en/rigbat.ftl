@@ -48,6 +48,7 @@ notify-low-body = { $percent }% remaining
 ## Settings window: shared
 
 tab-general = General
+tab-appearance = Appearance
 tab-devices = Devices
 button-refresh = Refresh
 button-refreshing = Refreshing…
@@ -56,23 +57,11 @@ settings-title = rigbat — settings
 ## Settings window: General tab
 
 group-tray = Tray
-tray-icon-style = Icon style
-display-icon-only = Battery icon only
-display-percent-only = Percentage as text
-display-percent-in-icon = Percentage inside icon
 tray-per-device = One icon per device
 tray-per-device-hint = Choose which on the Devices tab.
 tray-primary-hint-pinned = The single icon shows { $name }. Change it on the Devices tab.
 tray-primary-hint-auto = The single icon shows the connected device with the lowest charge. Pin one on the Devices tab.
 button-clear = Clear
-
-group-appearance = Appearance
-appearance-palette = Colours
-appearance-palette-hint = Charge colours on the tray icon, in the device overview and here. Light or dark follows the system.
-palette-catppuccin = Catppuccin
-palette-everforest = Everforest
-palette-gnome = GNOME
-palette-nord = Nord
 
 group-battery = Battery
 default-low-threshold = Low battery threshold
@@ -95,6 +84,29 @@ section-language = Language / Язык
 language-system = System
 
 about-project-page = Project page
+
+## Settings window: Appearance tab
+
+group-windows = Windows
+window-theme = Theme
+window-theme-hint = For this window and the device overview. The tray icon follows the system.
+theme-system = System
+theme-light = Light
+theme-dark = Dark
+
+group-colours = Colours
+appearance-palette = Palette
+appearance-palette-hint = Charge colours on the tray icon, in the device overview and here.
+palette-catppuccin = Catppuccin
+palette-everforest = Everforest
+palette-gnome = GNOME
+palette-nord = Nord
+
+group-tray-icon = Tray icon
+tray-icon-style = Icon style
+display-icon-only = Battery icon only
+display-percent-only = Percentage as text
+display-percent-in-icon = Percentage inside icon
 
 ## Settings window: Devices tab
 

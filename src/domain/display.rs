@@ -49,6 +49,30 @@ impl Palette {
     }
 }
 
+/// Light or dark for the settings window and the dashboard; the tray icon
+/// always follows the system, whose panel it sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowTheme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl WindowTheme {
+    pub const ALL: [WindowTheme; 3] = [WindowTheme::System, WindowTheme::Light, WindowTheme::Dark];
+
+    pub fn label(self, lang: Lang) -> String {
+        let l = loader(lang);
+        match self {
+            WindowTheme::System => fl!(l, "theme-system"),
+            WindowTheme::Light => fl!(l, "theme-light"),
+            WindowTheme::Dark => fl!(l, "theme-dark"),
+        }
+    }
+}
+
 impl DisplayMode {
     /// All display modes in display order, used to build the Settings menu.
     pub const ALL: [DisplayMode; 3] = [
@@ -115,6 +139,9 @@ mod tests {
         for lang in Lang::ALL {
             for palette in Palette::ALL {
                 assert!(!palette.label(lang).is_empty(), "{palette:?} in {lang:?}");
+            }
+            for theme in WindowTheme::ALL {
+                assert!(!theme.label(lang).is_empty(), "{theme:?} in {lang:?}");
             }
         }
     }

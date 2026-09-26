@@ -4,7 +4,7 @@ use eframe::egui;
 use tokio::sync::watch;
 
 use crate::appearance::{Appearance, ColorScheme};
-use crate::domain::{DeviceKind, Palette};
+use crate::domain::{DeviceKind, Palette, WindowTheme};
 use crate::icon;
 use crate::palette::{self, DIM, GRAPHIC_CONTRAST, Rgb, TEXT_CONTRAST};
 
@@ -40,19 +40,35 @@ pub fn apply(ctx: &egui::Context, appearance: &Appearance) {
     });
 }
 
-/// Re-applies every appearance change for as long as the window lives.
+/// Applies the session's look under `theme` now, and again on every change of
+/// either for as long as the window lives.
 pub fn follow(
     rt: &tokio::runtime::Handle,
     ctx: egui::Context,
     mut appearance: watch::Receiver<Appearance>,
+    mut theme: watch::Receiver<WindowTheme>,
 ) {
+    apply(&ctx, &look(&mut appearance, &mut theme));
     rt.spawn(async move {
-        while appearance.changed().await.is_ok() {
-            let current = *appearance.borrow_and_update();
-            apply(&ctx, &current);
+        // A theme fixed at launch closes its channel; the portal is still followed.
+        let mut theme_open = true;
+        loop {
+            tokio::select! {
+                changed = appearance.changed() => if changed.is_err() { return },
+                changed = theme.changed(), if theme_open => theme_open = changed.is_ok(),
+            }
+            apply(&ctx, &look(&mut appearance, &mut theme));
             ctx.request_repaint();
         }
     });
+}
+
+fn look(
+    appearance: &mut watch::Receiver<Appearance>,
+    theme: &mut watch::Receiver<WindowTheme>,
+) -> Appearance {
+    let theme = *theme.borrow_and_update();
+    appearance.borrow_and_update().with_theme(theme)
 }
 
 /// A window size in points, grown with the text so the layout still fits.
@@ -237,6 +253,66 @@ mod tests {
             ctx.style_of(egui::Theme::Light).visuals.selection,
             egui::Visuals::light().selection
         );
+    }
+
+    fn until(what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn preference(ctx: &egui::Context) -> egui::ThemePreference {
+        ctx.options(|o| o.theme_preference)
+    }
+
+    #[test]
+    fn a_forced_theme_wins_over_the_portal_until_it_is_system_again() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let (portal, appearance) = watch::channel(Appearance::default());
+        let (theme, theme_rx) = watch::channel(WindowTheme::Light);
+        let ctx = egui::Context::default();
+
+        follow(rt.handle(), ctx.clone(), appearance, theme_rx);
+        run_pass(&ctx);
+        assert_eq!(preference(&ctx), egui::ThemePreference::Light);
+        assert!(!ctx.global_style().visuals.dark_mode);
+
+        theme.send_replace(WindowTheme::System);
+        until("System follows the dark portal", || {
+            preference(&ctx) == egui::ThemePreference::Dark
+        });
+        theme.send_replace(WindowTheme::Dark);
+        portal.send_modify(|a| {
+            a.scheme = ColorScheme::Light;
+            a.accent = Some([200, 0, 0]);
+        });
+        until("the accent still follows the portal", || {
+            ctx.style_of(egui::Theme::Dark).visuals.selection.bg_fill
+                == egui::Color32::from_rgb(200, 0, 0)
+        });
+        assert_eq!(preference(&ctx), egui::ThemePreference::Dark);
+    }
+
+    #[test]
+    fn a_theme_fixed_at_launch_still_follows_the_portal() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let (portal, appearance) = watch::channel(Appearance::default());
+        let ctx = egui::Context::default();
+
+        follow(
+            rt.handle(),
+            ctx.clone(),
+            appearance,
+            watch::channel(WindowTheme::System).1,
+        );
+        assert_eq!(preference(&ctx), egui::ThemePreference::Dark);
+
+        portal.send_modify(|a| a.scheme = ColorScheme::Light);
+        until("the window follows the portal to light", || {
+            preference(&ctx) == egui::ThemePreference::Light
+        });
     }
 
     #[test]

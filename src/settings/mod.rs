@@ -1,3 +1,4 @@
+mod appearance_tab;
 mod devices;
 mod devices_tab;
 mod general_tab;
@@ -12,14 +13,14 @@ use eframe::egui;
 
 use crate::autostart;
 use crate::config::{self, Config};
-use crate::domain::DeviceId;
+use crate::domain::{DeviceId, WindowTheme};
 use crate::gui;
 use crate::i18n::{Lang, fl, loader};
 use crate::state;
+use appearance_tab::{PaletteSwatches, StylePreviews};
 use devices::{DeleteState, DeviceRow};
-use general_tab::{PaletteSwatches, StylePreviews};
 
-/// The minimum is where both tabs' column reaches `CONTENT_MAX_WIDTH`; the
+/// The minimum is where every tab's column reaches `CONTENT_MAX_WIDTH`; the
 /// tabs' width tests run at it.
 const WINDOW_DEFAULT_SIZE: [f32; 2] = [720.0, 640.0];
 const WINDOW_MIN_SIZE: [f32; 2] = [
@@ -31,25 +32,38 @@ const WINDOW_MIN_SIZE: [f32; 2] = [
 /// late to matter; above 50% it stops meaning "low".
 const LOW_THRESHOLD_RANGE: std::ops::RangeInclusive<u8> = 5..=50;
 
-/// The window's two top-level sections. Hand-rolled tab bar, not `egui_dock`
-/// (a docking system for editor layouts, not a fixed two-or-three-section
-/// switcher) and not a sidebar (GNOME HIG reserves the
-/// sidebar pattern for apps with many destinations or their own iconography;
-/// two sections is squarely view-switcher territory). Kept open for a third
-/// tab without redesigning navigation — add a variant and a label.
+/// The window's top-level sections. Hand-rolled tab bar, not `egui_dock`
+/// (a docking system for editor layouts, not a fixed few-section switcher)
+/// and not a sidebar (GNOME HIG reserves the sidebar pattern for apps with
+/// many destinations or their own iconography; three sections is squarely
+/// view-switcher territory).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     General,
+    Appearance,
     Devices,
 }
 
 impl Tab {
+    /// In tab-bar order.
+    const ALL: [Tab; 3] = [Tab::General, Tab::Appearance, Tab::Devices];
+
     /// The tab `rigbat settings <name>` opens on.
     pub fn from_arg(arg: &str) -> Option<Self> {
         match arg {
             "general" => Some(Self::General),
+            "appearance" => Some(Self::Appearance),
             "devices" => Some(Self::Devices),
             _ => None,
+        }
+    }
+
+    fn label(self, lang: Lang) -> String {
+        let l = loader(lang);
+        match self {
+            Tab::General => fl!(l, "tab-general"),
+            Tab::Appearance => fl!(l, "tab-appearance"),
+            Tab::Devices => fl!(l, "tab-devices"),
         }
     }
 }
@@ -106,6 +120,8 @@ struct SettingsApp {
     palette_swatches: Option<PaletteSwatches>,
     /// The language the window title was last set in.
     title_lang: Lang,
+    /// What the window's look follows; `gui::follow` re-applies on every change.
+    theme: tokio::sync::watch::Sender<WindowTheme>,
 }
 
 impl SettingsApp {
@@ -214,6 +230,7 @@ impl eframe::App for SettingsApp {
         self.poll_scan();
         self.handle_escape(ui);
         self.follow_language(ui.ctx());
+        self.follow_theme();
 
         let frame = egui::Frame::central_panel(ui.style()).inner_margin(widgets::PANEL_MARGIN);
         frame.show(ui, |ui| {
@@ -221,6 +238,7 @@ impl eframe::App for SettingsApp {
             ui.add_space(widgets::TAB_BAR_GAP);
             match self.tab {
                 Tab::General => self.render_general_tab(ui),
+                Tab::Appearance => self.render_appearance_tab(ui),
                 Tab::Devices => self.render_devices_tab(ui),
             }
         });
@@ -236,12 +254,20 @@ impl SettingsApp {
         }
     }
 
+    fn follow_theme(&self) {
+        let theme = self.config.theme;
+        self.theme
+            .send_if_modified(|current| std::mem::replace(current, theme) != theme);
+    }
+
     fn render_tab_bar(&mut self, ui: &mut egui::Ui) {
-        let l = loader(self.config.lang());
-        let tabs = [Tab::General, Tab::Devices];
-        let labels = [fl!(l, "tab-general"), fl!(l, "tab-devices")];
-        let selected = tabs.iter().position(|&tab| tab == self.tab).unwrap_or(0);
-        if let Some(tab) = widgets::tab_bar(ui, &labels, selected).and_then(|i| tabs.get(i)) {
+        let lang = self.config.lang();
+        let labels = Tab::ALL.map(|tab| tab.label(lang));
+        let selected = Tab::ALL
+            .iter()
+            .position(|&tab| tab == self.tab)
+            .unwrap_or(0);
+        if let Some(tab) = widgets::tab_bar(ui, &labels, selected).and_then(|i| Tab::ALL.get(i)) {
             self.tab = *tab;
         }
     }
@@ -322,6 +348,7 @@ pub fn run(tab: Tab) -> anyhow::Result<()> {
     let (rt, appearance) = start()?;
     let discovery_ctx = Arc::new(crate::sources::Context::new());
     let text_scale = appearance.borrow().text_scale;
+    let (theme, theme_rx) = tokio::sync::watch::channel(config.theme);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(gui::scaled(WINDOW_DEFAULT_SIZE, text_scale))
@@ -334,8 +361,7 @@ pub fn run(tab: Tab) -> anyhow::Result<()> {
         "rigbat",
         options,
         Box::new(move |cc| {
-            gui::apply(&cc.egui_ctx, &appearance.borrow());
-            gui::follow(rt.handle(), cc.egui_ctx.clone(), appearance);
+            gui::follow(rt.handle(), cc.egui_ctx.clone(), appearance, theme_rx);
             let mut app = SettingsApp {
                 config,
                 config_path: config::config_path(),
@@ -356,6 +382,7 @@ pub fn run(tab: Tab) -> anyhow::Result<()> {
                 style_previews: None,
                 palette_swatches: None,
                 title_lang,
+                theme,
             };
             app.spawn_scan(cc.egui_ctx.clone(), scan::Scan::Read);
             Ok(Box::new(app))
@@ -388,6 +415,7 @@ mod tests {
         // Tests assert English text unless they pick a language; LANG must not decide.
         config.language.get_or_insert_with(|| "en".to_owned());
         let title_lang = config.lang();
+        let theme = tokio::sync::watch::Sender::new(config.theme);
         SettingsApp {
             config,
             config_path: None,
@@ -412,6 +440,7 @@ mod tests {
             style_previews: None,
             palette_swatches: None,
             title_lang,
+            theme,
         }
     }
 
@@ -677,7 +706,8 @@ mod bus_tests {
         assert_eq!(appearance.borrow().scheme, ColorScheme::Light);
 
         let window = egui::Context::default();
-        gui::follow(rt.handle(), window.clone(), appearance);
+        let (_, theme) = tokio::sync::watch::channel(crate::domain::WindowTheme::System);
+        gui::follow(rt.handle(), window.clone(), appearance, theme);
         let dark = || window.options(|o| o.theme_preference) == egui::ThemePreference::Dark;
         let deadline = Instant::now() + TIMEOUT;
         // The follower subscribes after `start` returns, so an early signal can go unheard.

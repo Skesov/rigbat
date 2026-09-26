@@ -205,13 +205,18 @@ controller on, undocked from its dongle.
 
 ## Settings
 
-`rigbat settings` opens the settings window. It has two tabs.
+`rigbat settings` opens the settings window. It has three tabs; `rigbat settings appearance` (or
+`general`, `devices`) opens on one.
 
-**General** — how the tray looks and behaves for every device: one icon per device or a single
-aggregate icon, the display mode, the colour palette for charge states (Catppuccin, Everforest,
-GNOME or Nord; light or dark still follows the system), the default low-battery threshold (5–50%,
-default 20), the default poll interval (30 s to 1 h, default 1 min), low-battery notifications,
-whether rigbat starts with the session, and the language (`System` follows `LANG`).
+**General** — how rigbat behaves for every device: one icon per device or a single aggregate
+icon, the default low-battery threshold (5–50%, default 20), the default poll interval (30 s to
+1 h, default 1 min), low-battery notifications, whether rigbat starts with the session, and the
+language (`System` follows `LANG`).
+
+**Appearance** — how it looks: the theme of the settings window and the device overview
+(`System`, `Light` or `Dark`; the tray icon always follows the system, whose panel it sits on),
+the colour palette for charge states (Catppuccin, Everforest, GNOME or Nord), and the tray icon's
+display mode.
 
 <p align="center">
   <img src="docs/screenshots/general.png" width="726"

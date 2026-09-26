@@ -33,7 +33,7 @@ Usage:
   rigbat --json            Print battery data as JSON
   rigbat --waybar          Stream waybar custom-module JSON lines (featured device)
   rigbat tray              Run the system tray daemon
-  rigbat settings [general|devices]
+  rigbat settings [general|appearance|devices]
                            Open the settings window, on that tab
   rigbat dashboard         Open the device overview (the tray icon's left click)
   rigbat doctor            Check the setup and print how to fix each problem
@@ -582,6 +582,10 @@ mod tests {
         assert_eq!(
             parse_args(&s(&["settings", "general"])),
             Invocation::Settings(settings::Tab::General)
+        );
+        assert_eq!(
+            parse_args(&s(&["settings", "appearance"])),
+            Invocation::Settings(settings::Tab::Appearance)
         );
         assert_eq!(
             parse_args(&s(&["settings", "power"])),

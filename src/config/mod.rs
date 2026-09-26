@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{DisplayMode, Palette, TrayMode};
+use crate::domain::{DisplayMode, Palette, TrayMode, WindowTheme};
 use crate::i18n::{self, Lang};
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
@@ -56,8 +56,9 @@ pub struct Config {
     /// UI language tag (`"ru"`); `None` follows the session locale. A string, not
     /// `Lang`, so a tag unknown to this build still loads.
     pub language: Option<String>,
-    /// Colours inside the session's light or dark scheme.
+    /// Colours inside the light or dark scheme.
     pub palette: Palette,
+    pub theme: WindowTheme,
 }
 
 /// Moves every per-device setting from `from` to `to`, returning whether any
@@ -112,6 +113,7 @@ impl Default for Config {
             device_overrides: HashMap::new(),
             language: None,
             palette: Palette::Catppuccin,
+            theme: WindowTheme::System,
         }
     }
 }
@@ -436,10 +438,12 @@ mod tests {
             tray_mode: TrayMode::PerDevice,
             primary_device: Some("mouse".to_string()),
             palette: Palette::Everforest,
+            theme: WindowTheme::Light,
             ..Config::default()
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains(r#""palette":"everforest""#), "{json}");
+        assert!(json.contains(r#""theme":"light""#), "{json}");
         let restored: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg, restored);
     }
@@ -474,6 +478,19 @@ mod tests {
         let cfg: Config = serde_json::from_str(r#"{"display_mode":"percent_only"}"#).unwrap();
         assert_eq!(cfg.palette, Palette::Catppuccin);
         assert_eq!(cfg.display_mode, DisplayMode::PercentOnly);
+    }
+
+    #[test]
+    fn a_config_without_a_theme_follows_the_system() {
+        let cfg: Config = serde_json::from_str(r#"{"palette":"nord"}"#).unwrap();
+        assert_eq!(cfg.theme, WindowTheme::System);
+        for (json, theme) in [
+            (r#"{"theme":"system"}"#, WindowTheme::System),
+            (r#"{"theme":"light"}"#, WindowTheme::Light),
+            (r#"{"theme":"dark"}"#, WindowTheme::Dark),
+        ] {
+            assert_eq!(serde_json::from_str::<Config>(json).unwrap().theme, theme);
+        }
     }
 
     #[test]

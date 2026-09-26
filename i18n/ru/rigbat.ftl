@@ -48,6 +48,7 @@ notify-low-body = Осталось { $percent }%
 ## Settings window: shared
 
 tab-general = Основное
+tab-appearance = Оформление
 tab-devices = Устройства
 button-refresh = Обновить
 button-refreshing = Обновление…
@@ -56,23 +57,11 @@ settings-title = rigbat — настройки
 ## Settings window: General tab
 
 group-tray = Трей
-tray-icon-style = Вид значка
-display-icon-only = Только значок
-display-percent-only = Проценты текстом
-display-percent-in-icon = Проценты внутри значка
 tray-per-device = Значок на каждое устройство
 tray-per-device-hint = Какие именно — на вкладке «Устройства».
 tray-primary-hint-pinned = Общий значок показывает { $name }. Сменить — на вкладке «Устройства».
 tray-primary-hint-auto = Общий значок показывает подключённое устройство с самым низким зарядом. Закрепить — на вкладке «Устройства».
 button-clear = Сбросить
-
-group-appearance = Оформление
-appearance-palette = Цвета
-appearance-palette-hint = Цвета заряда на значке, в обзоре устройств и здесь. Светлая или тёмная тема — как в системе.
-palette-catppuccin = Catppuccin
-palette-everforest = Everforest
-palette-gnome = GNOME
-palette-nord = Nord
 
 group-battery = Батарея
 default-low-threshold = Порог низкого заряда
@@ -94,6 +83,29 @@ section-language = Язык / Language
 language-system = Системный
 
 about-project-page = Страница проекта
+
+## Settings window: Appearance tab
+
+group-windows = Окна
+window-theme = Тема
+window-theme-hint = Для этого окна и обзора устройств. Значок в трее — как в системе.
+theme-system = Как в системе
+theme-light = Светлая
+theme-dark = Тёмная
+
+group-colours = Цвета
+appearance-palette = Палитра
+appearance-palette-hint = Цвета заряда на значке, в обзоре устройств и здесь.
+palette-catppuccin = Catppuccin
+palette-everforest = Everforest
+palette-gnome = GNOME
+palette-nord = Nord
+
+group-tray-icon = Значок в трее
+tray-icon-style = Вид значка
+display-icon-only = Только значок
+display-percent-only = Проценты текстом
+display-percent-in-icon = Проценты внутри значка
 
 ## Settings window: Devices tab
 
