@@ -86,7 +86,7 @@ libXrandr-devel libXi-devel mesa-libGL-devel pkgconf-pkg-config`.
 ## Install
 
 The [releases page](https://github.com/Skesov/rigbat/releases) has builds for `x86_64` and
-`aarch64` (glibc 2.35 or newer), each file with a `.sha256` and a build provenance attestation
+`aarch64` (built on Ubuntu 26.04: glibc 2.43 or newer), each file with a `.sha256` and a build provenance attestation
 (`gh attestation verify <file> --repo Skesov/rigbat`):
 
 - **Packages** — `.deb` and `.rpm`. They install `/usr/bin/rigbat`, the udev rule, the systemd

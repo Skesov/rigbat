@@ -43,9 +43,8 @@ jobs:
   # Builds the artifacts only once a release exists to attach them to. The
   # shape follows ripgrep and fd: per target a bare binary, a tarball with the
   # files a user needs to install it, .deb and .rpm, and a checksum beside each.
-  # Native runners per architecture (no cross image with X11/Wayland headers);
-  # Ubuntu 22.04 keeps the glibc floor at 2.35 so the binary runs on older
-  # distributions than the build host.
+  # Built inside Ubuntu 26.04 on native runners per architecture (no cross
+  # image with X11/Wayland headers); the binaries need glibc 2.43 or newer.
   artifacts:
     needs: release-please
     if: ${{ always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
@@ -54,33 +53,33 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-22.04
+            runner: ubuntu-latest
             deb_arch: amd64
             rpm_arch: x86_64
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
             deb_arch: arm64
             rpm_arch: aarch64
     runs-on: ${{ matrix.runner }}
-    # Replaces the workflow-level permissions for this job.
+    container: ubuntu:26.04
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: read
     env:
       TARGET: ${{ matrix.target }}
       TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
     steps:
+      - name: Install build dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install --no-install-recommends -y \
+            ca-certificates curl git build-essential pkg-config \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libgl1-mesa-dev
+
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
-            libxrandr-dev libxi-dev libgl1-mesa-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -98,23 +97,20 @@ jobs:
       # udev rule a USB HID device needs, the desktop entry, the systemd user
       # unit and the icon.
       - name: Stage the binary and the tarball
-        id: stage
+        shell: bash
         run: |
           set -euo pipefail
           version="${TAG#v}"
           name="rigbat-v${version}-${TARGET}"
-          strip "target/${TARGET}/release/rigbat" || true
-          cp "target/${TARGET}/release/rigbat" "${name}"
-          sha256sum "${name}" > "${name}.sha256"
+          mkdir -p dist
+          strip "target/${TARGET}/release/rigbat"
+          cp "target/${TARGET}/release/rigbat" "dist/${name}"
           staging="$(mktemp -d)/${name}"
           mkdir -p "${staging}"
           cp "target/${TARGET}/release/rigbat" "${staging}/"
           cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "${staging}/"
           cp -r packaging "${staging}/"
-          tar czf "${name}.tar.gz" -C "$(dirname "${staging}")" "${name}"
-          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
-          echo "binary=${name}" >> "$GITHUB_OUTPUT"
-          echo "asset=${name}.tar.gz" >> "$GITHUB_OUTPUT"
+          tar czf "dist/${name}.tar.gz" -C "$(dirname "${staging}")" "${name}"
 
       - uses: taiki-e/install-action@v2
         with:
@@ -123,7 +119,7 @@ jobs:
       # The shipped unit points at ~/.cargo/bin for `make service`; the
       # packages install the binary to /usr/bin.
       - name: Build the packages
-        id: packages
+        shell: bash
         run: |
           set -euo pipefail
           version="${TAG#v}"
@@ -131,14 +127,35 @@ jobs:
           sed 's|^ExecStart=.*rigbat tray$|ExecStart=/usr/bin/rigbat tray|' \
             packaging/rigbat.service > target/packaging/rigbat.service
           grep -qx 'ExecStart=/usr/bin/rigbat tray' target/packaging/rigbat.service
-          deb="rigbat_${version}-1_${{ matrix.deb_arch }}.deb"
-          rpm="rigbat-${version}-1.${{ matrix.rpm_arch }}.rpm"
-          cargo deb --no-build --target "$TARGET" --output "${deb}"
-          cargo generate-rpm --target "$TARGET" --output "${rpm}"
-          sha256sum "${deb}" > "${deb}.sha256"
-          sha256sum "${rpm}" > "${rpm}.sha256"
-          echo "deb=${deb}" >> "$GITHUB_OUTPUT"
-          echo "rpm=${rpm}" >> "$GITHUB_OUTPUT"
+          cargo deb --no-build --target "$TARGET" \
+            --output "dist/rigbat_${version}-1_${{ matrix.deb_arch }}.deb"
+          cargo generate-rpm --target "$TARGET" \
+            --output "dist/rigbat-${version}-1.${{ matrix.rpm_arch }}.rpm"
+          cd dist && for f in *; do sha256sum "$f" > "$f.sha256"; done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+
+  # Attests and attaches on the host runner: the build container has no gh.
+  # Whatever targets built are published; a failed one is visible in the run.
+  publish:
+    needs: [release-please, artifacts]
+    if: ${{ !cancelled() && needs.artifacts.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
 
       # GitHub stores attestations only for public repositories (and
       # organisation-owned private ones); on a user-owned private repository
@@ -147,22 +164,10 @@ jobs:
         if: ${{ !github.event.repository.private }}
         with:
           subject-path: |
-            ${{ steps.stage.outputs.binary }}
-            ${{ steps.stage.outputs.asset }}
-            ${{ steps.packages.outputs.deb }}
-            ${{ steps.packages.outputs.rpm }}
+            dist/rigbat*
+            !dist/*.sha256
 
       - name: Attach to the release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "$TAG" \
-            "${{ steps.stage.outputs.binary }}" \
-            "${{ steps.stage.outputs.binary }}.sha256" \
-            "${{ steps.stage.outputs.asset }}" \
-            "${{ steps.stage.outputs.asset }}.sha256" \
-            "${{ steps.packages.outputs.deb }}" \
-            "${{ steps.packages.outputs.deb }}.sha256" \
-            "${{ steps.packages.outputs.rpm }}" \
-            "${{ steps.packages.outputs.rpm }}.sha256" \
-            --clobber
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
