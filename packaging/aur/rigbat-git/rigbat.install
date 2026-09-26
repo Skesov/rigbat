@@ -3,7 +3,7 @@ post_install() {
 ==> Start the tray with your graphical session (run as your user, not root):
       systemctl --user enable --now rigbat.service
     Or use the "Startup" toggle in `rigbat settings` instead, not both.
-==> USB HID devices (SteelSeries, 8BitDo) get access through the udev rule.
+==> USB HID devices (SteelSeries, 8BitDo, Corsair, Logitech headsets) get access through the udev rule.
     If one still shows "no access", replug its USB receiver.
 EOF
 }

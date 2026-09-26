@@ -43,10 +43,15 @@ work without rigbat knowing their model:
   band rather than a percentage, shown without a time-remaining estimate).
 - **BlueZ** — any Bluetooth device that implements `org.bluez.Battery1`.
 
-Two more speak a vendor protocol over `/dev/hidraw`, and those need the device to be in the table:
+The rest speak a vendor protocol over `/dev/hidraw`, and those need the device to be in the table:
 
 - **SteelSeries** — Aerox 5 Wireless.
 - **8BitDo** — Ultimate 2 Wireless, in DInput mode only (see below).
+- **Wireless headsets** — untested, reports welcome: SteelSeries Arctis 1 Wireless (also Xbox),
+  Arctis 7X, Arctis 7P, the Arctis Nova 7 family (7, 7X, 7P, Gen 2, Diablo IV, WoW Edition),
+  Corsair Void / Void Pro / Void Elite Wireless, Logitech G533. Where the kernel already reports
+  the headset's battery, the sysfs backend shows it instead. Protocol notes and the models left
+  out: [docs/headsets.md](docs/headsets.md).
 
 Adding a device to either table is a small, well-scoped change: see
 [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/adding-a-device.md](docs/adding-a-device.md).

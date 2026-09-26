@@ -1,6 +1,6 @@
 use crate::sources::{
-    BatteryBackend, bluez::BluezBackend, eightbitdo::EightBitDoBackend, hidraw::HidrawFamily,
-    steelseries::SteelSeriesBackend, sysfs::SysfsBackend,
+    BatteryBackend, bluez::BluezBackend, eightbitdo::EightBitDoBackend, headsets,
+    hidraw::HidrawFamily, steelseries::SteelSeriesBackend, sysfs::SysfsBackend,
 };
 
 /// Returns all registered backends in priority order.
@@ -11,6 +11,10 @@ pub fn backends() -> Vec<Box<dyn BatteryBackend>> {
         Box::new(BluezBackend),
         Box::new(SteelSeriesBackend),
         Box::new(EightBitDoBackend),
+        Box::new(headsets::ARCTIS_1),
+        Box::new(headsets::ARCTIS_NOVA),
+        Box::new(headsets::CORSAIR_VOID),
+        Box::new(headsets::LOGITECH_G533),
     ]
 }
 
@@ -30,13 +34,25 @@ mod tests {
     #[test]
     fn backends_contains_all_expected_names() {
         let names: Vec<&'static str> = backends().iter().map(|b| b.name()).collect();
-        assert_eq!(names, vec!["sysfs", "bluez", "steelseries", "eightbitdo"]);
+        assert_eq!(
+            names,
+            vec![
+                "sysfs",
+                "bluez",
+                "steelseries",
+                "eightbitdo",
+                "steelseries-arctis",
+                "steelseries-arctis-nova",
+                "corsair-void",
+                "logitech-g533",
+            ]
+        );
     }
 
     #[test]
     fn hidraw_families_come_from_the_hidraw_backends() {
         let vendors: Vec<u16> = hidraw_families().iter().map(|f| f.vendor).collect();
-        assert_eq!(vendors, [0x1038, 0x2DC8]);
+        assert_eq!(vendors, [0x1038, 0x2DC8, 0x1038, 0x1038, 0x1B1C, 0x046D]);
     }
 
     #[test]

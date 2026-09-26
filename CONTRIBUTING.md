@@ -23,6 +23,8 @@ pub fn backends() -> Vec<Box<dyn BatteryBackend>> {
         Box::new(BluezBackend),
         Box::new(SteelSeriesBackend),
         Box::new(EightBitDoBackend),
+        Box::new(headsets::ARCTIS_1),
+        // … one line per headset family
     ]
 }
 ```

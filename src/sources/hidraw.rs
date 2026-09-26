@@ -56,7 +56,7 @@ impl HidrawFamily {
 
     /// Every node under `sysfs_root` that is one of this family's devices.
     /// A missing root is an empty result, not an error: no hidraw driver, no devices.
-    fn discover_in(&self, sysfs_root: &Path) -> anyhow::Result<Vec<HidrawDevice>> {
+    pub fn discover_in(&self, sysfs_root: &Path) -> anyhow::Result<Vec<HidrawDevice>> {
         if !sysfs_root.exists() {
             return Ok(Vec::new());
         }
@@ -127,6 +127,16 @@ pub async fn discover(family: &'static HidrawFamily) -> anyhow::Result<Vec<Hidra
     tokio::task::spawn_blocking(|| family.discover_in(Path::new(SYSFS_HIDRAW)))
         .await
         .context("spawn_blocking")?
+}
+
+/// Whether a kernel driver already registered a battery on the HID device
+/// behind `dev_path`; the sysfs backend reports that one.
+pub fn kernel_reports_battery(sysfs_root: &Path, dev_path: &Path) -> bool {
+    let Some(node) = dev_path.file_name() else {
+        return false;
+    };
+    std::fs::read_dir(sysfs_root.join(node).join("device/power_supply"))
+        .is_ok_and(|mut entries| entries.next().is_some())
 }
 
 /// The USB interface number from a canonical sysfs path: the last segment of
@@ -273,6 +283,65 @@ pub fn stable_locator(uevent: &str, node_name: &str) -> String {
         .or_else(|| uevent_value(uevent, "HID_PHYS"))
         .unwrap_or(node_name)
         .to_owned()
+}
+
+#[cfg(test)]
+pub mod fake_sysfs {
+    use std::path::PathBuf;
+
+    /// `class/hidrawN/device` links into `devices/…/1-1:1.<iface>/…`, as on a real system.
+    pub struct FakeSysfs {
+        pub root: PathBuf,
+    }
+
+    impl FakeSysfs {
+        pub fn new(test_name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "rigbat-hidraw-discover-{test_name}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("class")).expect("create fake sysfs");
+            Self { root }
+        }
+
+        pub fn class(&self) -> PathBuf {
+            self.root.join("class")
+        }
+
+        pub fn add(&self, node: &str, iface: u8, vendor: u16, product: u16, uniq: &str) {
+            let device = self
+                .root
+                .join(format!("devices/usb1/1-1/1-1:1.{iface}/{node}-hid"));
+            std::fs::create_dir_all(&device).expect("create fake HID device");
+            let uevent = format!(
+                "DRIVER=hid-generic\n\
+                 HID_ID=0003:0000{vendor:04X}:0000{product:04X}\n\
+                 HID_PHYS=usb-0000:13:00.0-1.1/input{iface}\n\
+                 HID_UNIQ={uniq}\n"
+            );
+            std::fs::write(device.join("uevent"), uevent).expect("write uevent");
+            let node_dir = self.class().join(node);
+            std::fs::create_dir_all(&node_dir).expect("create fake hidraw node");
+            std::os::unix::fs::symlink(&device, node_dir.join("device")).expect("link device");
+        }
+
+        /// A kernel driver's battery registered on `node`'s HID device.
+        pub fn add_power_supply(&self, node: &str, name: &str) {
+            let supply = self
+                .class()
+                .join(node)
+                .join("device/power_supply")
+                .join(name);
+            std::fs::create_dir_all(supply).expect("create fake power_supply");
+        }
+    }
+
+    impl Drop for FakeSysfs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -506,49 +575,7 @@ mod tests {
 
     // ── discovery against a fake sysfs tree ──────────────────────────────────
 
-    /// `class/hidrawN/device` links into `devices/…/1-1:1.<iface>/…`, as on a real system.
-    struct FakeSysfs {
-        root: PathBuf,
-    }
-
-    impl FakeSysfs {
-        fn new(test_name: &str) -> Self {
-            let root = std::env::temp_dir().join(format!(
-                "rigbat-hidraw-discover-{test_name}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(root.join("class")).expect("create fake sysfs");
-            Self { root }
-        }
-
-        fn class(&self) -> PathBuf {
-            self.root.join("class")
-        }
-
-        fn add(&self, node: &str, iface: u8, vendor: u16, product: u16, uniq: &str) {
-            let device = self
-                .root
-                .join(format!("devices/usb1/1-1/1-1:1.{iface}/{node}-hid"));
-            std::fs::create_dir_all(&device).expect("create fake HID device");
-            let uevent = format!(
-                "DRIVER=hid-generic\n\
-                 HID_ID=0003:0000{vendor:04X}:0000{product:04X}\n\
-                 HID_PHYS=usb-0000:13:00.0-1.1/input{iface}\n\
-                 HID_UNIQ={uniq}\n"
-            );
-            std::fs::write(device.join("uevent"), uevent).expect("write uevent");
-            let node_dir = self.class().join(node);
-            std::fs::create_dir_all(&node_dir).expect("create fake hidraw node");
-            std::os::unix::fs::symlink(&device, node_dir.join("device")).expect("link device");
-        }
-    }
-
-    impl Drop for FakeSysfs {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
-    }
+    use super::fake_sysfs::FakeSysfs;
 
     use crate::sources::{eightbitdo, steelseries};
 

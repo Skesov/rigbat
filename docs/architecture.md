@@ -39,7 +39,7 @@ layers, never the reverse.
    clock / palette
           │
         sources           BatterySource / BatteryBackend traits + Context + supervise +
-          ▲               sysfs/bluez/steelseries/eightbitdo impls
+          ▲               sysfs/bluez/steelseries/eightbitdo/headsets impls
         discovery         registry of backends + discover_all()
           ▲
           app             poll_once (list/--json) and Supervisor (tray, --waybar): orchestration
