@@ -136,7 +136,7 @@ impl SettingsApp {
         }
         let header = widgets::Expander {
             id: egui::Id::new(("device-row", &row.device)),
-            glyph: gui::kind_glyph(row.kind),
+            kind: row.kind,
             title: name,
             note: note.as_deref(),
             value,
@@ -713,11 +713,6 @@ mod tests {
                 fl!(l, "note-remaining", estimate = estimate.as_str()),
                 fl!(l, "note-last-reading", age = age.as_str()),
             ]);
-            expected.extend(
-                every_state()
-                    .into_iter()
-                    .map(|row| gui::kind_glyph(row.kind).to_owned()),
-            );
             assert_whole_on_one_line(&painted, &expected, lang);
         }
     }
@@ -1045,6 +1040,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_kind_paints_the_tray_icon_glyph_whole() {
+        let mut app = app_in(Lang::En, Config::default());
+        app.device_rows = crate::egui_test::KINDS
+            .into_iter()
+            .enumerate()
+            .map(|(i, kind)| {
+                let charge = Some((50, ChargeState::Discharging));
+                let name = format!("device {i}");
+                device_row(&name, kind, Presence::Online, charge, Some(i as i64))
+            })
+            .collect();
+        let ctx = egui::Context::default();
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(run_frame(&ctx, TEST_SIZE, Vec::new(), |ui| {
+                app.render_devices_tab(ui)
+            }));
+        }
+        let glyphs = crate::egui_test::painted_kind_glyphs(&output.expect("a frame"));
+        for kind in crate::egui_test::KINDS {
+            let painted: Vec<_> = glyphs.iter().filter(|(k, ..)| *k == kind).collect();
+            assert_eq!(painted.len(), 1, "{kind:?}: {glyphs:?}");
+            let (_, rect, cut) = painted[0];
+            assert!(!cut, "{kind:?} cut: {rect:?}");
+            assert!(
+                rect.width() > 0.0 && rect.width() <= gui::GLYPH_SIZE + 1.0,
+                "{rect:?}"
+            );
+        }
+    }
     #[test]
     fn the_reset_glyph_is_in_the_bundled_fonts() {
         let ctx = egui::Context::default();

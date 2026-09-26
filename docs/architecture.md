@@ -168,9 +168,10 @@ minute, and a worker per core only adds idle wakeups. `TOKIO_WORKER_THREADS` sti
   itself for a vanished device) is demoted to `Unreachable` and respawned rather than left
   silently dead.
 - **Stale rendering**: a device that is `Unreachable`/`Disconnected` but still holds a reading
-  keeps its normal icon with the fill dimmed by `palette::DIM`, rather than falling back to the
-  empty offline battery — Bluetooth peripherals sleep constantly, and the charge is still known.
-  Only the fill dims: the outline and the digits carry the reading, so they stay at full strength
+  keeps its normal icon, marked as not live — a dashed outline, dotted digits in the percent-only
+  mode, and the fill dimmed by `palette::DIM` — rather than falling back to the empty offline
+  battery: Bluetooth peripherals sleep constantly, and the charge is still known. Only the fill
+  dims: the outline and the digits carry the reading, so they stay at full strength
   and above the 3:1 WCAG 2.1 SC 1.4.11 floor for graphical objects (the standard's exemption
   covers inactive _controls_, not information displays). A `Low` status never dims at all — a
   warning that has gone stale is exactly the one that must not get quieter.

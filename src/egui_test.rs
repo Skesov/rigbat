@@ -3,6 +3,9 @@
 
 use eframe::egui;
 
+use crate::domain::DeviceKind;
+use crate::gui;
+
 /// The narrowest a string may be drawn and still count as readable.
 const MIN_READABLE_WIDTH: f32 = 24.0;
 
@@ -137,4 +140,75 @@ pub fn assert_no_overlap(painted: &[Painted]) {
             );
         }
     }
+}
+
+pub const KINDS: [DeviceKind; 5] = [
+    DeviceKind::Mouse,
+    DeviceKind::Keyboard,
+    DeviceKind::Headset,
+    DeviceKind::Controller,
+    DeviceKind::Other,
+];
+
+/// Every kind glyph a frame painted, identified by its cells, with the
+/// rect it covers and whether its clip rectangle cut any of it.
+pub fn painted_kind_glyphs(output: &egui::FullOutput) -> Vec<(DeviceKind, egui::Rect, bool)> {
+    let expected: Vec<_> = KINDS
+        .into_iter()
+        .map(|kind| {
+            (
+                kind,
+                quads(&gui::kind_glyph(
+                    egui::Pos2::ZERO,
+                    kind,
+                    egui::Color32::WHITE,
+                    1.0,
+                )),
+            )
+        })
+        .collect();
+    let mut found = Vec::new();
+    for clipped in &output.shapes {
+        let egui::Shape::Mesh(_) = &clipped.shape else {
+            continue;
+        };
+        let painted = quads(&clipped.shape);
+        let Some(bounds) = painted.iter().copied().reduce(|a, b| a.union(b)) else {
+            continue;
+        };
+        let kind = expected
+            .iter()
+            .find(|(_, cells)| same_cells(cells, &painted));
+        if let Some((kind, _)) = kind {
+            found.push((*kind, bounds, !clipped.clip_rect.contains_rect(bounds)));
+        }
+    }
+    found
+}
+
+/// A mesh built from `add_colored_rect`: four vertices per rect.
+fn quads(shape: &egui::Shape) -> Vec<egui::Rect> {
+    let egui::Shape::Mesh(mesh) = shape else {
+        return Vec::new();
+    };
+    mesh.vertices
+        .chunks(4)
+        .map(|quad| egui::Rect::from_points(&quad.iter().map(|v| v.pos).collect::<Vec<_>>()))
+        .collect()
+}
+
+/// Equal up to position and a pixel of snapping per edge.
+fn same_cells(a: &[egui::Rect], b: &[egui::Rect]) -> bool {
+    let origin = |rects: &[egui::Rect]| {
+        rects
+            .iter()
+            .fold(egui::pos2(f32::MAX, f32::MAX), |m, r| m.min(r.min))
+            .to_vec2()
+    };
+    let (oa, ob) = (origin(a), origin(b));
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(ra, rb)| {
+            let (ra, rb) = (ra.translate(-oa), rb.translate(-ob));
+            (ra.min - rb.min).length() <= 1.5 && (ra.max - rb.max).length() <= 1.5
+        })
 }

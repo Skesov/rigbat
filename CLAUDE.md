@@ -105,7 +105,7 @@ src/
 ├── cli/           # output adapter: table / --json / --wide; waybar.rs: --waybar line + loop
 ├── tray/          # manager.rs (icon set + run loop), item.rs (SNI item + menu),
 │                 # resolve.rs (device per icon), launch.rs, state service for the dashboard
-├── icon/          # IconRenderer (tiny-skia) + device-type corner glyph, shared by tray/dashboard
+├── icon/          # IconRenderer (tiny-skia), status marks, kind glyph bitmaps shared with windows
 ├── gui/           # shared egui theme for dashboard and settings
 ├── palette.rs     # colour tables per Palette + WCAG readable(): shared by icon/gui/settings
 ├── dashboard/     # eframe device overview (separate process, left click)

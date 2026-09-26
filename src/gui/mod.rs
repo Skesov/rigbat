@@ -5,12 +5,14 @@ use tokio::sync::watch;
 
 use crate::appearance::{Appearance, ColorScheme};
 use crate::domain::{DeviceKind, Palette};
+use crate::icon;
 use crate::palette::{self, DIM, GRAPHIC_CONTRAST, Rgb, TEXT_CONTRAST};
 
 /// A device row in either window, and the least height of a settings row.
 pub const ROW_HEIGHT: f32 = 48.0;
 pub const GLYPH_COLUMN: f32 = 30.0;
-pub const GLYPH_SIZE: f32 = 20.0;
+/// Three points per cell of the 7 × 7 kind glyph.
+pub const GLYPH_SIZE: f32 = 21.0;
 
 /// Accent goes into both styles so a scheme switch keeps it.
 pub fn apply(ctx: &egui::Context, appearance: &Appearance) {
@@ -67,14 +69,32 @@ fn readable_on(fill: egui::Color32) -> egui::Color32 {
     }
 }
 
-pub fn kind_glyph(kind: DeviceKind) -> &'static str {
-    match kind {
-        DeviceKind::Mouse => "\u{1F5B1}",
-        DeviceKind::Keyboard => "\u{2328}",
-        DeviceKind::Headset => "\u{1F3A7}",
-        DeviceKind::Controller => "\u{1F3AE}",
-        DeviceKind::Other => "\u{1F50B}",
+/// The kind's silhouette from `icon::kind_glyph`, the one the tray icon draws,
+/// `GLYPH_SIZE` square around `centre`, its cell edges on whole pixels.
+pub fn kind_glyph(
+    centre: egui::Pos2,
+    kind: DeviceKind,
+    color: egui::Color32,
+    pixels_per_point: f32,
+) -> egui::Shape {
+    let bitmap = icon::kind_glyph(kind);
+    let origin = centre - egui::Vec2::splat(GLYPH_SIZE / 2.0);
+    let cell = egui::vec2(
+        GLYPH_SIZE / bitmap.cols as f32,
+        GLYPH_SIZE / bitmap.row_count() as f32,
+    );
+    let snap = |p: egui::Pos2| {
+        egui::pos2(
+            (p.x * pixels_per_point).round() / pixels_per_point,
+            (p.y * pixels_per_point).round() / pixels_per_point,
+        )
+    };
+    let mut mesh = egui::Mesh::default();
+    for (col, row) in bitmap.cells() {
+        let min = origin + egui::vec2(col as f32 * cell.x, row as f32 * cell.y);
+        mesh.add_colored_rect(egui::Rect::from_min_max(snap(min), snap(min + cell)), color);
     }
+    egui::Shape::mesh(mesh)
 }
 
 /// Hints, notes and subtitles. `weak_text_color` misses WCAG 4.5:1 on a dark panel.
@@ -257,6 +277,41 @@ mod tests {
                     let painted = palette::over(rgb(color), panel, opacity);
                     let ratio = palette::contrast_ratio(painted, panel);
                     assert!(ratio >= GRAPHIC_CONTRAST, "{}: {ratio:.2}:1", at(role));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_window_glyph_is_the_tray_bitmap_on_whole_pixels() {
+        for kind in crate::egui_test::KINDS {
+            let bitmap = icon::kind_glyph(kind);
+            for pixels_per_point in [1.0_f32, 1.25_f32, 2.0_f32] {
+                let centre = egui::pos2(15.3_f32, 24.0_f32);
+                let shape = kind_glyph(centre, kind, egui::Color32::WHITE, pixels_per_point);
+                let egui::Shape::Mesh(mesh) = shape else {
+                    unreachable!("{kind:?}: not a mesh: {shape:?}");
+                };
+                let cells: Vec<_> = bitmap.cells().collect();
+                assert!(!cells.is_empty(), "{kind:?}");
+                assert_eq!(mesh.vertices.len(), 4 * cells.len(), "{kind:?}");
+                let square = egui::Rect::from_center_size(centre, egui::Vec2::splat(GLYPH_SIZE));
+                for (quad, (col, row)) in mesh.vertices.chunks(4).zip(cells) {
+                    for v in quad {
+                        let px = v.pos * pixels_per_point;
+                        assert_eq!(px, px.round(), "{kind:?} off the pixel grid");
+                        assert!(
+                            square.expand(1.0).contains(v.pos),
+                            "{kind:?} leaves its square"
+                        );
+                    }
+                    let cell = GLYPH_SIZE / 7.0;
+                    let at = quad[0].pos - square.min;
+                    assert!(
+                        (at.x - col as f32 * cell).abs() <= 1.0
+                            && (at.y - row as f32 * cell).abs() <= 1.0,
+                        "{kind:?} cell ({col}, {row}) at {at:?}"
+                    );
                 }
             }
         }

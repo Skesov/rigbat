@@ -147,8 +147,8 @@ own code.
 1. `src/domain/types.rs`: the variant, `as_str`, `label`, the freedesktop icon name, and any
    `guess_kind` keywords.
 2. A `kind-<name>` message in every `i18n/<lang>/rigbat.ftl`.
-3. A silhouette in `maybe_draw_kind_glyph` (`src/icon/mod.rs`) and a glyph in `kind_glyph`
-   (`src/dashboard/mod.rs`).
+3. A 7 × 7 silhouette in `icon::kind_glyph` (`src/icon/mod.rs`); the tray icon, the dashboard
+   and the Devices tab all draw it.
 4. `kind_from_str` in `src/state/store.rs` — a catch-all string match the compiler does not flag.
 
 ## Requirements for a vendor file

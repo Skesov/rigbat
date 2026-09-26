@@ -54,7 +54,7 @@ pub const fn swatches(palette: Palette, scheme: ColorScheme) -> Swatches {
             swatches_of(0x1e1e2e, 0xcdd6f4, 0xa6e3a1, 0xf38ba8, 0xf9e2af, 0x45475a)
         }
         (Palette::Everforest, Light) => {
-            swatches_of(0xfdf6e3, 0x5c6a72, 0x8da101, 0xf85552, 0xdfa000, 0xe6e2cc)
+            swatches_of(0xfdf6e3, 0x5c6a72, 0x35a77c, 0xf85552, 0xdfa000, 0xe6e2cc)
         }
         (Palette::Everforest, Dark) => {
             swatches_of(0x2d353b, 0xd3c6aa, 0xa7c080, 0xe67e80, 0xdbbc7f, 0x475258)
@@ -211,6 +211,17 @@ mod tests {
     fn contrast_ratio_spans_one_to_twenty_one() {
         assert!((contrast_ratio(BLACK, WHITE) - 21.0).abs() < 0.01);
         assert!((contrast_ratio(WHITE, WHITE) - 1.0).abs() < 1e-6);
+    }
+
+    /// The published charging green lifted to 3:1 on a light panel turned
+    /// olive; the palette's aqua stays green.
+    #[test]
+    fn everforest_light_charges_in_aqua_and_stays_green_when_lifted() {
+        let s = swatches(Palette::Everforest, ColorScheme::Light);
+        assert_eq!(s.charging, rgb(0x35a77c));
+        let lifted = readable(s.charging, [0xf0, 0xf0, 0xf0], GRAPHIC_CONTRAST, DIM);
+        let hue = hue(lifted).expect("a coloured charging mark");
+        assert!((120.0..=180.0).contains(&hue), "hue {hue:.0}°");
     }
 
     #[test]

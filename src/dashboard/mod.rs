@@ -17,9 +17,7 @@ use crate::config;
 use crate::domain::{
     BootTime, Palette, Presence, PrimaryStatus, charge_value, roster_order, status_note,
 };
-use crate::gui::{
-    self, GLYPH_COLUMN, GLYPH_SIZE, ROW_HEIGHT, StatusColors, kind_glyph, secondary_text,
-};
+use crate::gui::{self, GLYPH_COLUMN, ROW_HEIGHT, StatusColors, kind_glyph, secondary_text};
 use crate::i18n::{Lang, fl, loader};
 use crate::ipc::single_instance::{SingleInstance, acquire_named};
 use crate::ipc::{DASHBOARD_NAME, DASHBOARD_PATH, DeviceCard, Snapshot, TRAY_NAME};
@@ -489,13 +487,12 @@ fn render_row(
     let low = matches!(card.status, PrimaryStatus::Low { .. });
     let online = card.presence == Presence::Online;
 
-    ui.painter().text(
+    ui.painter().add(kind_glyph(
         egui::pos2(rect.left() + GLYPH_COLUMN / 2.0, rect.center().y),
-        egui::Align2::CENTER_CENTER,
-        kind_glyph(card.kind),
-        egui::FontId::proportional(GLYPH_SIZE),
+        card.kind,
         visuals.text_color(),
-    );
+        ui.pixels_per_point(),
+    ));
 
     let body = egui::Rect::from_min_max(
         egui::pos2(rect.left() + GLYPH_COLUMN + GAP, rect.top() + ROW_PADDING),
@@ -718,8 +715,6 @@ mod tests {
             let expected = [
                 "MX Anywhere 3".to_owned(),
                 "Nothing Ear (2)".to_owned(),
-                "\u{1F5B1}".to_owned(),
-                "\u{1F3A7}".to_owned(),
                 "62%".to_owned(),
                 format!("{LOW_SIGN} 15%"),
                 format!("{CHARGING_SIGN} 40%"),
@@ -838,21 +833,42 @@ mod tests {
     }
 
     #[test]
-    fn every_glyph_is_in_the_bundled_fonts() {
+    fn every_kind_paints_the_tray_icon_glyph_whole() {
+        let cards = crate::egui_test::KINDS
+            .into_iter()
+            .enumerate()
+            .map(|(i, kind)| DeviceCard {
+                kind,
+                ..card(&format!("device {i}"), Presence::Online, Some(50))
+            })
+            .collect();
+        let mut d = dashboard(cards, Lang::En);
+        let ctx = egui::Context::default();
+        let output = run_frame(&ctx, d.wanted_size(), Vec::new(), |ui| d.show(ui));
+        let glyphs = crate::egui_test::painted_kind_glyphs(&output);
+        for kind in crate::egui_test::KINDS {
+            let painted: Vec<_> = glyphs.iter().filter(|(k, ..)| *k == kind).collect();
+            assert_eq!(painted.len(), 1, "{kind:?}: {glyphs:?}");
+            let (_, rect, cut) = painted[0];
+            assert!(!cut, "{kind:?} cut: {rect:?}");
+            assert!(
+                rect.width() > 0.0 && rect.width() <= gui::GLYPH_SIZE + 1.0,
+                "{rect:?}"
+            );
+            assert!(
+                rect.right() <= MARGIN + GLYPH_COLUMN,
+                "{kind:?} leaves its column: {rect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_sign_is_in_the_bundled_fonts() {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
-        let kinds = [
-            DeviceKind::Mouse,
-            DeviceKind::Keyboard,
-            DeviceKind::Headset,
-            DeviceKind::Controller,
-            DeviceKind::Other,
-        ];
-        let font = egui::FontId::proportional(GLYPH_SIZE);
+        let font = egui::TextStyle::Body.resolve(&ctx.global_style());
         ctx.fonts_mut(|fonts| {
-            for glyph in kinds.map(kind_glyph).into_iter().chain([REFRESH]) {
-                assert!(fonts.has_glyphs(&font, glyph), "{glyph:?}");
-            }
+            assert!(fonts.has_glyphs(&font, REFRESH), "{REFRESH:?}");
             for sign in [CHARGING_SIGN, LOW_SIGN] {
                 assert!(fonts.has_glyph(&font, sign), "{sign:?}");
             }

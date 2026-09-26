@@ -4,7 +4,8 @@
 
 use eframe::egui;
 
-use crate::gui::{self, GLYPH_COLUMN, GLYPH_SIZE, ROW_HEIGHT};
+use crate::domain::DeviceKind;
+use crate::gui::{self, GLYPH_COLUMN, ROW_HEIGHT};
 
 pub const CONTENT_MAX_WIDTH: f32 = 640.0;
 pub const PANEL_MARGIN: f32 = 16.0;
@@ -124,7 +125,7 @@ pub struct Rows<'a> {
 /// The always-visible line of `Rows::expander`.
 pub struct Expander<'a> {
     pub id: egui::Id,
-    pub glyph: &'a str,
+    pub kind: DeviceKind,
     pub title: &'a str,
     pub note: Option<&'a str>,
     pub value: egui::RichText,
@@ -206,13 +207,12 @@ impl Rows<'_> {
                 .rect_filled(rect.shrink(1.0), radius, fill);
         }
         let inner = rect.shrink2(egui::vec2(ROW_PADDING_X, 0.0));
-        self.ui.painter().text(
+        self.ui.painter().add(gui::kind_glyph(
             egui::pos2(inner.left() + GLYPH_COLUMN / 2.0, rect.center().y),
-            egui::Align2::CENTER_CENTER,
-            header.glyph,
-            egui::FontId::proportional(GLYPH_SIZE),
+            header.kind,
             visuals.text_color(),
-        );
+            self.ui.pixels_per_point(),
+        ));
 
         let mut right = self.ui.new_child(
             egui::UiBuilder::new()

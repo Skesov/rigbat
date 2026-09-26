@@ -12,9 +12,9 @@ comes from is in [`architecture.md`](architecture.md#data-flow-per-surface).
 | Follow the session, never theme it       | Both windows take the scheme, accent and text scale from xdg-desktop-portal and re-apply every change live. The accent becomes egui's selection colour; the text scale becomes the zoom factor and grows the window size. The tray icon follows the scheme. The one colour setting, the palette, picks status colours inside the scheme; window surfaces and text stay the session's ([Palettes](#palettes)).                                                                                      | `src/gui/mod.rs`, `src/appearance/mod.rs`, `src/palette.rs`                             |
 | Cap the content width                    | Both settings tabs are a centred column at most `CONTENT_MAX_WIDTH` wide (`page`); a wider window adds margin, not longer rows. The dashboard has a fixed width.                                                                                                                                                                                                                                                                                                                                   | `src/settings/widgets.rs`                                                               |
 | One trailing control per row             | `Rows::row` takes exactly one `control`. A secondary action on the same setting sits in the subtitle as a small button (the pin's "Clear" in the Tray group, a device override's "↺").                                                                                                                                                                                                                                                                                                             | `src/settings/widgets.rs`, `src/settings/general_tab.rs`, `src/settings/devices_tab.rs` |
-| Status text carries a sign, not only hue | `charge_value` prefixes a low reading with `LOW_SIGN` (⚠) and a charging one with `CHARGING_SIGN` (⚡). The dashboard also colours a low value; the tray menu has no colour and relies on the sign.                                                                                                                                                                                                                                                                                                | `src/domain/text.rs`                                                                    |
-| Same words on every surface              | The dashboard row, the Devices tab row, the tray menu row and the tray tooltip are built from `charge_value` and `status_note` (`device_line` joins them); both windows draw a device with the same kind glyph (`gui::kind_glyph`) and value style (`gui::charge_value_text`). Devices are ordered by `roster_order`: online first, then by name, ignoring case.                                                                                                                                   | `src/domain/text.rs`, `src/domain/roster.rs`, `src/gui/mod.rs`                          |
-| A low reading never gets quieter         | A retained (not live) reading is dimmed by `palette::DIM` on the tray icon and the dashboard bar, except when it is low.                                                                                                                                                                                                                                                                                                                                                                           | `src/icon/mod.rs`, `src/dashboard/mod.rs`                                               |
+| Status text carries a sign, not only hue | `charge_value` prefixes a low reading with `LOW_SIGN` (⚠) and a charging one with `CHARGING_SIGN` (⚡). The dashboard also colours a low value; the tray menu has no colour and relies on the sign. The tray icon draws the same signs as shapes in every display mode (`status_mark`: a bolt, a warning triangle), so charging and low differ from an ordinary reading in a single colour.                                                                                                        | `src/domain/text.rs`, `src/icon/mod.rs`                                                 |
+| Same words on every surface              | The dashboard row, the Devices tab row, the tray menu row and the tray tooltip are built from `charge_value` and `status_note` (`device_line` joins them); a device's kind is the same 7 × 7 silhouette (`icon::kind_glyph`) in the tray icon's corner and in both windows (`gui::kind_glyph` paints it as a mesh); both windows use one value style (`gui::charge_value_text`). Devices are ordered by `roster_order`: online first, then by name, ignoring case.                                 | `src/domain/text.rs`, `src/domain/roster.rs`, `src/gui/mod.rs`                          |
+| A low reading never gets quieter         | A retained (not live) reading is dimmed by `palette::DIM` on the tray icon's fill and the dashboard bar, and the tray icon marks it with a dashed outline or dotted digits ([Tray icon](#tray-icon)) — except when it is low, which renders exactly as a live one.                                                                                                                                                                                                                                 | `src/icon/mod.rs`, `src/dashboard/mod.rs`                                               |
 | Contrast is measured, not eyeballed      | `palette::contrast_ratio` (WCAG 2.1) backs tests: secondary text (`gui::secondary_text`, one rule for both windows) ≥ 4.5:1 on the panel and the group fill, text on the accent ≥ 4.5:1 (`readable_on` picks black or white). egui's weak text colour misses 4.5:1 on dark, so secondary text is the body colour at a smaller size. Palette colours pass through `palette::readable`: text ≥ 4.5:1, bars and icon marks ≥ 3:1 as graphical objects, dimmed included ([Readability](#readability)). | `src/palette.rs`, `src/gui/mod.rs`, `src/settings/widgets.rs`, `src/icon/mod.rs`        |
 | Custom widgets are accessible widgets    | `switch`, `tile`, the tabs and an expander row report a role and label through `widget_info` (checkbox, radio button, selectable label, collapsing header with its expanded state), take keyboard focus and draw a focus ring. A glyph-only button announces a word ("↺" is "Use the default"). Both windows export an AT-SPI tree through eframe's `accesskit` feature.                                                                                                                           | `src/settings/widgets.rs`, `Cargo.toml`                                                 |
 
@@ -40,7 +40,7 @@ are private constants in `src/dashboard/mod.rs`; tokens both windows use are `pu
 | `gui::ROW_HEIGHT`           | 48        | Minimum row height in a group; a dashboard row; an expander row                           |
 | `NESTED_ROW_HEIGHT`         | 36        | Minimum height of a row under an expanded row                                             |
 | `gui::GLYPH_COLUMN`         | 30        | Kind-glyph column, dashboard and Devices rows; the indent of nested rows                  |
-| `gui::GLYPH_SIZE`           | 20        | Kind glyph                                                                                |
+| `gui::GLYPH_SIZE`           | 21        | Kind glyph: 7 × 7 cells of 3                                                              |
 | `CHEVRON_SIZE`              | 10        | Expander chevron box                                                                      |
 | `ROW_PADDING_X`             | 14        | Row inset from the group box; half of it insets group titles and footers                  |
 | `ROW_PADDING_Y`             | 8         | Least vertical padding around a row's text                                                |
@@ -110,13 +110,13 @@ selection colour with the accent (`gui::apply`). Status colours come from the pa
 
 `palette` in `config.json` (`domain::Palette`, default `catppuccin`), picked on the General tab.
 Light or dark still follows the portal; the palette picks the colours inside it. The tables are
-`palette::swatches`, as each palette's authors publish them:
+`palette::swatches`, in colours each palette's authors publish (one role substituted, see below):
 
 | Palette    | Scheme | bg        | fg        | charging  | low       | warn      | track     |
 | ---------- | ------ | --------- | --------- | --------- | --------- | --------- | --------- |
 | Catppuccin | Light  | `#eff1f5` | `#4c4f69` | `#40a02b` | `#d20f39` | `#df8e1d` | `#ccd0da` |
 | Catppuccin | Dark   | `#1e1e2e` | `#cdd6f4` | `#a6e3a1` | `#f38ba8` | `#f9e2af` | `#45475a` |
-| Everforest | Light  | `#fdf6e3` | `#5c6a72` | `#8da101` | `#f85552` | `#dfa000` | `#e6e2cc` |
+| Everforest | Light  | `#fdf6e3` | `#5c6a72` | `#35a77c` | `#f85552` | `#dfa000` | `#e6e2cc` |
 | Everforest | Dark   | `#2d353b` | `#d3c6aa` | `#a7c080` | `#e67e80` | `#dbbc7f` | `#475258` |
 | GNOME      | Light  | `#fafafb` | `#2e3436` | `#26a269` | `#c01c28` | `#e5a50a` | `#deddda` |
 | GNOME      | Dark   | `#222226` | `#ffffff` | `#33d17a` | `#f66151` | `#f6d32d` | `#3d3846` |
@@ -129,6 +129,11 @@ Light or dark still follows the portal; the palette picks the colours inside it.
   only behind the swatches of the General tab's palette tiles.
 - **One dim factor.** `palette::DIM` (0.70) dims the icon's retained fill, the offline icon, and a
   dashboard bar and track that are not live. A low reading never dims.
+- **Substitutions.** Everforest light charging is the palette's aqua `#35a77c`, not its green
+  `#8da101`: lifted to 3:1 on a light panel the green turned olive (`#5a6701` on the icon), the
+  aqua stays a green (`#236e52`). Nord dark low stays red `#bf616a` (4.08:1 on the nominal dark
+  panel as is); orange `#d08770` would read louder (5.86:1) but it is Nord light's warn, and it
+  needs a lift as window text too (3.88:1 → `#d69783`), so it would not be less muted there.
 
 #### Readability
 
@@ -158,8 +163,8 @@ ratio before → after):
 | Everforest light | warn (text)     | `#dfa000` → `#866100` | 1.84 → 4.52 |
 | Everforest light | fg (bar)        | `#5c6a72` → `#58656d` | 2.88 → 3.02 |
 | Everforest light | fg (icon)       | `#5c6a72` → `#546169` | 2.79 → 3.01 |
-| Everforest light | charging (bar)  | `#8da101` → `#5e6b01` | 1.98 → 3.03 |
-| Everforest light | charging (icon) | `#8da101` → `#5a6701` | 1.89 → 3.01 |
+| Everforest light | charging (bar)  | `#35a77c` → `#257356` | 2.05 → 3.01 |
+| Everforest light | charging (icon) | `#35a77c` → `#236e52` | 1.95 → 3.01 |
 | Everforest dark  | low (text)      | `#e67e80` → `#e98c8d` | 4.02 → 4.52 |
 | GNOME light      | warn (text)     | `#e5a50a` → `#866106` | 1.73 → 4.52 |
 | GNOME light      | charging (bar)  | `#26a269` → `#1b754c` | 2.16 → 3.03 |
@@ -173,7 +178,7 @@ Every other table colour is used as published.
 
 ### Typography
 
-egui's bundled fonts; no font is loaded.
+egui's bundled fonts; no font is loaded. The emoji fonts in egui's default set stay: `LOW_SIGN`, `CHARGING_SIGN`, `REFRESH` and "↺" are text and come from them. The kind glyph is not text ([Tray icon](#tray-icon)).
 
 | Role                     | Style                                                         | Where                          |
 | ------------------------ | ------------------------------------------------------------- | ------------------------------ |
@@ -185,7 +190,6 @@ egui's bundled fonts; no font is loaded.
 | Dashboard name           | Body, `.strong()`, truncated                                  | `render_row`                   |
 | Devices row name         | Body, truncated                                               | `Rows::expander`               |
 | Dashboard note           | `NOTE_SIZE` (12), `gui::secondary_text`                       | `render_row`                   |
-| Kind glyph               | `gui::GLYPH_SIZE` (20)                                        | `render_row`, `Rows::expander` |
 
 ## Components
 
@@ -288,7 +292,7 @@ running tray's state over the session bus and never polls a device.
 Built by `RigbatTray::menu` from a `View` (`src/tray/item.rs`).
 
 - One row per visible device, in roster order: `device_line` (name, value, note) with the kind's
-  freedesktop icon (`freedesktop_icon_name`).
+  freedesktop icon (`freedesktop_icon_name`); `DeviceKind::Other` is `battery`, as in the windows.
 - Single icon (`TrayMode::PrimaryOnly`): "Automatic" then every device as a `CheckmarkItem`. The
   checked item is what the icon shows; clicking a device pins it, "Automatic" clears the pin.
 - One icon per device (`TrayMode::PerDevice`): device rows are plain `StandardItem`s that open the
@@ -308,12 +312,21 @@ Rendered by `TinySkiaRenderer` behind the `IconRenderer` port (`src/icon/mod.rs`
   `PercentInIcon` (battery outline with digits inside).
 - Colour from `PrimaryStatus` through `Theme::new(palette, scheme)` ([Readability](#readability)).
   Offline is a crossed battery (`draw_cross_line`) in the neutral at `DIM`.
-- A retained reading dims only the fill, by `DIM`; outline, nub, digits and glyph stay at full
-  colour. `Low` is never dimmed.
+- Status marks (`status_mark`), drawn whole in the full status colour behind a clear halo: a bolt
+  for charging, a warning triangle for low — the icon's `CHARGING_SIGN` and `LOW_SIGN`. `IconOnly`
+  puts the mark in the body, left of the kind glyph; `PercentOnly` bottom-left, opposite the
+  kind glyph, with the digits above both; `PercentInIcon` on the battery's top edge, above the
+  digits. The mark never meets the kind glyph or its ring, and cells are whole pixels (1 px at
+  22 px).
+- A retained reading: a dashed outline (`IconOnly`, `PercentInIcon`), dotted digits
+  (`PercentOnly`, which has no outline), and in `IconOnly` the fill dimmed by `DIM`; the status
+  mark, nub and glyph stay solid at full colour. `Low` renders as if live.
 - The icon cache key (`IconKey`) holds the resolved `Theme`, so a palette change re-renders every
   icon.
-- The device-kind corner glyph (`maybe_draw_kind_glyph`) sits bottom-right; `DeviceKind::Other`
-  gets none. In the percent modes the digits are drawn after the glyph and win the overlap.
+- The device-kind corner glyph (`maybe_draw_kind_glyph`) sits bottom-right, drawn from
+  `icon::kind_glyph`, the bitmap both windows paint. `DeviceKind::Other` is a battery there and in
+  the menu (`battery`); the icon, itself a battery, draws no corner glyph for it. In the percent
+  modes the digits are drawn after the glyph and win the overlap.
 - COSMIC shows no hover tooltip, so the SNI title names the device (`Tray::title`) and the glyph
   identifies its kind. The tooltip carries `device_line` for hosts that show it.
 - The General tab's style tiles are rendered by the same renderer in the chosen palette
@@ -395,7 +408,15 @@ Window tests run headless on `src/egui_test.rs` and assert what was painted, not
   `every_palette_icon_colour_clears_3_to_1_on_the_nominal_panel_dimmed_included`,
   `a_low_reading_paints_its_value_and_bar_in_the_palette_low_colour`,
   `a_switch_knob_takes_its_colours_from_the_theme`,
-  `apply_sets_theme_zoom_and_accent_in_both_styles`, `every_glyph_is_in_the_bundled_fonts`,
+  `apply_sets_theme_zoom_and_accent_in_both_styles`, `every_sign_is_in_the_bundled_fonts`,
   `the_reset_glyph_is_in_the_bundled_fonts`.
+- Kind glyphs are meshes, not text: `egui_test::painted_kind_glyphs` recognises each painted glyph
+  by its cells (`every_kind_paints_the_tray_icon_glyph_whole` in the dashboard and the Devices
+  tab; `the_window_glyph_is_the_tray_bitmap_on_whole_pixels`).
+- The tray icon is tested on its pixels: `charging_and_low_differ_from_ok_in_shape_alone` and
+  `a_retained_reading_differs_in_shape_in_every_mode` render with a one-colour theme and compare
+  masks; `the_status_mark_is_whole_and_clear_of_the_kind_glyph`,
+  `the_corner_glyph_is_the_shared_kind_bitmap`. `cargo test dump_icons -- --ignored` writes
+  contact sheets of every state, mode, palette and scheme to the temp directory.
 - The tray menu is tested as text: `describe` renders it one line per item (`[x]` checkmark,
   `#icon`, `---` separator) and a test compares whole menus per mode.

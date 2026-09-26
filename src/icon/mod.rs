@@ -2,7 +2,8 @@ use crate::appearance::ColorScheme;
 use crate::domain::{DeviceKind, DisplayMode, Palette, PrimaryStatus};
 use crate::palette::{self, DIM, GRAPHIC_CONTRAST, Rgb};
 use tiny_skia::{
-    Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform,
+    Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, StrokeDash,
+    Transform,
 };
 
 pub trait IconRenderer: Send + Sync {
@@ -123,47 +124,52 @@ impl IconRenderer for TinySkiaRenderer {
         mode: DisplayMode,
         stale: bool,
     ) -> Vec<ksni::Icon> {
-        let (color_rgba, percent, is_offline) = match status {
-            PrimaryStatus::Offline => (theme.offline, None, true),
-            PrimaryStatus::Charging { percent } => (theme.charging, Some(percent), false),
-            PrimaryStatus::Low { percent } => (theme.low, Some(percent), false),
-            PrimaryStatus::Ok { percent } => (theme.normal, Some(percent), false),
+        // Offline draws the crossed battery in every mode; `resolve_for` never
+        // pairs it with `stale`.
+        let (rgba, percent) = match status {
+            PrimaryStatus::Offline => {
+                return self
+                    .sizes
+                    .iter()
+                    .filter_map(|&size| render_offline_battery(size, theme.offline, kind))
+                    .collect();
+            }
+            PrimaryStatus::Charging { percent } => (theme.charging, percent),
+            PrimaryStatus::Low { percent } => (theme.low, percent),
+            PrimaryStatus::Ok { percent } => (theme.normal, percent),
         };
-
-        // Offline always draws the offline battery regardless of mode.
-        // `Offline` + `stale` cannot happen by construction (resolve_for
-        // never sets stale alongside Offline), but if it did, this path
-        // draws the plain offline battery rather than dimming an
-        // already-empty icon.
-        if is_offline {
-            return self
-                .sizes
-                .iter()
-                .filter_map(|&size| render_offline_battery(size, color_rgba, kind))
-                .collect();
-        }
-
-        // A low battery that has gone stale is exactly the reading that must
-        // not get quieter, so `Low` is never dimmed even when stale. Every
-        // other status dims the fill bar only — the outline and the digits
-        // carry the reading and stay at full colour/contrast.
-        let dim_fill = stale && !matches!(status, PrimaryStatus::Low { .. });
-        let fill_rgba = if dim_fill {
-            dimmed(color_rgba)
-        } else {
-            color_rgba
+        let retained = stale && !matches!(status, PrimaryStatus::Low { .. });
+        let look = Look {
+            color: color(rgba),
+            fill: color(if retained { dimmed(rgba) } else { rgba }),
+            percent,
+            kind,
+            mark: status_mark(status),
+            retained,
         };
-
-        let fill_ratio = percent.map_or(0.0, |p| f32::from(p) / 100.0);
-        let pct = percent.unwrap_or(0);
-
         self.sizes
             .iter()
-            .filter_map(|&size| {
-                render_mode(size, color_rgba, fill_rgba, fill_ratio, pct, mode, kind)
-            })
+            .filter_map(|&size| render_mode(size, mode, &look))
             .collect()
     }
+}
+
+/// One reading, whatever the size. A low reading is never `retained`: it
+/// must not get quieter.
+struct Look {
+    /// Outline, nub, digits, status mark and kind glyph — never dimmed.
+    color: Color,
+    /// The fill bar, dimmed by `DIM` when retained.
+    fill: Color,
+    percent: u8,
+    kind: Option<DeviceKind>,
+    mark: Option<Bitmap>,
+    /// Not live: a dashed outline, or dotted digits where there is no outline.
+    retained: bool,
+}
+
+fn color([r, g, b, a]: [u8; 4]) -> Color {
+    Color::from_rgba8(r, g, b, a)
 }
 
 // ---------------------------------------------------------------------------
@@ -179,32 +185,25 @@ fn wide_width(height: u32) -> u32 {
     ((height as f32) * WIDE_ASPECT).round() as u32
 }
 
-/// Renders one icon for the given mode and size. `fill_rgba` is the colour
-/// used for the fill bar (may be dimmed for a stale reading); `color_rgba`
-/// is the full colour used for the outline, nub, digits and glyph, which are
-/// never dimmed. Returns `None` only if `Pixmap::new` fails (does not happen
-/// for sizes ≤ 64).
-fn render_mode(
-    size: u32,
-    color_rgba: [u8; 4],
-    fill_rgba: [u8; 4],
-    fill_ratio: f32,
-    percent: u8,
-    mode: DisplayMode,
-    kind: Option<DeviceKind>,
-) -> Option<ksni::Icon> {
-    let [r, g, b, a] = color_rgba;
-    let color = Color::from_rgba8(r, g, b, a);
-    let [fr, fg, fb, fa] = fill_rgba;
-    let fill_color = Color::from_rgba8(fr, fg, fb, fa);
-    let w = wide_width(size);
-
+/// Returns `None` only if `Pixmap::new` fails (does not happen for sizes ≤ 64).
+fn render_mode(size: u32, mode: DisplayMode, look: &Look) -> Option<ksni::Icon> {
+    let mut pixmap = Pixmap::new(wide_width(size), size)?;
+    let g = battery_geometry(pixmap.width() as f32, pixmap.height() as f32);
+    let glyph = has_kind_glyph(look.kind);
     match mode {
         DisplayMode::IconOnly => {
-            let mut pixmap = Pixmap::new(w, size)?;
-            draw_battery(&mut pixmap, fill_ratio, fill_color, color, false);
-            maybe_draw_kind_glyph(&mut pixmap, kind, size, color);
-            Some(pixmap_to_icon(pixmap))
+            draw_battery_fill(&mut pixmap, &g, f32::from(look.percent) / 100.0, look.fill);
+            draw_battery_outline(&mut pixmap, &g, look.color, look.retained);
+            draw_battery_nub(&mut pixmap, &g, look.color);
+            if let Some(mark) = look.mark {
+                draw_mark(
+                    &mut pixmap,
+                    mark,
+                    mark_area(size, mode, mark, glyph),
+                    look.color,
+                );
+            }
+            maybe_draw_kind_glyph(&mut pixmap, look.kind, size, look.color);
         }
         // The glyph goes on before the digits in both percent modes. Its first
         // step punches a transparent ring around itself, and the canvas is
@@ -213,68 +212,44 @@ fn render_mode(
         // part of the last digit (21 px at 22 px, 163 px at 64 px, measured).
         // Digits carry the reading and the glyph only identifies the device,
         // so where they collide the digits win.
-        DisplayMode::PercentOnly => {
-            let mut pixmap = Pixmap::new(w, size)?;
-            maybe_draw_kind_glyph(&mut pixmap, kind, size, color);
-            draw_percent_centered(&mut pixmap, percent, color);
-            Some(pixmap_to_icon(pixmap))
-        }
-        DisplayMode::PercentInIcon => {
-            let mut pixmap = Pixmap::new(w, size)?;
-            // Draw battery outline only (no fill bar — number takes priority).
-            draw_battery_outline_only(&mut pixmap, color);
-            maybe_draw_kind_glyph(&mut pixmap, kind, size, color);
-            draw_percent_in_battery(&mut pixmap, percent, color);
-            Some(pixmap_to_icon(pixmap))
+        DisplayMode::PercentOnly | DisplayMode::PercentInIcon => {
+            let outline = mode == DisplayMode::PercentInIcon;
+            if outline {
+                draw_battery_outline(&mut pixmap, &g, look.color, look.retained);
+                draw_battery_nub(&mut pixmap, &g, look.color);
+            }
+            maybe_draw_kind_glyph(&mut pixmap, look.kind, size, look.color);
+            if let Some(mark) = look.mark {
+                draw_mark(
+                    &mut pixmap,
+                    mark,
+                    mark_area(size, mode, mark, glyph),
+                    look.color,
+                );
+            }
+            let dotted = look.retained && !outline;
+            let region = digit_region(size, mode, look.mark);
+            draw_percent_in_region(&mut pixmap, region, look.percent, look.color, dotted);
         }
     }
+    Some(pixmap_to_icon(pixmap))
 }
 
-/// Renders an offline (crossed) battery icon, matching the online width.
-/// Offline is never dimmed, so fill and mark share one colour.
-fn render_offline_battery(
-    n: u32,
-    color_rgba: [u8; 4],
-    kind: Option<DeviceKind>,
-) -> Option<ksni::Icon> {
+/// The crossed battery, in the offline colour, which is already dimmed.
+fn render_offline_battery(n: u32, rgba: [u8; 4], kind: Option<DeviceKind>) -> Option<ksni::Icon> {
     let mut pixmap = Pixmap::new(wide_width(n), n)?;
-    let [r, g, b, a] = color_rgba;
-    let color = Color::from_rgba8(r, g, b, a);
-    draw_battery(&mut pixmap, 0.0, color, color, true);
-    maybe_draw_kind_glyph(&mut pixmap, kind, n, color);
+    let c = color(rgba);
+    let g = battery_geometry(pixmap.width() as f32, pixmap.height() as f32);
+    draw_battery_outline(&mut pixmap, &g, c, false);
+    draw_battery_nub(&mut pixmap, &g, c);
+    draw_cross_line(&mut pixmap, &g, c);
+    maybe_draw_kind_glyph(&mut pixmap, kind, n, c);
     Some(pixmap_to_icon(pixmap))
 }
 
 // ---------------------------------------------------------------------------
 // Battery drawing helpers
 // ---------------------------------------------------------------------------
-
-/// Draws the full battery (outline + fill + nub + optional cross line)
-/// into `pixmap`. The battery occupies the full pixmap area. `fill_color`
-/// paints the fill bar only; `mark_color` paints the outline, nub and cross
-/// line — the meaning-bearing marks, which are never dimmed.
-fn draw_battery(
-    pixmap: &mut Pixmap,
-    fill_ratio: f32,
-    fill_color: Color,
-    mark_color: Color,
-    is_offline: bool,
-) {
-    let g = battery_geometry(pixmap.width() as f32, pixmap.height() as f32);
-    draw_battery_fill(pixmap, &g, fill_ratio, fill_color);
-    draw_battery_outline(pixmap, &g, mark_color);
-    draw_battery_nub(pixmap, &g, mark_color);
-    if is_offline {
-        draw_cross_line(pixmap, &g, mark_color);
-    }
-}
-
-/// Draws only the battery outline + nub (no fill bar). Used for `PercentInIcon`.
-fn draw_battery_outline_only(pixmap: &mut Pixmap, color: Color) {
-    let g = battery_geometry(pixmap.width() as f32, pixmap.height() as f32);
-    draw_battery_outline(pixmap, &g, color);
-    draw_battery_nub(pixmap, &g, color);
-}
 
 /// Geometry of the battery body within a `w`×`h` canvas.
 struct BatteryGeom {
@@ -336,13 +311,19 @@ fn draw_battery_fill(pixmap: &mut Pixmap, g: &BatteryGeom, fill_ratio: f32, colo
     }
 }
 
-fn draw_battery_outline(pixmap: &mut Pixmap, g: &BatteryGeom, color: Color) {
+fn draw_battery_outline(pixmap: &mut Pixmap, g: &BatteryGeom, color: Color, dashed: bool) {
     let paint = solid_paint(color);
-
     let stroke = Stroke {
         width: g.sw,
-        line_cap: LineCap::Square,
+        line_cap: if dashed {
+            LineCap::Butt
+        } else {
+            LineCap::Square
+        },
         line_join: LineJoin::Miter,
+        dash: dashed
+            .then(|| StrokeDash::new(vec![g.sw * 2.0, g.sw * 1.25], 0.0))
+            .flatten(),
         ..Stroke::default()
     };
 
@@ -392,196 +373,236 @@ fn draw_cross_line(pixmap: &mut Pixmap, g: &BatteryGeom, color: Color) {
 }
 
 // ---------------------------------------------------------------------------
-// Device-kind corner glyph
+// Bitmaps: kind glyphs and status marks
 // ---------------------------------------------------------------------------
 
-/// Calls `draw_kind_glyph` only for drawable kinds; no-op for `None`/`Other`.
-///
-/// The glyph occupies the bottom-right corner. That corner is not free in the
-/// percent modes — the canvas is square and the centred digit block reaches
-/// into it — so `render_mode` draws the glyph *before* the digits there and
-/// lets the digits win the overlap.
-fn maybe_draw_kind_glyph(pixmap: &mut Pixmap, kind: Option<DeviceKind>, size: u32, color: Color) {
-    let k = match kind {
-        Some(DeviceKind::Mouse) => DeviceKind::Mouse,
-        Some(DeviceKind::Keyboard) => DeviceKind::Keyboard,
-        Some(DeviceKind::Headset) => DeviceKind::Headset,
-        Some(DeviceKind::Controller) => DeviceKind::Controller,
-        _ => return, // None or Other → no glyph
-    };
-
-    let glyph = ((size as f32 / 3.0).round() as u32).max(6);
-    let margin = ((size as f32 / 22.0).round() as u32).max(1);
-
-    let x0 = size.saturating_sub(glyph + margin);
-    let y0 = size.saturating_sub(glyph + margin);
-
-    draw_kind_glyph(pixmap, k, x0, y0, glyph, color);
+/// A one-colour pixel drawing: bit `cols - 1 - c` of `rows[r]` lights cell `(c, r)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bitmap {
+    pub cols: u32,
+    pub rows: &'static [u8],
 }
 
-/// Draws a single-color device-kind silhouette in the box at `(x0, y0, glyph×glyph)`.
-///
-/// Step 1: punch a 1px transparent ring around the box so the glyph reads
-/// against a full-charge battery fill without a background square.
-/// Step 2: draw the silhouette in `color` using filled `Rect`s, `anti_alias = false`.
-fn draw_kind_glyph(
-    pixmap: &mut Pixmap,
-    kind: DeviceKind,
-    x0: u32,
-    y0: u32,
-    glyph: u32,
-    color: Color,
-) {
-    // --- knockout ring (1px transparent border around the glyph box) ---
-    let pw = pixmap.width();
-    let ph = pixmap.height();
-    let ko_x = x0.saturating_sub(1);
-    let ko_y = y0.saturating_sub(1);
-    let ko_w = (glyph + 2).min(pw.saturating_sub(ko_x));
-    let ko_h = (glyph + 2).min(ph.saturating_sub(ko_y));
-    if ko_w > 0
-        && ko_h > 0
-        && let Some(rect) = Rect::from_xywh(ko_x as f32, ko_y as f32, ko_w as f32, ko_h as f32)
-    {
-        let mut paint = Paint::default();
-        paint.set_color(Color::TRANSPARENT);
-        paint.anti_alias = false;
-        // BlendMode::Source clears pixels regardless of what is already there.
+impl Bitmap {
+    pub fn row_count(self) -> u32 {
+        self.rows.len() as u32
+    }
+
+    pub fn is_set(self, col: u32, row: u32) -> bool {
+        col < self.cols
+            && self
+                .rows
+                .get(row as usize)
+                .is_some_and(|bits| bits & (1 << (self.cols - 1 - col)) != 0)
+    }
+
+    /// Lit cells as `(col, row)`.
+    pub fn cells(self) -> impl Iterator<Item = (u32, u32)> {
+        (0..self.row_count())
+            .flat_map(move |row| (0..self.cols).map(move |col| (col, row)))
+            .filter(move |&(col, row)| self.is_set(col, row))
+    }
+}
+
+/// The device-kind silhouette, drawn by the tray icon's corner and by both
+/// windows. `Other` is a battery; the tray icon, itself a battery, skips it.
+pub fn kind_glyph(kind: DeviceKind) -> Bitmap {
+    let rows: &'static [u8] = match kind {
+        DeviceKind::Mouse => &[
+            0b0110110, 0b0110110, 0b0111110, 0b0111110, 0b0111110, 0b0111110, 0b0011100,
+        ],
+        DeviceKind::Keyboard => &[
+            0b0000000, 0b1111111, 0b1010101, 0b1111111, 0b1100011, 0b1111111, 0b0000000,
+        ],
+        DeviceKind::Headset => &[
+            0b0011100, 0b0100010, 0b1000001, 0b1000001, 0b1100011, 0b1100011, 0b1100011,
+        ],
+        DeviceKind::Controller => &[
+            0b0000000, 0b0111110, 0b1111111, 0b1011101, 0b1111111, 0b1100011, 0b1000001,
+        ],
+        DeviceKind::Other => &[
+            0b0000000, 0b1111110, 0b1110011, 0b1110011, 0b1110011, 0b1111110, 0b0000000,
+        ],
+    };
+    Bitmap { cols: 7, rows }
+}
+
+const BOLT: Bitmap = Bitmap {
+    cols: 5,
+    rows: &[
+        0b00011, 0b00110, 0b01100, 0b11111, 0b00110, 0b01100, 0b11000,
+    ],
+};
+
+const WARNING: Bitmap = Bitmap {
+    cols: 7,
+    rows: &[
+        0b0001000, 0b0011100, 0b0010100, 0b0110110, 0b0111110, 0b1110111, 0b1111111,
+    ],
+};
+
+/// The shape that tells charging and low apart from an ordinary reading
+/// without colour — the icon's `CHARGING_SIGN` and `LOW_SIGN`.
+fn status_mark(status: PrimaryStatus) -> Option<Bitmap> {
+    match status {
+        PrimaryStatus::Charging { .. } => Some(BOLT),
+        PrimaryStatus::Low { .. } => Some(WARNING),
+        PrimaryStatus::Ok { .. } | PrimaryStatus::Offline => None,
+    }
+}
+
+/// A whole-pixel box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Area {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+impl Area {
+    fn bottom(self) -> i32 {
+        self.y + self.h
+    }
+
+    fn grown(self, by: i32) -> Self {
+        Self {
+            x: self.x - by,
+            y: self.y - by,
+            w: self.w + 2 * by,
+            h: self.h + 2 * by,
+        }
+    }
+
+    fn rect(self) -> Option<Rect> {
+        Rect::from_xywh(self.x as f32, self.y as f32, self.w as f32, self.h as f32)
+    }
+}
+
+/// Each lit cell of `bitmap` stretched over `area`; cell edges round to whole
+/// pixels, so cells differ by at most one pixel and never leave a seam.
+fn cell_areas(bitmap: Bitmap, area: Area) -> impl Iterator<Item = Area> {
+    let edge = |origin: i32, span: i32, n: u32, i: u32| {
+        origin + (span as f32 * i as f32 / n as f32).round() as i32
+    };
+    bitmap.cells().map(move |(col, row)| {
+        let (x0, x1) = (
+            edge(area.x, area.w, bitmap.cols, col),
+            edge(area.x, area.w, bitmap.cols, col + 1),
+        );
+        let (y0, y1) = (
+            edge(area.y, area.h, bitmap.row_count(), row),
+            edge(area.y, area.h, bitmap.row_count(), row + 1),
+        );
+        Area {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
+    })
+}
+
+fn draw_bitmap(pixmap: &mut Pixmap, bitmap: Bitmap, area: Area, color: Color) {
+    let paint = solid_paint(color);
+    for rect in cell_areas(bitmap, area).filter_map(Area::rect) {
+        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+    }
+}
+
+/// Clears `area` to transparent, whatever was drawn there.
+fn knock_out(pixmap: &mut Pixmap, area: Area) {
+    if let Some(rect) = area.rect() {
+        let mut paint = solid_paint(Color::TRANSPARENT);
         paint.blend_mode = tiny_skia::BlendMode::Source;
         pixmap.fill_rect(rect, &paint, Transform::identity(), None);
     }
+}
 
-    // --- silhouette ---
-    match kind {
-        DeviceKind::Mouse => draw_glyph_mouse(pixmap, x0, y0, glyph, color),
-        DeviceKind::Keyboard => draw_glyph_keyboard(pixmap, x0, y0, glyph, color),
-        DeviceKind::Headset => draw_glyph_headset(pixmap, x0, y0, glyph, color),
-        DeviceKind::Controller => draw_glyph_controller(pixmap, x0, y0, glyph, color),
-        DeviceKind::Other => {}
+fn has_kind_glyph(kind: Option<DeviceKind>) -> bool {
+    kind.is_some_and(|k| k != DeviceKind::Other)
+}
+
+fn kind_glyph_margin(size: u32) -> i32 {
+    ((size as f32 / 22.0).round() as i32).max(1)
+}
+
+/// The bottom-right box of the kind glyph.
+fn kind_glyph_area(size: u32) -> Area {
+    let glyph = ((size as f32 / 3.0).round() as i32).max(6);
+    let at = (size as i32 - glyph - kind_glyph_margin(size)).max(0);
+    Area {
+        x: at,
+        y: at,
+        w: glyph,
+        h: glyph,
     }
 }
 
-/// Mouse: tall body (taller than wide) with a 1px top-centre notch.
-///
-/// Layout (origin = glyph box top-left):
-///   body   : x = ⌊g/4⌋ .. x+⌊g/2⌋, y = ⌊g/6⌋ .. g
-///   notch  : 1px gap at top-centre of body (body_x + body_w/2, body_y)
-fn draw_glyph_mouse(pixmap: &mut Pixmap, x0: u32, y0: u32, g: u32, color: Color) {
-    let paint = solid_paint(color);
-    let bx = x0 + g / 4;
-    let by = y0 + g / 6;
-    let bw = g / 2;
-    let bh = g - g / 6;
-    if bw == 0 || bh == 0 {
+/// The glyph clears its box and a 1 px ring first, so it reads against a
+/// full-charge fill without a background square. In the percent modes the
+/// digits reach this corner too; `render_mode` draws them last.
+fn maybe_draw_kind_glyph(pixmap: &mut Pixmap, kind: Option<DeviceKind>, size: u32, color: Color) {
+    let Some(kind) = kind.filter(|&k| has_kind_glyph(Some(k))) else {
         return;
-    }
-    // Full body
-    if let Some(rect) = Rect::from_xywh(bx as f32, by as f32, bw as f32, bh as f32) {
-        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-    }
-    // Top-centre notch: punch a 1px transparent cell at the top middle of the body.
-    let notch_x = bx + bw / 2;
-    if let Some(rect) = Rect::from_xywh(notch_x as f32, by as f32, 1.0, 1.0) {
-        let mut tp = Paint::default();
-        tp.set_color(Color::TRANSPARENT);
-        tp.anti_alias = false;
-        tp.blend_mode = tiny_skia::BlendMode::Source;
-        pixmap.fill_rect(rect, &tp, Transform::identity(), None);
+    };
+    let area = kind_glyph_area(size);
+    knock_out(pixmap, area.grown(1));
+    draw_bitmap(pixmap, kind_glyph(kind), area, color);
+}
+
+/// The clear halo around a status mark, and its gap to the digits.
+fn mark_ring(size: u32) -> i32 {
+    (size as i32 / 32).max(1)
+}
+
+/// Where the status mark goes: in `IconOnly` inside the body, left of the kind
+/// glyph; in `PercentOnly` bottom-left, opposite the kind glyph, under the
+/// digits; in `PercentInIcon` above the digits, over the battery's top edge.
+fn mark_area(size: u32, mode: DisplayMode, mark: Bitmap, glyph: bool) -> Area {
+    let (w, h) = (wide_width(size) as f32, size as f32);
+    let g = battery_geometry(w, h);
+    // Whole pixels per cell keep the mark crisp; the body has room for more.
+    let per_22 = match mode {
+        DisplayMode::IconOnly => 1.4,
+        DisplayMode::PercentOnly | DisplayMode::PercentInIcon => 1.0,
+    };
+    let cell = (h * per_22 / 22.0).floor().max(1.0) as i32;
+    let (width, height) = (mark.cols as i32 * cell, mark.row_count() as i32 * cell);
+    let (centre_x, y) = match mode {
+        DisplayMode::IconOnly => {
+            let left = g.bx + g.sw / 2.0;
+            let right = if glyph {
+                (kind_glyph_area(size).x - 1) as f32
+            } else {
+                g.bx + g.bw - g.sw / 2.0
+            };
+            (
+                (left + right) / 2.0,
+                (g.by + (g.bh - height as f32) / 2.0).round() as i32,
+            )
+        }
+        DisplayMode::PercentOnly => {
+            let margin = kind_glyph_margin(size);
+            ((margin + width / 2) as f32, size as i32 - margin - height)
+        }
+        DisplayMode::PercentInIcon => (g.bx + g.bw / 2.0, (h * 0.05) as i32),
+    };
+    Area {
+        x: (centre_x - width as f32 / 2.0).round() as i32,
+        y,
+        w: width,
+        h: height,
     }
 }
 
-/// Keyboard: wide flat rect (wider than tall) with 1px key-bump dots on the top edge.
-///
-/// Layout:
-///   body : x = 0 .. g, y = ⌊g/3⌋ .. ⌊2g/3⌋  (flat band in vertical centre)
-///   bumps: three 1px dots evenly spaced across the body, 1px above the body top
-fn draw_glyph_keyboard(pixmap: &mut Pixmap, x0: u32, y0: u32, g: u32, color: Color) {
-    let paint = solid_paint(color);
-    let bx = x0;
-    let by = y0 + g / 3;
-    let bw = g;
-    let bh = g / 3;
-    if bw == 0 || bh == 0 {
-        return;
+/// Knocks a halo out of whatever is under the mark, then draws it.
+fn draw_mark(pixmap: &mut Pixmap, mark: Bitmap, area: Area, color: Color) {
+    let ring = mark_ring(pixmap.height());
+    for cell in cell_areas(mark, area) {
+        knock_out(pixmap, cell.grown(ring));
     }
-    // Flat body
-    if let Some(rect) = Rect::from_xywh(bx as f32, by as f32, bw as f32, bh as f32) {
-        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-    }
-    // Key bumps: 3 dots 1px above body, evenly spaced
-    if by > y0 {
-        let dot_y = by - 1;
-        let spacing = bw / 4; // positions at 1/4, 2/4, 3/4 of bw
-        for i in 1..=3_u32 {
-            let dot_x = bx + spacing * i;
-            if let Some(rect) = Rect::from_xywh(dot_x as f32, dot_y as f32, 1.0, 1.0) {
-                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-            }
-        }
-    }
-}
-
-/// Headset: 1px-thick top arc (two corner pixels) + two short vertical earcup stems.
-///
-/// Layout:
-///   top bar : y = y0,          x = x0+1 .. x0+g-2  (headband row)
-///   stems   : x = x0, x0+g-1, y = y0+1 .. y0+⌊g/2⌋  (left and right earcup)
-fn draw_glyph_headset(pixmap: &mut Pixmap, x0: u32, y0: u32, g: u32, color: Color) {
-    let paint = solid_paint(color);
-    // Headband: top row from x+1 to x+g-2 (leave corner pixels transparent)
-    let bar_x = x0 + 1;
-    let bar_w = g.saturating_sub(2);
-    if bar_w > 0
-        && let Some(rect) = Rect::from_xywh(bar_x as f32, y0 as f32, bar_w as f32, 1.0)
-    {
-        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-    }
-    // Left earcup stem
-    let stem_h = g / 2;
-    if stem_h > 0 {
-        if let Some(rect) = Rect::from_xywh(x0 as f32, (y0 + 1) as f32, 1.0, stem_h as f32) {
-            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-        }
-        // Right earcup stem
-        let rx = x0 + g - 1;
-        if let Some(rect) = Rect::from_xywh(rx as f32, (y0 + 1) as f32, 1.0, stem_h as f32) {
-            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-        }
-    }
-}
-
-/// Controller: wide central rect with a 1px bump protruding from each side.
-///
-/// Layout:
-///   body  : x = 1 .. g-1, y = ⌊g/4⌋ .. ⌊3g/4⌋  (wide band)
-///   bumps : 1px×2px block on left (x=0) and right (x=g) at vertical centre
-fn draw_glyph_controller(pixmap: &mut Pixmap, x0: u32, y0: u32, g: u32, color: Color) {
-    let paint = solid_paint(color);
-    let bx = x0 + 1;
-    let by = y0 + g / 4;
-    let bw = g.saturating_sub(2);
-    let bh = g / 2;
-    if bw == 0 || bh == 0 {
-        return;
-    }
-    // Wide body
-    if let Some(rect) = Rect::from_xywh(bx as f32, by as f32, bw as f32, bh as f32) {
-        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-    }
-    // Side bumps at vertical centre
-    let mid_y = y0 + g / 2;
-    let bump_h = 2_u32.min(g / 4).max(1);
-    // Left bump
-    if let Some(rect) = Rect::from_xywh(x0 as f32, mid_y as f32, 1.0, bump_h as f32) {
-        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-    }
-    // Right bump
-    let right_x = x0 + g;
-    if right_x < pixmap.width()
-        && let Some(rect) = Rect::from_xywh(right_x as f32, mid_y as f32, 1.0, bump_h as f32)
-    {
-        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-    }
+    draw_bitmap(pixmap, mark, area, color);
 }
 
 // ---------------------------------------------------------------------------
@@ -634,8 +655,17 @@ fn digit_count(value: u8) -> usize {
 
 /// Draws the decimal digits of `value` (0–100) starting at pixel `(x, y)`.
 /// Each font cell is `cell` pixels wide and tall. Digits are 3 cells wide,
-/// 5 cells tall, separated by `DIGIT_GAP` of a cell.
-fn draw_number(pixmap: &mut Pixmap, value: u8, x: f32, y: f32, cell: f32, color: Color) {
+/// 5 cells tall, separated by `DIGIT_GAP` of a cell. `dotted` leaves a pixel
+/// between cells.
+fn draw_number(
+    pixmap: &mut Pixmap,
+    value: u8,
+    x: f32,
+    y: f32,
+    cell: f32,
+    color: Color,
+    dotted: bool,
+) {
     if cell <= 0.0 {
         return;
     }
@@ -650,6 +680,7 @@ fn draw_number(pixmap: &mut Pixmap, value: u8, x: f32, y: f32, cell: f32, color:
     };
 
     let digit_stride = 3.0 * cell + DIGIT_GAP * cell; // 3 columns + gap
+    let dot = if dotted { cell - 1.0 } else { cell };
     let paint = solid_paint(color);
 
     for (i, &d) in digits.iter().enumerate() {
@@ -660,7 +691,7 @@ fn draw_number(pixmap: &mut Pixmap, value: u8, x: f32, y: f32, cell: f32, color:
                 // MSB of the 3-bit mask is the leftmost column.
                 if mask & (0b100 >> col) != 0 {
                     let px = ox + col as f32 * cell;
-                    if let Some(rect) = Rect::from_xywh(px, oy, cell, cell) {
+                    if let Some(rect) = Rect::from_xywh(px, oy, dot, dot) {
                         pixmap.fill_rect(rect, &paint, Transform::identity(), None);
                     }
                 }
@@ -669,49 +700,78 @@ fn draw_number(pixmap: &mut Pixmap, value: u8, x: f32, y: f32, cell: f32, color:
     }
 }
 
-/// Draws `value` centered in the full pixmap canvas (`PercentOnly` mode).
-/// Digits fill most of the canvas for readability at small panel sizes.
-fn draw_percent_centered(pixmap: &mut Pixmap, value: u8, color: Color) {
-    let w = pixmap.width() as f32;
-    let h = pixmap.height() as f32;
-    draw_percent_in_region(pixmap, w * 0.05, h * 0.05, w * 0.90, h * 0.90, value, color);
+/// Where the digits may go, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Region {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
 }
 
-/// Draws `value` inside the battery body (`PercentInIcon` mode).
-fn draw_percent_in_battery(pixmap: &mut Pixmap, value: u8, color: Color) {
-    let g = battery_geometry(pixmap.width() as f32, pixmap.height() as f32);
-    let inner_x = g.bx + g.sw;
-    let inner_y = g.by + g.sw;
-    let inner_w = g.bw - g.sw * 2.0;
-    let inner_h = g.bh - g.sw * 2.0;
-    draw_percent_in_region(pixmap, inner_x, inner_y, inner_w, inner_h, value, color);
+/// Most of the canvas in `PercentOnly`, the battery's inside in
+/// `PercentInIcon`; in both, below a status mark.
+fn digit_region(size: u32, mode: DisplayMode, mark: Option<Bitmap>) -> Region {
+    let (w, h) = (wide_width(size) as f32, size as f32);
+    let region = match mode {
+        DisplayMode::PercentInIcon => {
+            let g = battery_geometry(w, h);
+            Region {
+                x: g.bx + g.sw,
+                y: g.by + g.sw,
+                w: g.bw - g.sw * 2.0,
+                h: g.bh - g.sw * 2.0,
+            }
+        }
+        DisplayMode::IconOnly | DisplayMode::PercentOnly => Region {
+            x: w * 0.05,
+            y: h * 0.05,
+            w: w * 0.90,
+            h: h * 0.90,
+        },
+    };
+    let Some(mark) = mark else {
+        return region;
+    };
+    let area = mark_area(size, mode, mark, false);
+    let ring = mark_ring(size);
+    if mode == DisplayMode::PercentOnly {
+        let bottom = ((area.y - ring) as f32).min(region.y + region.h);
+        return Region {
+            h: (bottom - region.y).max(0.0),
+            ..region
+        };
+    }
+    let top = ((area.bottom() + ring) as f32).max(region.y);
+    Region {
+        y: top,
+        h: (region.y + region.h - top).max(0.0),
+        ..region
+    }
 }
 
-/// Draws `value` centered inside an arbitrary region `(rx, ry, rw, rh)`,
-/// sized as large as fits in both width and height.
+/// Draws `value` centred in `region`, as large as fits in both width and height.
 fn draw_percent_in_region(
     pixmap: &mut Pixmap,
-    rx: f32,
-    ry: f32,
-    rw: f32,
-    rh: f32,
+    region: Region,
     value: u8,
     color: Color,
+    dotted: bool,
 ) {
     let n = digit_count(value);
 
     // Largest cell that fits 5 rows in height and the digit block in width.
-    let cell_from_h = rh / 5.0;
+    let cell_from_h = region.h / 5.0;
     let cols = n as f32 * 3.0 + (n.saturating_sub(1)) as f32 * DIGIT_GAP;
-    let cell_from_w = rw / cols;
+    let cell_from_w = region.w / cols;
     let cell = cell_from_h.min(cell_from_w).max(0.0);
 
     let total_w = digits_width(n, cell);
     let total_h = 5.0 * cell;
 
-    let x = rx + ((rw - total_w) / 2.0).max(0.0);
-    let y = ry + ((rh - total_h) / 2.0).max(0.0);
-    draw_number(pixmap, value, x, y, cell, color);
+    let x = region.x + ((region.w - total_w) / 2.0).max(0.0);
+    let y = region.y + ((region.h - total_h) / 2.0).max(0.0);
+    draw_number(pixmap, value, x, y, cell, color, dotted);
 }
 
 // ---------------------------------------------------------------------------
@@ -756,48 +816,45 @@ mod tests {
     /// centred and reaches the same bottom-right corner, so drawing the glyph
     /// after the digits erased part of the last digit — 21 px at 22 px, 163 px
     /// at 64 px, measured. `render_mode` draws the glyph first in the percent
-    /// modes; this asserts no digit pixel is lost at any published size.
+    /// modes, and the status mark above the digits; this asserts no digit
+    /// pixel is lost at any published size.
     #[test]
-    fn kind_glyph_never_erases_a_digit() {
-        use crate::domain::DisplayMode;
-
+    fn neither_the_kind_glyph_nor_the_status_mark_erases_a_digit() {
         let theme = Theme::dark();
-        let color = {
-            let [r, g, b, a] = theme.normal;
-            Color::from_rgba8(r, g, b, a)
-        };
         let renderer = TinySkiaRenderer {
-            sizes: vec![22, 32, 48, 64],
+            sizes: vec![22, 24, 32, 44, 48, 64],
         };
+        let statuses = [
+            (PrimaryStatus::Ok { percent: 88 }, 88, theme.normal),
+            (PrimaryStatus::Charging { percent: 88 }, 88, theme.charging),
+            (
+                PrimaryStatus::Charging { percent: 100 },
+                100,
+                theme.charging,
+            ),
+            (PrimaryStatus::Low { percent: 8 }, 8, theme.low),
+        ];
 
         for mode in [DisplayMode::PercentOnly, DisplayMode::PercentInIcon] {
-            let icons = renderer.render(
-                PrimaryStatus::Ok { percent: 88 },
-                Some(DeviceKind::Mouse),
-                &theme,
-                mode,
-                false,
-            );
+            for (status, percent, rgba) in statuses {
+                let icons = renderer.render(status, Some(DeviceKind::Mouse), &theme, mode, false);
+                for icon in icons {
+                    let (w, h) = (icon.width as u32, icon.height as u32);
+                    let mut digits = Pixmap::new(w, h).expect("digit mask pixmap");
+                    let region = digit_region(h, mode, status_mark(status));
+                    draw_percent_in_region(&mut digits, region, percent, color(rgba), false);
 
-            for icon in icons {
-                let (w, h) = (icon.width as u32, icon.height as u32);
-                let mut digits = Pixmap::new(w, h).expect("digit mask pixmap");
-                match mode {
-                    DisplayMode::PercentOnly => draw_percent_centered(&mut digits, 88, color),
-                    DisplayMode::PercentInIcon => draw_percent_in_battery(&mut digits, 88, color),
-                    DisplayMode::IconOnly => unreachable!("not under test"),
+                    let lost = digits
+                        .pixels()
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, pixel)| pixel.alpha() > 0 && icon.data[i * 4] == 0)
+                        .count();
+                    assert_eq!(
+                        lost, 0,
+                        "{mode:?} {status:?} at {w}x{h}: {lost} digit pixels erased"
+                    );
                 }
-
-                let mut lost = 0usize;
-                for (i, pixel) in digits.pixels().iter().enumerate() {
-                    if pixel.alpha() > 0 && icon.data[i * 4] == 0 {
-                        lost += 1;
-                    }
-                }
-                assert_eq!(
-                    lost, 0,
-                    "{mode:?} at {w}x{h}: the glyph erased {lost} digit pixels"
-                );
             }
         }
     }
@@ -806,85 +863,122 @@ mod tests {
         TinySkiaRenderer::default().sizes.clone()
     }
 
-    /// Debug helper: dump every mode to /tmp as PNG for visual inspection.
+    fn icon_pixmap(icon: &ksni::Icon) -> Pixmap {
+        let size =
+            tiny_skia::IntSize::from_wh(icon.width as u32, icon.height as u32).expect("icon size");
+        Pixmap::from_vec(icon_to_rgba(icon), size).expect("icon pixmap")
+    }
+
+    /// Every state × mode × palette × scheme on the nominal panel: each cell
+    /// holds the 22 px icon ×3, the 22 px icon and the 64 px icon.
+    fn contact_sheet(schemes: &[ColorScheme], kind: Option<DeviceKind>) -> Pixmap {
+        const ZOOM: u32 = 3;
+        const PAD: u32 = 6;
+        let states = [
+            (PrimaryStatus::Ok { percent: 75 }, false),
+            (PrimaryStatus::Charging { percent: 40 }, false),
+            (PrimaryStatus::Low { percent: 12 }, false),
+            (PrimaryStatus::Ok { percent: 75 }, true),
+            (PrimaryStatus::Charging { percent: 100 }, true),
+            (PrimaryStatus::Low { percent: 12 }, true),
+            (PrimaryStatus::Offline, false),
+        ];
+        let renderer = TinySkiaRenderer {
+            sizes: vec![22, 64],
+        };
+        let cell_w = 22 * ZOOM + 22 + 64 + 4 * PAD;
+        let cell_h = 64 + 2 * PAD;
+        let rows = schemes.len() * Palette::ALL.len() * DisplayMode::ALL.len();
+        let mut sheet =
+            Pixmap::new(cell_w * states.len() as u32, cell_h * rows as u32).expect("sheet");
+        let mut row = 0;
+        for &scheme in schemes {
+            let [r, g, b] = match scheme {
+                ColorScheme::Dark => NOMINAL_PANEL_DARK,
+                ColorScheme::Light => NOMINAL_PANEL_LIGHT,
+            };
+            for palette_choice in Palette::ALL {
+                let theme = Theme::new(palette_choice, scheme);
+                for mode in DisplayMode::ALL {
+                    let y = (row * cell_h) as f32;
+                    let band =
+                        Rect::from_xywh(0.0, y, sheet.width() as f32, cell_h as f32).expect("band");
+                    sheet.fill_rect(
+                        band,
+                        &solid_paint(Color::from_rgba8(r, g, b, 255)),
+                        Transform::identity(),
+                        None,
+                    );
+                    for (col, &(status, stale)) in states.iter().enumerate() {
+                        let icons = renderer.render(status, kind, &theme, mode, stale);
+                        let (small, large) = (icon_pixmap(&icons[0]), icon_pixmap(&icons[1]));
+                        let x = (col as u32 * cell_w + PAD) as f32;
+                        let paint = tiny_skia::PixmapPaint::default();
+                        let middle = y + (cell_h / 2 - 11) as f32;
+                        sheet.draw_pixmap(
+                            0,
+                            0,
+                            small.as_ref(),
+                            &paint,
+                            Transform::from_scale(ZOOM as f32, ZOOM as f32)
+                                .post_translate(x, y + (cell_h / 2 - 33) as f32),
+                            None,
+                        );
+                        sheet.draw_pixmap(
+                            0,
+                            0,
+                            small.as_ref(),
+                            &paint,
+                            Transform::from_translate(x + (22 * ZOOM + PAD) as f32, middle),
+                            None,
+                        );
+                        sheet.draw_pixmap(
+                            0,
+                            0,
+                            large.as_ref(),
+                            &paint,
+                            Transform::from_translate(
+                                x + (22 * ZOOM + 22 + 2 * PAD) as f32,
+                                y + PAD as f32,
+                            ),
+                            None,
+                        );
+                    }
+                    row += 1;
+                }
+            }
+        }
+        sheet
+    }
+
+    /// Writes contact sheets to the temp directory for visual review.
     /// Run with: `cargo test dump_icons -- --ignored`.
     #[test]
     #[ignore]
     fn dump_icons() {
-        use crate::domain::DeviceKind;
-        use tiny_skia::{IntSize, Pixmap};
-        let renderer = TinySkiaRenderer { sizes: vec![128] };
-
-        // Helper: convert ARGB (network byte order) back to premultiplied RGBA and save.
-        let save = |icon: &ksni::Icon, path: &str| {
-            let mut rgba = Vec::with_capacity(icon.data.len());
-            for px in icon.data.as_chunks::<4>().0.iter() {
-                rgba.extend_from_slice(&[px[1], px[2], px[3], px[0]]);
-            }
-            let size = IntSize::from_wh(icon.width as u32, icon.height as u32).unwrap();
-            let pm = Pixmap::from_vec(rgba, size).unwrap();
-            pm.save_png(path).unwrap();
-        };
-
-        // Without glyph — existing baseline.
-        let modes = [
-            ("icon_only", DisplayMode::IconOnly),
-            ("percent_only", DisplayMode::PercentOnly),
-            ("percent_in_icon", DisplayMode::PercentInIcon),
+        let dir = std::env::temp_dir();
+        let sheets = [
+            (
+                "rigbat-icons.png",
+                &[ColorScheme::Dark, ColorScheme::Light][..],
+            ),
+            ("rigbat-icons-dark.png", &[ColorScheme::Dark][..]),
+            ("rigbat-icons-light.png", &[ColorScheme::Light][..]),
         ];
-        for (name, mode) in modes {
-            let icons = renderer.render(
-                PrimaryStatus::Ok { percent: 90 },
-                None,
-                &Theme::dark(),
-                mode,
-                false,
-            );
-            save(&icons[0], &format!("/tmp/rigbat_{name}.png"));
+        for (name, schemes) in sheets {
+            contact_sheet(schemes, Some(DeviceKind::Mouse))
+                .save_png(dir.join(name))
+                .expect("saving the sheet");
         }
-
-        // With device-kind glyphs for visual review.
-        let kinds = [
-            ("mouse", Some(DeviceKind::Mouse)),
-            ("keyboard", Some(DeviceKind::Keyboard)),
-            ("headset", Some(DeviceKind::Headset)),
-            ("controller", Some(DeviceKind::Controller)),
-        ];
-        for (kname, kind) in kinds {
-            let icons = renderer.render(
-                PrimaryStatus::Ok { percent: 75 },
-                kind,
-                &Theme::dark(),
-                DisplayMode::IconOnly,
-                false,
-            );
-            save(&icons[0], &format!("/tmp/rigbat_glyph_{kname}.png"));
-        }
-
-        // Fresh/stale pairs, both themes: the point of comparison is whether a
-        // remembered reading still reads as a reading. `Low` appears here
-        // deliberately — it must come out identical in both columns.
-        let stale_cases = [
-            ("ok", PrimaryStatus::Ok { percent: 75 }),
-            ("charging", PrimaryStatus::Charging { percent: 75 }),
-            ("low", PrimaryStatus::Low { percent: 12 }),
-        ];
-        for (theme_name, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
-            for (case, status) in stale_cases {
-                for (suffix, stale) in [("fresh", false), ("stale", true)] {
-                    let icons = renderer.render(
-                        status,
-                        Some(DeviceKind::Mouse),
-                        &theme,
-                        DisplayMode::IconOnly,
-                        stale,
-                    );
-                    save(
-                        &icons[0],
-                        &format!("/tmp/rigbat_{theme_name}_{case}_{suffix}.png"),
-                    );
-                }
-            }
+        for kind in [
+            DeviceKind::Keyboard,
+            DeviceKind::Headset,
+            DeviceKind::Controller,
+            DeviceKind::Other,
+        ] {
+            contact_sheet(&[ColorScheme::Dark], Some(kind))
+                .save_png(dir.join(format!("rigbat-icons-{}.png", kind.as_str())))
+                .expect("saving the sheet");
         }
     }
 
@@ -1044,7 +1138,7 @@ mod tests {
         let size = 32_u32;
         let mut pixmap = Pixmap::new(size, size).unwrap();
         let color = Color::from_rgba8(255, 255, 255, 255);
-        draw_number(&mut pixmap, 5, 2.0, 2.0, 3.0, color);
+        draw_number(&mut pixmap, 5, 2.0, 2.0, 3.0, color, false);
 
         // At least one pixel must be non-transparent after drawing.
         let has_opaque = pixmap.data().as_chunks::<4>().0.iter().any(|px| px[3] != 0);
@@ -1057,7 +1151,7 @@ mod tests {
         let mut pixmap = Pixmap::new(size, size).unwrap();
         let color = Color::from_rgba8(255, 255, 255, 255);
         // Cell of 4 px → three digits use 3*(3*4 + 4) - 4 = 44 px wide, fits in 64.
-        draw_number(&mut pixmap, 100, 0.0, 0.0, 4.0, color);
+        draw_number(&mut pixmap, 100, 0.0, 0.0, 4.0, color, false);
         let has_opaque = pixmap.data().as_chunks::<4>().0.iter().any(|px| px[3] != 0);
         assert!(has_opaque);
     }
@@ -1811,6 +1905,151 @@ mod tests {
                     false,
                 );
                 assert_eq!(icons.len(), 1, "size {size}: {kind:?} did not render");
+            }
+        }
+    }
+
+    // --- status without colour ----------------------------------------------
+
+    const PUBLISHED_SIZES: [u32; 5] = [22, 24, 32, 44, 64];
+
+    /// Every role in one colour: what remains is shape.
+    fn monochrome() -> Theme {
+        let c = [0xff, 0xff, 0xff, 0xff];
+        Theme {
+            normal: c,
+            low: c,
+            charging: c,
+            offline: c,
+        }
+    }
+
+    fn masks(status: PrimaryStatus, mode: DisplayMode, stale: bool) -> Vec<Vec<bool>> {
+        TinySkiaRenderer {
+            sizes: PUBLISHED_SIZES.to_vec(),
+        }
+        .render(status, Some(DeviceKind::Mouse), &monochrome(), mode, stale)
+        .iter()
+        .map(|icon| {
+            icon.data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|px| px[0] > 0)
+                .collect()
+        })
+        .collect()
+    }
+
+    #[test]
+    fn charging_and_low_differ_from_ok_in_shape_alone() {
+        for mode in DisplayMode::ALL {
+            for percent in [8, 15, 88, 100] {
+                let ok = masks(PrimaryStatus::Ok { percent }, mode, false);
+                let charging = masks(PrimaryStatus::Charging { percent }, mode, false);
+                let low = masks(PrimaryStatus::Low { percent }, mode, false);
+                for (i, size) in PUBLISHED_SIZES.iter().enumerate() {
+                    let at = format!("{mode:?} {percent}% at {size} px");
+                    assert_ne!(ok[i], charging[i], "{at}: charging looks like ok");
+                    assert_ne!(ok[i], low[i], "{at}: low looks like ok");
+                    assert_ne!(charging[i], low[i], "{at}: charging looks like low");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_retained_reading_differs_in_shape_in_every_mode() {
+        for mode in DisplayMode::ALL {
+            for status in [
+                PrimaryStatus::Ok { percent: 88 },
+                PrimaryStatus::Charging { percent: 40 },
+                PrimaryStatus::Ok { percent: 100 },
+            ] {
+                let fresh = masks(status, mode, false);
+                let stale = masks(status, mode, true);
+                for (i, size) in PUBLISHED_SIZES.iter().enumerate() {
+                    assert_ne!(fresh[i], stale[i], "{mode:?} {status:?} at {size} px");
+                }
+            }
+        }
+    }
+
+    fn alpha_at(icon: &ksni::Icon, x: i32, y: i32) -> u8 {
+        if x < 0 || y < 0 || x >= icon.width || y >= icon.height {
+            return 0;
+        }
+        icon.data[((y * icon.width + x) * 4) as usize]
+    }
+
+    fn overlaps(a: Area, b: Area) -> bool {
+        a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+    }
+
+    /// The mark and its halo stay clear of the kind glyph and its ring, and
+    /// nothing drawn after the mark covers any of its pixels.
+    #[test]
+    fn the_status_mark_is_whole_and_clear_of_the_kind_glyph() {
+        for mode in DisplayMode::ALL {
+            for status in [
+                PrimaryStatus::Charging { percent: 100 },
+                PrimaryStatus::Charging { percent: 40 },
+                PrimaryStatus::Low { percent: 8 },
+            ] {
+                let mark = status_mark(status).expect("a mark");
+                for size in PUBLISHED_SIZES {
+                    let at = format!("{mode:?} {status:?} at {size} px");
+                    let area = mark_area(size, mode, mark, true);
+                    let halo = area.grown(mark_ring(size));
+                    assert!(
+                        !overlaps(halo, kind_glyph_area(size).grown(1)),
+                        "{at}: {halo:?} meets the glyph"
+                    );
+                    assert!(
+                        halo.x >= 0 && halo.y >= 0 && halo.bottom() <= size as i32,
+                        "{at}: {halo:?} leaves the canvas"
+                    );
+                    let icon = TinySkiaRenderer { sizes: vec![size] }
+                        .render(status, Some(DeviceKind::Mouse), &Theme::dark(), mode, false)
+                        .remove(0);
+                    for cell in cell_areas(mark, area) {
+                        for y in cell.y..cell.bottom() {
+                            for x in cell.x..cell.x + cell.w {
+                                assert_eq!(alpha_at(&icon, x, y), 255, "{at}: ({x}, {y}) lost");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The windows draw `kind_glyph` too; at 22 px each cell is one pixel.
+    #[test]
+    fn the_corner_glyph_is_the_shared_kind_bitmap() {
+        for kind in [
+            DeviceKind::Mouse,
+            DeviceKind::Keyboard,
+            DeviceKind::Headset,
+            DeviceKind::Controller,
+        ] {
+            let icon = TinySkiaRenderer { sizes: vec![22] }
+                .render(
+                    PrimaryStatus::Ok { percent: 100 },
+                    Some(kind),
+                    &Theme::dark(),
+                    DisplayMode::IconOnly,
+                    false,
+                )
+                .remove(0);
+            let area = kind_glyph_area(22);
+            let bitmap = kind_glyph(kind);
+            assert_eq!((area.w, area.h), (7, 7));
+            for row in 0..7 {
+                for col in 0..7 {
+                    let lit = alpha_at(&icon, area.x + col as i32, area.y + row as i32) > 0;
+                    assert_eq!(lit, bitmap.is_set(col, row), "{kind:?} cell ({col}, {row})");
+                }
             }
         }
     }
