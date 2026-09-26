@@ -41,22 +41,34 @@ jobs:
           manifest-file: .release-please-manifest.json
 
   # Builds the artifacts only once a release exists to attach them to. The
-  # shape follows ripgrep and fd: one tarball per target, the binary plus the
-  # files a user needs to install it, and a checksum beside each.
+  # shape follows ripgrep and fd: per target a bare binary, a tarball with the
+  # files a user needs to install it, .deb and .rpm, and a checksum beside each.
+  # Native runners per architecture (no cross image with X11/Wayland headers);
+  # Ubuntu 22.04 keeps the glibc floor at 2.35 so the binary runs on older
+  # distributions than the build host.
   artifacts:
     needs: release-please
     if: ${{ always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch') }}
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            deb_arch: amd64
+            rpm_arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            deb_arch: arm64
+            rpm_arch: aarch64
+    runs-on: ${{ matrix.runner }}
     # Replaces the workflow-level permissions for this job.
     permissions:
       contents: write
       id-token: write
       attestations: write
-    # One target for now. A cross-built aarch64 leg needs the X11/Wayland
-    # headers inside the cross image, and a matrix leg that fails on every
-    # release is worse than a target nobody has asked for yet.
     env:
-      TARGET: x86_64-unknown-linux-gnu
+      TARGET: ${{ matrix.target }}
       TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
     steps:
       - uses: actions/checkout@v7
@@ -75,29 +87,33 @@ jobs:
           targets: ${{ env.TARGET }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Build
         run: cargo build --release --locked --target "$TARGET"
 
-      # The tarball carries what `make install` would place: the binary, the
+      # The bare binary is for users who manage the udev rule and the service
+      # themselves; the tarball carries what `make install` would place — the
       # udev rule a USB HID device needs, the desktop entry, the systemd user
-      # unit and the icon. Without them a user who skips the repository has a
-      # binary that cannot see half their hardware.
-      - name: Stage the tarball
+      # unit and the icon.
+      - name: Stage the binary and the tarball
         id: stage
         run: |
           set -euo pipefail
           version="${TAG#v}"
           name="rigbat-v${version}-${TARGET}"
+          strip "target/${TARGET}/release/rigbat" || true
+          cp "target/${TARGET}/release/rigbat" "${name}"
+          sha256sum "${name}" > "${name}.sha256"
           staging="$(mktemp -d)/${name}"
           mkdir -p "${staging}"
           cp "target/${TARGET}/release/rigbat" "${staging}/"
-          strip "${staging}/rigbat" || true
-          cp README.md CHANGELOG.md "${staging}/"
-          cp LICENSE-MIT LICENSE-APACHE "${staging}/"
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "${staging}/"
           cp -r packaging "${staging}/"
           tar czf "${name}.tar.gz" -C "$(dirname "${staging}")" "${name}"
           sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          echo "binary=${name}" >> "$GITHUB_OUTPUT"
           echo "asset=${name}.tar.gz" >> "$GITHUB_OUTPUT"
 
       - uses: taiki-e/install-action@v2
@@ -115,8 +131,8 @@ jobs:
           sed 's|^ExecStart=.*rigbat tray$|ExecStart=/usr/bin/rigbat tray|' \
             packaging/rigbat.service > target/packaging/rigbat.service
           grep -qx 'ExecStart=/usr/bin/rigbat tray' target/packaging/rigbat.service
-          deb="rigbat_${version}-1_amd64.deb"
-          rpm="rigbat-${version}-1.x86_64.rpm"
+          deb="rigbat_${version}-1_${{ matrix.deb_arch }}.deb"
+          rpm="rigbat-${version}-1.${{ matrix.rpm_arch }}.rpm"
           cargo deb --no-build --target "$TARGET" --output "${deb}"
           cargo generate-rpm --target "$TARGET" --output "${rpm}"
           sha256sum "${deb}" > "${deb}.sha256"
@@ -131,6 +147,7 @@ jobs:
         if: ${{ !github.event.repository.private }}
         with:
           subject-path: |
+            ${{ steps.stage.outputs.binary }}
             ${{ steps.stage.outputs.asset }}
             ${{ steps.packages.outputs.deb }}
             ${{ steps.packages.outputs.rpm }}
@@ -140,6 +157,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "$TAG" \
+            "${{ steps.stage.outputs.binary }}" \
+            "${{ steps.stage.outputs.binary }}.sha256" \
             "${{ steps.stage.outputs.asset }}" \
             "${{ steps.stage.outputs.asset }}.sha256" \
             "${{ steps.packages.outputs.deb }}" \

@@ -85,12 +85,16 @@ libXrandr-devel libXi-devel mesa-libGL-devel pkgconf-pkg-config`.
 
 ## Install
 
-- **Packages** — `.deb` and `.rpm` from the
-  [releases page](https://github.com/Skesov/rigbat/releases). They install `/usr/bin/rigbat`, the
-  udev rule, the systemd user unit, the desktop entry and the icon; then run
+The [releases page](https://github.com/Skesov/rigbat/releases) has builds for `x86_64` and
+`aarch64` (glibc 2.35 or newer), each file with a `.sha256` and a build provenance attestation
+(`gh attestation verify <file> --repo Skesov/rigbat`):
+
+- **Packages** — `.deb` and `.rpm`. They install `/usr/bin/rigbat`, the udev rule, the systemd
+  user unit, the desktop entry and the icon; then run
   `systemctl --user enable --now rigbat.service`.
-- **Tarball** — the same release page has `rigbat-v<version>-x86_64-unknown-linux-gnu.tar.gz`:
-  the binary plus the `packaging/` files, each with a `.sha256`.
+- **Tarball** — `rigbat-v<version>-<target>.tar.gz`: the binary plus the `packaging/` files.
+- **Binary** — `rigbat-v<version>-<target>`, the executable alone. A USB HID device also needs
+  the udev rule from the tarball (see [Permissions](#permissions)).
 - **crates.io** — `cargo install rigbat --locked` builds the binary only (needs the build
   requirements above). A USB HID device also needs the udev rule (see [Permissions](#permissions));
   start the tray with the settings window's `Start with session` switch.
