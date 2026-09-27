@@ -1041,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn every_kind_paints_the_tray_icon_glyph_whole() {
+    fn every_kind_paints_its_emoji_whole() {
         let mut app = app_in(Lang::En, Config::default());
         app.device_rows = crate::egui_test::KINDS
             .into_iter()
@@ -1059,18 +1059,22 @@ mod tests {
                 app.render_devices_tab(ui)
             }));
         }
-        let glyphs = crate::egui_test::painted_kind_glyphs(&output.expect("a frame"));
-        for kind in crate::egui_test::KINDS {
-            let painted: Vec<_> = glyphs.iter().filter(|(k, ..)| *k == kind).collect();
-            assert_eq!(painted.len(), 1, "{kind:?}: {glyphs:?}");
-            let (_, rect, cut) = painted[0];
-            assert!(!cut, "{kind:?} cut: {rect:?}");
+        let painted = crate::egui_test::painted(&output.expect("a frame"));
+        for (i, kind) in crate::egui_test::KINDS.into_iter().enumerate() {
+            let find = |text: &str| {
+                let found: Vec<_> = painted.iter().filter(|p| p.text == text).collect();
+                assert_eq!(found.len(), 1, "{kind:?} {text:?}: {painted:?}");
+                found[0].rect
+            };
+            let glyph = find(gui::kind_glyph(kind));
+            let title = find(&format!("device {i}"));
             assert!(
-                rect.width() > 0.0 && rect.width() <= gui::GLYPH_SIZE + 1.0,
-                "{rect:?}"
+                glyph.left() >= title.left() - gui::GLYPH_COLUMN && glyph.right() <= title.left(),
+                "{kind:?} leaves its column: {glyph:?}, title at {title:?}"
             );
         }
     }
+
     #[test]
     fn the_reset_glyph_is_in_the_bundled_fonts() {
         let ctx = egui::Context::default();

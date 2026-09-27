@@ -5,7 +5,7 @@
 use eframe::egui;
 
 use crate::domain::DeviceKind;
-use crate::gui::{self, GLYPH_COLUMN, ROW_HEIGHT};
+use crate::gui::{self, GLYPH_COLUMN, GLYPH_SIZE, ROW_HEIGHT};
 
 pub const CONTENT_MAX_WIDTH: f32 = 640.0;
 pub const PANEL_MARGIN: f32 = 16.0;
@@ -207,12 +207,13 @@ impl Rows<'_> {
                 .rect_filled(rect.shrink(1.0), radius, fill);
         }
         let inner = rect.shrink2(egui::vec2(ROW_PADDING_X, 0.0));
-        self.ui.painter().add(gui::kind_glyph(
+        self.ui.painter().text(
             egui::pos2(inner.left() + GLYPH_COLUMN / 2.0, rect.center().y),
-            header.kind,
+            egui::Align2::CENTER_CENTER,
+            gui::kind_glyph(header.kind),
+            egui::FontId::proportional(GLYPH_SIZE),
             visuals.text_color(),
-            self.ui.pixels_per_point(),
-        ));
+        );
 
         let mut right = self.ui.new_child(
             egui::UiBuilder::new()

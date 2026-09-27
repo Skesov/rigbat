@@ -242,10 +242,9 @@ Dashboard: tray left click (SNI Activate) → spawn `rigbat dashboard` (separate
 The dashboard is a view of the tray's state, not a second monitor: the tray serves
 `org.rigbat.Tray1` on the connection that holds its single-instance name, and the dashboard never
 polls a device. It opens instantly, wakes nothing, and cannot classify a device differently from
-its tray icon — the snapshot carries each device already classified by `domain::device_status`,
-and the card draws its glyph with the same `icon::TinySkiaRenderer` the tray uses. It also lists
-devices the tray has dropped after a day of silence, dimmed and last; hidden ones never appear.
-If the tray goes away the window says so, and it reloads when the tray comes back.
+its tray icon — the snapshot carries each device already classified by `domain::device_status`.
+It also lists devices the tray has dropped after a day of silence, dimmed and last; hidden ones
+never appear. If the tray goes away the window says so, and it reloads when the tray comes back.
 
 The settings window reads the same snapshot, which also lists hidden devices apart
 (`Snapshot::hidden`) and carries each device's locator, so its rows match inventory records. It

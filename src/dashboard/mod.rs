@@ -18,7 +18,9 @@ use crate::domain::{
     BootTime, Palette, Presence, PrimaryStatus, WindowTheme, charge_value, roster_order,
     status_note,
 };
-use crate::gui::{self, GLYPH_COLUMN, ROW_HEIGHT, StatusColors, kind_glyph, secondary_text};
+use crate::gui::{
+    self, GLYPH_COLUMN, GLYPH_SIZE, ROW_HEIGHT, StatusColors, kind_glyph, secondary_text,
+};
 use crate::i18n::{Lang, fl, loader};
 use crate::ipc::single_instance::{SingleInstance, acquire_named};
 use crate::ipc::{DASHBOARD_NAME, DASHBOARD_PATH, DeviceCard, Snapshot, TRAY_NAME};
@@ -502,12 +504,13 @@ fn render_row(
     let low = matches!(card.status, PrimaryStatus::Low { .. });
     let online = card.presence == Presence::Online;
 
-    ui.painter().add(kind_glyph(
+    ui.painter().text(
         egui::pos2(rect.left() + GLYPH_COLUMN / 2.0, rect.center().y),
-        card.kind,
+        egui::Align2::CENTER_CENTER,
+        kind_glyph(card.kind),
+        egui::FontId::proportional(GLYPH_SIZE),
         visuals.text_color(),
-        ui.pixels_per_point(),
-    ));
+    );
 
     let body = egui::Rect::from_min_max(
         egui::pos2(rect.left() + GLYPH_COLUMN + GAP, rect.top() + ROW_PADDING),
@@ -848,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn every_kind_paints_the_tray_icon_glyph_whole() {
+    fn every_kind_paints_its_emoji_whole() {
         let cards = crate::egui_test::KINDS
             .into_iter()
             .enumerate()
@@ -860,32 +863,34 @@ mod tests {
         let mut d = dashboard(cards, Lang::En);
         let ctx = egui::Context::default();
         let output = run_frame(&ctx, d.wanted_size(), Vec::new(), |ui| d.show(ui));
-        let glyphs = crate::egui_test::painted_kind_glyphs(&output);
+        let painted = crate::egui_test::painted(&output);
         for kind in crate::egui_test::KINDS {
-            let painted: Vec<_> = glyphs.iter().filter(|(k, ..)| *k == kind).collect();
-            assert_eq!(painted.len(), 1, "{kind:?}: {glyphs:?}");
-            let (_, rect, cut) = painted[0];
-            assert!(!cut, "{kind:?} cut: {rect:?}");
+            let glyph: Vec<_> = painted
+                .iter()
+                .filter(|p| p.text == kind_glyph(kind))
+                .collect();
+            assert_eq!(glyph.len(), 1, "{kind:?}: {painted:?}");
+            let rect = glyph[0].rect;
             assert!(
-                rect.width() > 0.0 && rect.width() <= gui::GLYPH_SIZE + 1.0,
-                "{rect:?}"
-            );
-            assert!(
-                rect.right() <= MARGIN + GLYPH_COLUMN,
+                rect.left() >= MARGIN && rect.right() <= MARGIN + GLYPH_COLUMN,
                 "{kind:?} leaves its column: {rect:?}"
             );
         }
     }
 
     #[test]
-    fn every_sign_is_in_the_bundled_fonts() {
+    fn every_glyph_is_in_the_bundled_fonts() {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
         let font = egui::TextStyle::Body.resolve(&ctx.global_style());
+        let glyph_font = egui::FontId::proportional(GLYPH_SIZE);
         ctx.fonts_mut(|fonts| {
             assert!(fonts.has_glyphs(&font, REFRESH), "{REFRESH:?}");
             for sign in [CHARGING_SIGN, LOW_SIGN] {
                 assert!(fonts.has_glyph(&font, sign), "{sign:?}");
+            }
+            for glyph in crate::egui_test::KINDS.map(kind_glyph) {
+                assert!(fonts.has_glyphs(&glyph_font, glyph), "{glyph:?}");
             }
         });
     }
