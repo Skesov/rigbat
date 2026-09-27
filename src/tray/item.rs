@@ -426,7 +426,7 @@ mod tests {
     /// One device per shape a row takes.
     fn every_row_shape() -> TrayState {
         use crate::domain::Estimate;
-        let mut keyboard = retained("NuPhy", 88, Duration::from_secs(2 * 3600));
+        let mut keyboard = retained("NuPhy", 88, Duration::from_secs(3600));
         keyboard.info.kind = DeviceKind::Keyboard;
         TrayState {
             devices: vec![
@@ -524,7 +524,7 @@ mod tests {
                 "[ ] MX__Master: 62% · ~3h left #input-mouse",
                 "[ ] Pad: 100% · full #input-gaming",
                 "[ ] mouse: no access · run rigbat doctor #input-mouse",
-                "[ ] NuPhy: unreachable · last reading 2h ago #input-keyboard",
+                "[ ] NuPhy: unreachable · last reading 1h ago #input-keyboard",
             ])
         );
     }
@@ -579,7 +579,7 @@ mod tests {
                 "MX__Master: 62% · ~3h left #input-mouse",
                 "Pad: 100% · full #input-gaming",
                 "mouse: no access · run rigbat doctor #input-mouse",
-                "NuPhy: unreachable · last reading 2h ago #input-keyboard",
+                "NuPhy: unreachable · last reading 1h ago #input-keyboard",
             ])
         );
     }

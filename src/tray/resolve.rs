@@ -5,7 +5,12 @@ use crate::domain::{
 
 /// The devices the tray shows, in roster order.
 pub(super) fn visible<'a>(state: &'a TrayState, cfg: &Config, now: BootTime) -> Roster<'a> {
-    Roster::visible(&state.devices, |name| cfg.is_shown(name), now)
+    Roster::visible(
+        &state.devices,
+        |name| cfg.is_shown(name),
+        now,
+        cfg.hide_offline_after(),
+    )
 }
 
 /// The device the single (aggregate) icon represents: `Roster::featured`.
@@ -65,7 +70,7 @@ pub(crate) fn resolve_for(
         .devices
         .iter()
         .find(|d| d.info.id() == id)
-        .filter(|d| is_visible(d, |name| cfg.is_shown(name), now))?;
+        .filter(|d| is_visible(d, |name| cfg.is_shown(name), now, cfg.hide_offline_after()))?;
     let (status, stale) = device_status(device, cfg.effective_low_threshold(&device.info.name));
     Some(Resolved {
         state: device.clone(),
@@ -81,7 +86,7 @@ mod tests {
     use super::{featured_id, resolve_for};
     use crate::config::Config;
     use crate::domain::{BatteryReading, BootTime, ChargeState, DeviceState, Presence};
-    use crate::domain::{PrimaryStatus, RETAINED_ICON_MAX_AGE, Transport, TrayState};
+    use crate::domain::{PrimaryStatus, Transport, TrayState};
     use crate::tray::fixtures::{
         cfg_with_primary, key, make_info, make_reading, make_state, no_access, retained,
         same_name_two_transports,
@@ -189,7 +194,7 @@ mod tests {
             devices: vec![retained(
                 "mouse",
                 80,
-                RETAINED_ICON_MAX_AGE + Duration::from_secs(60),
+                Config::default().hide_offline_after() + Duration::from_secs(60),
             )],
         };
         let cfg = cfg_with_primary(None);
@@ -335,7 +340,7 @@ mod tests {
             devices: vec![retained(
                 "mouse",
                 88,
-                RETAINED_ICON_MAX_AGE + Duration::from_secs(1),
+                Config::default().hide_offline_after() + Duration::from_secs(1),
             )],
         };
         assert!(resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).is_none());

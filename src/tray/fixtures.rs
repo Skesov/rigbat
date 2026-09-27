@@ -36,7 +36,7 @@ pub(super) fn make_reading(percent: u8) -> BatteryReading {
 
 /// A device that is not `Online` but still remembers a reading taken
 /// `age` ago — the state a sleeping Bluetooth peripheral is in, and the
-/// one `RETAINED_ICON_MAX_AGE` puts a shelf life on.
+/// one `Config::hide_offline_after` puts a shelf life on.
 pub(super) fn retained(name: &str, percent: u8, age: Duration) -> DeviceState {
     DeviceState {
         info: make_info(name),

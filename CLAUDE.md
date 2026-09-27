@@ -10,8 +10,8 @@ devices appear; BlueZ signals debounced, and a backend whose sweep _fails_ does 
 devices — an empty result and an error are different things). Devices retain their last reading
 across drops (`Presence`: Online/Unreachable/Disconnected/NoAccess) and render dimmed while unreachable,
 except a low reading, which never dims. A device that is not online loses its tray icon once its
-reading passes `RETAINED_ICON_MAX_AGE` (24 h) or if it never produced one — an enumerated dongle
-whose mouse is switched off is not a battery level. It keeps being polled and returns on its next
+reading passes the configured period (`hide_offline_after_mins`: default 2 h, at most 24 h) or
+if it never produced one — an enumerated dongle whose mouse is switched off is not a battery level. It keeps being polled and returns on its next
 answer. A device whose node the user may not open (`sources::AccessDenied`, typically a missing
 udev rule) reads `NoAccess` ("no access", pointing at `rigbat doctor`) instead of offline: it
 keeps its tray entry, never notifies, and is never featured over an online device. Tray: left click opens the dashboard (a row per device), right click the menu listing

@@ -16,7 +16,12 @@ pub fn waybar_featured<'a>(
     cfg: &Config,
     now: BootTime,
 ) -> Option<(&'a DeviceState, PrimaryStatus)> {
-    let roster = Roster::visible(states, |name| cfg.is_shown(name), now);
+    let roster = Roster::visible(
+        states,
+        |name| cfg.is_shown(name),
+        now,
+        cfg.hide_offline_after(),
+    );
     let device = roster.featured(cfg.primary_device.as_deref())?;
     let (status, _) = device_status(device, cfg.effective_low_threshold(&device.info.name));
     Some((device, status))
@@ -34,7 +39,12 @@ pub fn waybar_featured<'a>(
 /// `charging`, `low`, `ok`, `offline`. `percentage` is omitted, not `0`, when
 /// there is no reading to report.
 pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: BootTime) -> Value {
-    let roster = Roster::visible(states, |name| cfg.is_shown(name), now);
+    let roster = Roster::visible(
+        states,
+        |name| cfg.is_shown(name),
+        now,
+        cfg.hide_offline_after(),
+    );
 
     let tooltip = if roster.devices().is_empty() {
         "No devices".to_owned()

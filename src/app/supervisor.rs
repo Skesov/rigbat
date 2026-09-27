@@ -2137,6 +2137,11 @@ mod tests {
         assert!(registry.snapshot().is_empty());
     }
 
+    #[test]
+    fn an_offline_icon_never_outlives_its_roster_entry() {
+        assert!(crate::domain::OFFLINE_SHELF_LIFE_MAX <= DISCONNECTED_RETENTION);
+    }
+
     /// End-to-end wiring test: a real `Supervisor::spawn_with` run, with
     /// fake `load_config`/`save_config` standing in for
     /// `crate::config::load`/`crate::config::save` (never the real config
@@ -2482,7 +2487,8 @@ mod tests {
         assert!(crate::domain::is_visible(
             restored,
             |_| true,
-            crate::clock::now()
+            crate::clock::now(),
+            crate::domain::OFFLINE_SHELF_LIFE_MAX,
         ));
 
         cleanup_store(&path);

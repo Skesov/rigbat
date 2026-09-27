@@ -1,13 +1,17 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{DisplayMode, Palette, TrayMode, WindowTheme};
+use crate::domain::{
+    DisplayMode, OFFLINE_SHELF_LIFE_MAX, OFFLINE_SHELF_LIFE_MIN, Palette, TrayMode, WindowTheme,
+};
 use crate::i18n::{self, Lang};
 
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_LOW_THRESHOLD: u8 = 20;
+const DEFAULT_HIDE_OFFLINE_AFTER_MINS: u32 = 120;
 
 /// Per-device poll interval and low-threshold overrides.
 /// Missing fields fall back to the global `Config` values.
@@ -53,6 +57,9 @@ pub struct Config {
     pub low_threshold: u8,
     /// Per-device overrides keyed by device name.
     pub device_overrides: HashMap<String, DeviceSettings>,
+    /// Minutes a device that is not online stays on the status surfaces after
+    /// its last reading. Read through `hide_offline_after`.
+    pub hide_offline_after_mins: u32,
     /// UI language tag (`"ru"`); `None` follows the session locale. A string, not
     /// `Lang`, so a tag unknown to this build still loads.
     pub language: Option<String>,
@@ -111,6 +118,7 @@ impl Default for Config {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             low_threshold: DEFAULT_LOW_THRESHOLD,
             device_overrides: HashMap::new(),
+            hide_offline_after_mins: DEFAULT_HIDE_OFFLINE_AFTER_MINS,
             language: None,
             palette: Palette::Catppuccin,
             theme: WindowTheme::System,
@@ -152,6 +160,14 @@ impl Config {
             .and_then(|d| d.low_threshold)
             .unwrap_or(self.low_threshold)
             .min(100)
+    }
+
+    /// How long a device that is not online stays shown after its last
+    /// reading, clamped into `OFFLINE_SHELF_LIFE_MIN..=OFFLINE_SHELF_LIFE_MAX`
+    /// whatever a hand-edited `config.json` says.
+    pub fn hide_offline_after(&self) -> Duration {
+        Duration::from_secs(u64::from(self.hide_offline_after_mins) * 60)
+            .clamp(OFFLINE_SHELF_LIFE_MIN, OFFLINE_SHELF_LIFE_MAX)
     }
 }
 
@@ -852,5 +868,42 @@ mod tests {
         assert_eq!(cfg.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
         assert_eq!(cfg.low_threshold, DEFAULT_LOW_THRESHOLD);
         assert!(cfg.device_overrides.is_empty());
+    }
+
+    // --- hide_offline_after ---------------------------------------------------
+
+    #[test]
+    fn an_offline_device_hides_after_two_hours_by_default() {
+        let old: Config = serde_json::from_str(r#"{"poll_interval_secs":60}"#).unwrap();
+        for cfg in [Config::default(), old] {
+            assert_eq!(cfg.hide_offline_after_mins, 120);
+            assert_eq!(cfg.hide_offline_after(), Duration::from_secs(2 * 3600));
+        }
+    }
+
+    #[test]
+    fn hide_offline_after_survives_a_round_trip() {
+        let path = scratch_config_path("hide-offline-after");
+        let cfg = Config {
+            hide_offline_after_mins: 360,
+            ..Config::default()
+        };
+        save_to(&path, &cfg).unwrap();
+        assert_eq!(load_from(&path), cfg);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn hide_offline_after_clamps_a_hand_edited_value() {
+        let at = |mins| {
+            Config {
+                hide_offline_after_mins: mins,
+                ..Config::default()
+            }
+            .hide_offline_after()
+        };
+        assert_eq!(at(0), OFFLINE_SHELF_LIFE_MIN);
+        assert_eq!(at(u32::MAX), OFFLINE_SHELF_LIFE_MAX);
+        assert_eq!(at(45), Duration::from_secs(45 * 60));
     }
 }

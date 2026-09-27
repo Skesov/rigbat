@@ -174,7 +174,7 @@ pub async fn run(
 ) {
     let mut items = Items::new();
     let mut config_rx = config.subscribe();
-    // Views change with time alone: text that ages ("2h ago") and the 24 h icon cutoff.
+    // Views change with time alone: text that ages ("2h ago") and the offline shelf life.
     let mut age_tick = interval_at(Instant::now() + AGE_STEP, AGE_STEP);
     age_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -196,7 +196,7 @@ mod tests {
     use super::{desired_keys, shown_ids};
     use crate::config::Config;
     use crate::domain::{Presence, Transport, TrayMode};
-    use crate::tray::fixtures::{key, same_name_two_transports};
+    use crate::tray::fixtures::{key, retained, same_name_two_transports};
     use crate::tray::item::sni_id;
     use crate::tray::resolve::resolve_for;
 
@@ -219,6 +219,24 @@ mod tests {
     fn desired_keys_empty_shown_returns_one_none_regardless_of_mode() {
         assert_eq!(desired_keys(TrayMode::PrimaryOnly, &[]), vec![None]);
         assert_eq!(desired_keys(TrayMode::PerDevice, &[]), vec![None]);
+    }
+
+    #[test]
+    fn an_offline_device_keeps_its_icon_for_the_configured_period() {
+        let state = crate::domain::TrayState {
+            devices: vec![retained(
+                "keys",
+                88,
+                std::time::Duration::from_secs(3 * 3600),
+            )],
+        };
+        let now = crate::clock::now();
+        assert!(shown_ids(&state, &Config::default(), now).is_empty());
+        let six_hours = Config {
+            hide_offline_after_mins: 360,
+            ..Config::default()
+        };
+        assert_eq!(shown_ids(&state, &six_hours, now), [key("keys")]);
     }
 
     #[test]

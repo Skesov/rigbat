@@ -214,7 +214,8 @@ controller on, undocked from its dongle.
 `general`, `devices`) opens on one.
 
 **General** — how rigbat behaves for every device: one icon per device or a single aggregate
-icon, the default low-battery threshold (5–50%, default 20), the default poll interval (30 s to
+icon, how long an offline device stays shown after its last reading (30 min to 24 h, default
+2 h), the default low-battery threshold (5–50%, default 20), the default poll interval (30 s to
 1 h, default 1 min), low-battery notifications, whether rigbat starts with the session, and the
 language (`System` follows `LANG`).
 
@@ -305,7 +306,7 @@ add `restart-interval` so Waybar respawns it:
 the single tray icon shows. A device that goes unreachable (asleep, switched off, out of range)
 keeps its last reading, as in the tray: `text`/`class`/`percentage` report it, and the tooltip
 adds its age (e.g. "mouse: 88% offline (5m ago)"). A device drops out once that reading is older
-than 24 h, or if it never produced one.
+than the configured period (default 2 h, at most 24 h; General tab), or if it never produced one.
 
 ### Polybar
 

@@ -61,6 +61,8 @@ tray-per-device = One icon per device
 tray-per-device-hint = Choose which on the Devices tab.
 tray-primary-hint-pinned = The single icon shows { $name }. Change it on the Devices tab.
 tray-primary-hint-auto = The single icon shows the connected device with the lowest charge. Pin one on the Devices tab.
+hide-offline-after = Hide an offline device after
+hide-offline-after-hint = It comes back on its next reading.
 button-clear = Clear
 
 group-battery = Battery
@@ -125,7 +127,7 @@ presence-unreachable = unreachable
 presence-disconnected = disconnected
 presence-no-access = no access
 
-device-pin = Show on the single icon
+device-pin = Pin to the tray icon
 device-pin-hint = Applies when the tray shows one icon for all devices.
 device-uses-default = The default for all devices
 device-default-value = Default: { $value }

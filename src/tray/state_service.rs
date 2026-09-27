@@ -45,7 +45,9 @@ pub fn snapshot(state: &TrayState, cfg: &Config, now: BootTime) -> Snapshot {
         .into_iter()
         .map(|d| {
             let in_tray = match cfg.tray_mode {
-                TrayMode::PerDevice => is_visible(d, |name| cfg.is_shown(name), now),
+                TrayMode::PerDevice => {
+                    is_visible(d, |name| cfg.is_shown(name), now, cfg.hide_offline_after())
+                }
                 TrayMode::PrimaryOnly => featured.as_ref() == Some(&d.info.id()),
             };
             card(d, in_tray)
@@ -131,7 +133,7 @@ pub async fn serve(
         )
     };
     let mut last = current(&mut rx, &mut config);
-    // `in_tray` follows the 24 h icon cutoff, which moves with time alone.
+    // `in_tray` follows the offline shelf life, which moves with time alone.
     let mut age_tick = interval_at(Instant::now() + AGE_STEP, AGE_STEP);
     age_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {

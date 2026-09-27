@@ -3,17 +3,27 @@ use std::time::Duration;
 use super::time::BootTime;
 use super::types::{DeviceState, Presence};
 
-/// How long a device that is not `Online` stays on a status surface after its
-/// last reading.
+/// The shortest period a device that is not `Online` stays on a status
+/// surface after its last reading; `Config::hide_offline_after` clamps to it.
+pub const OFFLINE_SHELF_LIFE_MIN: Duration = Duration::from_secs(30 * 60);
+
+/// The longest period a device that is not `Online` stays on a status surface
+/// after its last reading; `Config::hide_offline_after` clamps to it.
 ///
-/// Matches the supervisor's `DISCONNECTED_RETENTION`, so an icon never outlives
-/// the roster entry behind it.
-pub const RETAINED_ICON_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// It may not exceed the supervisor's `DISCONNECTED_RETENTION`, so an icon
+/// never outlives the roster entry behind it.
+pub const OFFLINE_SHELF_LIFE_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Whether a status surface shows the device: not hidden by the user, and
-/// still saying something (`DeviceState::is_currently_informative`).
-pub fn is_visible(device: &DeviceState, is_shown: impl Fn(&str) -> bool, now: BootTime) -> bool {
-    is_shown(&device.info.name) && device.is_currently_informative(now, RETAINED_ICON_MAX_AGE)
+/// still saying something (`DeviceState::is_currently_informative`) within
+/// `shelf_life` of its last reading.
+pub fn is_visible(
+    device: &DeviceState,
+    is_shown: impl Fn(&str) -> bool,
+    now: BootTime,
+    shelf_life: Duration,
+) -> bool {
+    is_shown(&device.info.name) && device.is_currently_informative(now, shelf_life)
 }
 
 /// Sort key for every device list: online devices first, then by name,
@@ -31,10 +41,11 @@ impl<'a> Roster<'a> {
         devices: &'a [DeviceState],
         is_shown: impl Fn(&str) -> bool,
         now: BootTime,
+        shelf_life: Duration,
     ) -> Self {
         let mut shown: Vec<&DeviceState> = devices
             .iter()
-            .filter(|d| is_visible(d, &is_shown, now))
+            .filter(|d| is_visible(d, &is_shown, now, shelf_life))
             .collect();
         shown.sort_by_cached_key(|d| roster_order(&d.info.name, d.presence));
         Self(shown)
@@ -70,6 +81,8 @@ mod tests {
     use super::*;
     use crate::domain::types::{BatteryReading, ChargeState, DeviceInfo, DeviceKind, Transport};
     use crate::domain::{DeviceId, Estimate};
+
+    const SHELF_LIFE: Duration = OFFLINE_SHELF_LIFE_MAX;
 
     fn device(
         name: &str,
@@ -112,7 +125,7 @@ mod tests {
         primary: Option<&str>,
         now: BootTime,
     ) -> Option<DeviceId> {
-        Roster::visible(devices, all, now)
+        Roster::visible(devices, all, now, SHELF_LIFE)
             .featured(primary)
             .map(|d| d.info.id())
     }
@@ -123,19 +136,19 @@ mod tests {
     fn a_hidden_device_is_not_visible() {
         let now = BootTime::TEST_NOW;
         let mouse = online("mouse", now);
-        assert!(is_visible(&mouse, all, now));
-        assert!(!is_visible(&mouse, |n| n != "mouse", now));
+        assert!(is_visible(&mouse, all, now, SHELF_LIFE));
+        assert!(!is_visible(&mouse, |n| n != "mouse", now, SHELF_LIFE));
     }
 
     #[test]
     fn a_device_that_never_answered_is_not_visible() {
         let now = BootTime::TEST_NOW;
         let dongle = device("dongle", Transport::Hidraw, Presence::Unreachable, None);
-        assert!(!is_visible(&dongle, all, now));
+        assert!(!is_visible(&dongle, all, now, SHELF_LIFE));
     }
 
     #[test]
-    fn a_retained_reading_is_visible_for_a_day_and_not_after() {
+    fn a_retained_reading_is_visible_for_the_shelf_life_and_not_after() {
         let seen = BootTime::TEST_NOW;
         let keys = device(
             "keys",
@@ -143,15 +156,28 @@ mod tests {
             Presence::Unreachable,
             Some((88, seen)),
         );
-        assert!(is_visible(&keys, all, seen + RETAINED_ICON_MAX_AGE));
-        let later = seen + RETAINED_ICON_MAX_AGE + Duration::from_secs(1);
-        assert!(!is_visible(&keys, all, later));
+        for shelf_life in [Duration::from_secs(2 * 3600), OFFLINE_SHELF_LIFE_MAX] {
+            let before = seen + (shelf_life - Duration::from_secs(1));
+            let after = seen + shelf_life + Duration::from_secs(1);
+            assert!(is_visible(&keys, all, before, shelf_life), "{shelf_life:?}");
+            assert!(!is_visible(&keys, all, after, shelf_life), "{shelf_life:?}");
+        }
+    }
+
+    #[test]
+    fn an_online_device_outlives_any_shelf_life() {
+        let seen = BootTime::TEST_NOW;
+        let mouse = online("mouse", seen);
+        let much_later = seen + OFFLINE_SHELF_LIFE_MAX * 2;
+        for shelf_life in [OFFLINE_SHELF_LIFE_MIN, OFFLINE_SHELF_LIFE_MAX] {
+            assert!(is_visible(&mouse, all, much_later, shelf_life));
+        }
     }
 
     #[test]
     fn a_device_without_access_is_visible_without_a_reading() {
         let locked = device("locked", Transport::Hidraw, Presence::NoAccess, None);
-        assert!(is_visible(&locked, all, BootTime::TEST_NOW));
+        assert!(is_visible(&locked, all, BootTime::TEST_NOW, SHELF_LIFE));
     }
 
     // --- order ----------------------------------------------------------------
@@ -170,7 +196,7 @@ mod tests {
             device("Locked", Transport::Hidraw, Presence::NoAccess, None),
             online("Mouse", now),
         ];
-        let roster = Roster::visible(&devices, all, now);
+        let roster = Roster::visible(&devices, all, now, SHELF_LIFE);
         assert_eq!(names(&roster), ["Mouse", "zebra", "alpha", "Locked"]);
     }
 
@@ -186,7 +212,7 @@ mod tests {
                 Some((40, now)),
             ),
         ];
-        let transports: Vec<Transport> = Roster::visible(&devices, all, now)
+        let transports: Vec<Transport> = Roster::visible(&devices, all, now, SHELF_LIFE)
             .devices()
             .iter()
             .map(|d| d.info.transport)
@@ -202,7 +228,7 @@ mod tests {
             online("hidden", now),
             device("dongle", Transport::Hidraw, Presence::Unreachable, None),
         ];
-        let roster = Roster::visible(&devices, |n| n != "hidden", now);
+        let roster = Roster::visible(&devices, |n| n != "hidden", now, SHELF_LIFE);
         assert_eq!(names(&roster), ["mouse"]);
     }
 
@@ -245,7 +271,8 @@ mod tests {
         ];
         let pick = featured_id(&devices, Some("dongle"), now).map(|id| id.name);
         assert_eq!(pick.as_deref(), Some("mouse"));
-        let hidden = Roster::visible(&devices, |n| n != "mouse", now).featured(Some("mouse"));
+        let hidden =
+            Roster::visible(&devices, |n| n != "mouse", now, SHELF_LIFE).featured(Some("mouse"));
         assert_eq!(hidden, None);
     }
 

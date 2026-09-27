@@ -61,6 +61,8 @@ tray-per-device = Значок на каждое устройство
 tray-per-device-hint = Какие именно — на вкладке «Устройства».
 tray-primary-hint-pinned = Общий значок показывает { $name }. Сменить — на вкладке «Устройства».
 tray-primary-hint-auto = Общий значок показывает подключённое устройство с самым низким зарядом. Закрепить — на вкладке «Устройства».
+hide-offline-after = Скрывать отключённое устройство через
+hide-offline-after-hint = Оно вернётся при следующем показании.
 button-clear = Сбросить
 
 group-battery = Батарея
@@ -124,7 +126,7 @@ presence-unreachable = недоступно
 presence-disconnected = отключено
 presence-no-access = нет доступа
 
-device-pin = Показывать на общем значке
+device-pin = Закрепить на значке
 device-pin-hint = Действует, когда в трее один значок на все устройства.
 device-uses-default = Как для всех устройств
 device-default-value = По умолчанию: { $value }

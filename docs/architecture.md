@@ -177,14 +177,15 @@ minute, and a worker per core only adds idle wakeups. `TOKIO_WORKER_THREADS` sti
   warning that has gone stale is exactly the one that must not get quieter.
 - **Shelf life**: dimming says "remembered", but a memory stops being worth a tray slot. A device
   that is not `Online` loses its icon and its menu row once `DeviceState::is_currently_informative`
-  says no — its reading is older than `RETAINED_ICON_MAX_AGE` (24 h, matching the supervisor's
-  `DISCONNECTED_RETENTION` so an icon never outlives the roster entry behind it), or it has no
-  reading at all. The second case is the common one: a wireless dongle stays enumerated while its
+  says no — its reading is older than the configured period (`Config::hide_offline_after`:
+  default 2 h, at most `OFFLINE_SHELF_LIFE_MAX`, 24 h, the supervisor's `DISCONNECTED_RETENTION`,
+  so an icon never outlives the roster entry behind it), or it has no reading at all. The second case is the common one: a wireless dongle stays enumerated while its
   mouse is switched off, so the device is discovered, polled, and never answers — an empty battery
   outline that has never meant anything. Display only: the device stays in the roster, keeps being
   polled, and reappears on its next successful reading. The tray icons, the menu, the aggregate
-  icon's pick and `--waybar` all go through one predicate (`domain::is_visible`, via
-  `Roster::visible`), so they cannot disagree about which devices exist.
+  icon's pick, the dashboard's "in tray" mark and `--waybar` all go through one predicate
+  (`domain::is_visible`, via `Roster::visible`) with the period from config, so they cannot
+  disagree about which devices exist. The tray applies a changed period on the config watch.
 - **Estimate**: on every reading the manager derives a time-remaining estimate
   (`domain::estimate`) from the device's percent-change history. Only a discharging, non-coarse
   reading gets one. The rate runs from the first edge (a moment the percent was seen to change) to
@@ -195,8 +196,8 @@ minute, and a worker per core only adds idle wakeups. `TOKIO_WORKER_THREADS` sti
   handful of edges days apart.
 - **Clock**: reading times, ages and the estimate use `domain::BootTime`, read from
   `CLOCK_BOOTTIME` by `clock::now`. Unlike `Instant` (`CLOCK_MONOTONIC`) it counts suspend, so a
-  discharge across a night's suspend is not squeezed into seconds, and the 24 h retention caps are
-  24 h of real time, not of awake time.
+  discharge across a night's suspend is not squeezed into seconds, and the shelf life and the 24 h
+  roster retention are real time, not awake time.
 
 ## Data flow per surface
 
@@ -218,7 +219,7 @@ Tray:      main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶
                                                                     │ only items whose View changed,
                                                                     │ icons via IconCache
            appearance (xdg portal) ──watch<ColorScheme>────────────┘
-           AGE_STEP tick (60 s) ───────────────────────────────────┘ (text that ages, 24 h cutoff)
+           AGE_STEP tick (60 s) ───────────────────────────────────┘ (text that ages, shelf life)
            session (logind PrepareForSleep) ──RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
            bluez Connected / interfaces (debounced) ──rediscover──────▶ Supervisor (re-discover)
            bluez Battery1.Percentage ──BluezSource::pushed──▶ that device's task (one reading)

@@ -214,7 +214,7 @@ The settings building blocks live in `src/settings/widgets.rs`.
 | `footer(ui, text, link, url)`         | One centred secondary line ending in a link                                                                                                             | Version and project page at the bottom of General                       |
 
 Stock egui widgets fill the other roles inside a row: `egui::ComboBox` for a list of values (poll
-interval, language, theme), `egui::Slider` with a unit suffix inside `trailing` for a range (low-battery
+interval, offline period, language, theme), `egui::Slider` with a unit suffix inside `trailing` for a range (low-battery
 threshold), `ui.small_button` for a secondary action in a subtitle, `ui.button` for an action.
 The poll interval and the threshold are the same control wherever they appear: `interval_combo`
 over the one `POLL_INTERVAL_PRESETS` list and `threshold_slider`, both in
@@ -247,7 +247,8 @@ settings" (`settings-title`, retitled when the language changes), a `tab_bar` ov
 (`Tab::General`, `Tab::Appearance`, `Tab::Devices`), panel margin `PANEL_MARGIN`.
 `rigbat settings appearance` (or `general`, `devices`) opens on that tab.
 
-- **General** (`src/settings/general_tab.rs`), behaviour: groups Tray (one icon per device),
+- **General** (`src/settings/general_tab.rs`), behaviour: groups Tray (one icon per device; hide
+  an offline device after, a combo of `HIDE_OFFLINE_PRESETS`, 30 min to 24 h),
   Battery (low-battery threshold; check every; notifications; footer on defaults), System (start
   with session; language), then the `footer`. The column scrolls as a whole.
 - **Appearance** (`src/settings/appearance_tab.rs`), look: groups Windows (a theme combo box,
@@ -267,7 +268,7 @@ settings" (`settings-title`, retitled when the language changes), a `tab_bar` ov
     `switch` (the inverse of `hidden_devices`). A seen-before row: "seen 2d ago" and no switch.
     Kind and transport, and a seen-before row's last date, are the row's hover text.
   - A click on the row (not on the switch) expands it in place; one row at a time. Expanded:
-    "Show on the single icon" (the pin, with a subtitle saying it applies only to the single icon
+    "Pin to the tray icon" (the pin, with a subtitle saying it applies only to the single icon
     while per-device icons are on), the threshold and interval overrides, and "Remove from the
     list" with "Remove…", which arms "Remove" / "Cancel" (never deletes on the first click). A
     device the inventory has not recorded has no Remove row.

@@ -8,6 +8,10 @@ use crate::i18n::{self, Lang, fl, loader};
 /// Every poll-interval choice, default and per device, seconds.
 const POLL_INTERVAL_PRESETS: [u64; 7] = [30, 60, 120, 300, 900, 1800, 3600];
 
+/// Every choice of how long an offline device stays shown, seconds; within
+/// `OFFLINE_SHELF_LIFE_MIN..=OFFLINE_SHELF_LIFE_MAX`.
+const HIDE_OFFLINE_PRESETS: [u64; 6] = [1800, 3600, 7200, 21_600, 43_200, 86_400];
+
 /// The low-battery threshold's slider and value box, points.
 const THRESHOLD_CONTROL_WIDTH: f32 = 240.0;
 const THRESHOLD_SLIDER_WIDTH: f32 = 180.0;
@@ -76,6 +80,25 @@ impl SettingsApp {
             }
             if clear_pin {
                 self.persist(|target| target.primary_device = None);
+            }
+
+            let hint = fl!(l, "hide-offline-after-hint");
+            let current = self.config.hide_offline_after().as_secs();
+            let chosen = rows.row(
+                &fl!(l, "hide-offline-after"),
+                widgets::subtitle(&hint),
+                |ui| {
+                    preset_combo(
+                        ui,
+                        "hide-offline-after",
+                        &HIDE_OFFLINE_PRESETS,
+                        current,
+                        lang,
+                    )
+                },
+            );
+            if let Some(mins) = chosen.and_then(|secs| u32::try_from(secs / 60).ok()) {
+                self.persist(move |target| target.hide_offline_after_mins = mins);
             }
         });
     }
@@ -217,11 +240,23 @@ pub(super) fn interval_combo(
     current: u64,
     lang: Lang,
 ) -> Option<u64> {
+    preset_combo(ui, id_salt, &POLL_INTERVAL_PRESETS, current, lang)
+}
+
+/// A combo box of `presets` (seconds) showing `current`; the newly chosen
+/// value, if any.
+fn preset_combo(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    presets: &[u64],
+    current: u64,
+    lang: Lang,
+) -> Option<u64> {
     let mut interval = current;
     egui::ComboBox::from_id_salt(id_salt)
         .selected_text(interval_label(current, lang))
         .show_ui(ui, |ui| {
-            for secs in interval_choices(current) {
+            for secs in interval_choices(presets, current) {
                 ui.selectable_value(&mut interval, secs, interval_label(secs, lang));
             }
         });
@@ -249,8 +284,8 @@ pub(super) fn interval_label(secs: u64, lang: Lang) -> String {
 
 /// The presets, plus `current` when it is not one of them, so a value set
 /// by hand in `config.json` stays selectable instead of being replaced.
-fn interval_choices(current: u64) -> Vec<u64> {
-    let mut choices = POLL_INTERVAL_PRESETS.to_vec();
+fn interval_choices(presets: &[u64], current: u64) -> Vec<u64> {
+    let mut choices = presets.to_vec();
     if !choices.contains(&current) {
         choices.push(current);
         choices.sort_unstable();
@@ -330,6 +365,7 @@ mod tests {
                     "tab-appearance",
                     "group-tray",
                     "tray-per-device",
+                    "hide-offline-after",
                     "group-battery",
                     "default-low-threshold",
                     "default-poll-interval",
@@ -344,6 +380,10 @@ mod tests {
                 .collect();
                 expected.extend(["20", "%"].map(str::to_owned));
                 expected.push(interval_label(Config::default().poll_interval_secs, lang));
+                expected.push(interval_label(
+                    Config::default().hide_offline_after().as_secs(),
+                    lang,
+                ));
                 expected.push(lang.native_name().to_owned());
                 expected.push(format!("rigbat {} ·", env!("CARGO_PKG_VERSION")));
                 expected.push(if per_device {
@@ -455,7 +495,7 @@ mod tests {
     #[test]
     fn interval_choices_are_the_presets_in_seconds() {
         assert_eq!(
-            interval_choices(60),
+            interval_choices(&POLL_INTERVAL_PRESETS, 60),
             [30, 60, 120, 300, 900, 1800, 3600].to_vec()
         );
     }
@@ -465,7 +505,7 @@ mod tests {
     #[test]
     fn an_interval_that_is_no_preset_survives() {
         assert_eq!(
-            interval_choices(45),
+            interval_choices(&POLL_INTERVAL_PRESETS, 45),
             [30, 45, 60, 120, 300, 900, 1800, 3600].to_vec()
         );
 
@@ -477,6 +517,42 @@ mod tests {
 
         assert!(painted.iter().any(|p| p.text == "45 s"), "{painted:?}");
         assert_eq!(app.config.poll_interval_secs, 45);
+    }
+
+    #[test]
+    fn hide_offline_presets_span_the_allowed_shelf_life() {
+        use crate::domain::{OFFLINE_SHELF_LIFE_MAX, OFFLINE_SHELF_LIFE_MIN};
+        use std::time::Duration;
+        let presets = HIDE_OFFLINE_PRESETS.map(Duration::from_secs);
+        assert_eq!(presets.first(), Some(&OFFLINE_SHELF_LIFE_MIN));
+        assert_eq!(presets.last(), Some(&OFFLINE_SHELF_LIFE_MAX));
+        let en = HIDE_OFFLINE_PRESETS.map(|secs| interval_label(secs, Lang::En));
+        assert_eq!(en, ["30 min", "1 h", "2 h", "6 h", "12 h", "24 h"]);
+    }
+
+    #[test]
+    fn choosing_a_hide_offline_period_saves_it_in_minutes() {
+        let (mut app, path) = app_saving_to("hide-offline-after", Config::default());
+        let ctx = egui::Context::default();
+        let size = GENERAL_TAB_TEST_SIZE;
+        let rect_of = |output: &egui::FullOutput, text: &str| {
+            crate::egui_test::painted(output)
+                .into_iter()
+                .rfind(|p| p.text == text)
+                .map(|p| p.rect)
+                .expect("the text was painted")
+        };
+
+        let output = run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
+        let combo = rect_of(&output, "2 h");
+        click_at(&ctx, size, combo.center(), |ui| app.render_general_tab(ui));
+        let output = run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
+        let choice = rect_of(&output, "6 h");
+        click_at(&ctx, size, choice.center(), |ui| app.render_general_tab(ui));
+
+        assert_eq!(config::load_from(&path).hide_offline_after_mins, 360);
+        assert_eq!(app.config.hide_offline_after_mins, 360);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
