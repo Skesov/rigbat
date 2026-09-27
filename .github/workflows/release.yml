@@ -171,3 +171,38 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Publishes the crate from the same tag as the artifacts, through crates.io
+  # trusted publishing: the job trades GitHub's OIDC token for a token that
+  # lives minutes, so no registry token is stored anywhere. The trusted
+  # publisher on crates.io names this workflow and the crates-io environment.
+  crates-io:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      # `cargo publish` builds the packaged crate before uploading it.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libgl1-mesa-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked
