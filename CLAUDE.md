@@ -171,6 +171,10 @@ which fails on any other edge and on any cycle.
   `i18n/` (see `CONTRIBUTING.md`); persisted settings → `config/`
   (serde, `#[serde(default)]` so old config files keep loading).
 - Commits: Conventional Commits — `type(scope): description` (e.g. `feat(tray): …`).
+- Releases are CI-only: release-please keeps a release PR; merging it runs
+  `.github/workflows/release.yml`, which builds x86_64 and aarch64 artifacts in Ubuntu 26.04,
+  attests and attaches them to the GitHub Release, and publishes the crate through crates.io
+  trusted publishing. Nothing is published from a developer machine.
 
 ## Platform gotchas
 
