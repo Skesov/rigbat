@@ -7,8 +7,9 @@ use crate::i18n::{Lang, fl, loader};
 pub enum DisplayMode {
     #[default]
     IconOnly,
+    DeviceAndBattery,
+    #[serde(alias = "percent_in_icon")]
     PercentOnly,
-    PercentInIcon,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -77,8 +78,8 @@ impl DisplayMode {
     /// All display modes in display order, used to build the Settings menu.
     pub const ALL: [DisplayMode; 3] = [
         DisplayMode::IconOnly,
+        DisplayMode::DeviceAndBattery,
         DisplayMode::PercentOnly,
-        DisplayMode::PercentInIcon,
     ];
 
     /// Human-readable label used in the settings window radio group.
@@ -86,8 +87,8 @@ impl DisplayMode {
         let l = loader(lang);
         match self {
             DisplayMode::IconOnly => fl!(l, "display-icon-only"),
+            DisplayMode::DeviceAndBattery => fl!(l, "display-device-and-battery"),
             DisplayMode::PercentOnly => fl!(l, "display-percent-only"),
-            DisplayMode::PercentInIcon => fl!(l, "display-percent-in-icon"),
         }
     }
 }
@@ -104,8 +105,8 @@ mod tests {
     #[test]
     fn display_mode_all_contains_each_variant() {
         assert!(DisplayMode::ALL.contains(&DisplayMode::IconOnly));
+        assert!(DisplayMode::ALL.contains(&DisplayMode::DeviceAndBattery));
         assert!(DisplayMode::ALL.contains(&DisplayMode::PercentOnly));
-        assert!(DisplayMode::ALL.contains(&DisplayMode::PercentInIcon));
     }
 
     #[test]
@@ -128,10 +129,14 @@ mod tests {
             "Percentage as text"
         );
         assert_eq!(
-            DisplayMode::PercentInIcon.label(Lang::En),
-            "Percentage inside icon"
+            DisplayMode::DeviceAndBattery.label(Lang::En),
+            "Device type and battery"
         );
         assert_eq!(DisplayMode::IconOnly.label(Lang::Ru), "Только значок");
+        assert_eq!(
+            DisplayMode::DeviceAndBattery.label(Lang::Ru),
+            "Тип устройства и батарейка"
+        );
     }
 
     #[test]

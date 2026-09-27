@@ -13,7 +13,7 @@ comes from is in [`architecture.md`](architecture.md#data-flow-per-surface).
 | Cap the content width                    | Every settings tab is a centred column at most `CONTENT_MAX_WIDTH` wide (`page`); a wider window adds margin, not longer rows. The dashboard has a fixed width.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | `src/settings/widgets.rs`                                                               |
 | One trailing control per row             | `Rows::row` takes exactly one `control`. A secondary action on the same setting sits in the subtitle as a small button (the pin's "Clear" in the Tray group, a device override's "↺").                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | `src/settings/widgets.rs`, `src/settings/general_tab.rs`, `src/settings/devices_tab.rs` |
 | Status text carries a sign, not only hue | `charge_value` prefixes a low reading with `LOW_SIGN` (⚠) and a charging one with `CHARGING_SIGN` (⚡). The dashboard also colours a low value; the tray menu has no colour and relies on the sign. The tray icon draws the same signs as shapes in every display mode (`status_mark`: a bolt, a warning triangle), so charging and low differ from an ordinary reading in a single colour.                                                                                                                                                                                                                                                                           | `src/domain/text.rs`, `src/icon/mod.rs`                                                 |
-| Same words on every surface              | The dashboard row, the Devices tab row, the tray menu row and the tray tooltip are built from `charge_value` and `status_note` (`device_line` joins them); both windows draw a device's kind as the emoji from `gui::kind_glyph`, the tray icon's corner as the `icon::kind_glyph` silhouette; both windows use one value style (`gui::charge_value_text`). Devices are ordered by `roster_order`: online first, then by name, ignoring case.                                                                                                                                                                                                                         | `src/domain/text.rs`, `src/domain/roster.rs`, `src/gui/mod.rs`                          |
+| Same words on every surface              | The dashboard row, the Devices tab row, the tray menu row and the tray tooltip are built from `charge_value` and `status_note` (`device_line` joins them); both windows draw a device's kind as the emoji from `gui::kind_glyph`, the tray icon's `DeviceAndBattery` style as an `icon::silhouette` bitmap; both windows use one value style (`gui::charge_value_text`). Devices are ordered by `roster_order`: online first, then by name, ignoring case.                                                                                                                                                                                                            | `src/domain/text.rs`, `src/domain/roster.rs`, `src/gui/mod.rs`                          |
 | A low reading never gets quieter         | A retained (not live) reading is dimmed by `palette::DIM` on the tray icon's fill and the dashboard bar, and the tray icon marks it with a dashed outline or dotted digits ([Tray icon](#tray-icon)) — except when it is low, which renders exactly as a live one.                                                                                                                                                                                                                                                                                                                                                                                                    | `src/icon/mod.rs`, `src/dashboard/mod.rs`                                               |
 | Contrast is measured, not eyeballed      | `palette::contrast_ratio` (WCAG 2.1) backs tests: secondary text (`gui::secondary_text`, one rule for both windows) ≥ 4.5:1 on the panel and the group fill, text on the accent ≥ 4.5:1 (`readable_on` picks black or white). egui's weak text colour misses 4.5:1 on dark, so secondary text is the body colour at a smaller size. Palette colours pass through `palette::readable`: text ≥ 4.5:1, bars and icon marks ≥ 3:1 as graphical objects, dimmed included ([Readability](#readability)).                                                                                                                                                                    | `src/palette.rs`, `src/gui/mod.rs`, `src/settings/widgets.rs`, `src/icon/mod.rs`        |
 | Custom widgets are accessible widgets    | `switch`, `tile`, the tabs and an expander row report a role and label through `widget_info` (checkbox, radio button, selectable label, collapsing header with its expanded state), take keyboard focus and draw a focus ring. A glyph-only button announces a word ("↺" is "Use the default"). Both windows export an AT-SPI tree through eframe's `accesskit` feature.                                                                                                                                                                                                                                                                                              | `src/settings/widgets.rs`, `Cargo.toml`                                                 |
@@ -146,7 +146,7 @@ toward black on a light surface, toward white on a dark one — until, painted a
   group fill and a button (`gui::text_surfaces`). `fg` and `charging` are bars, ≥ 3:1 on the
   panel at `DIM`. `track` is used as is.
 - **Tray icon** (`Theme::new`): the panel is the host's, which rigbat cannot see. The icon keeps
-  its approach: outline, nub, digits and glyph in the full status colour, the neutral `fg` for an
+  its approach: outline, nub, digits and silhouette in the full status colour, the neutral `fg` for an
   ordinary reading and for offline. Each colour reaches ≥ 3:1 on a nominal panel (`#1e1e1e` dark,
   `#f0f0f0` light); `fg` and `charging` are measured at `DIM`, `low` opaque.
 
@@ -315,29 +315,34 @@ Built by `RigbatTray::menu` from a `View` (`src/tray/item.rs`).
 Rendered by `TinySkiaRenderer` behind the `IconRenderer` port (`src/icon/mod.rs`) at 22, 24, 32,
 44 and 64 px, on a square canvas.
 
-- Three `DisplayMode`s: `IconOnly` (battery with a fill bar), `PercentOnly` (digits),
-  `PercentInIcon` (battery outline with digits inside).
+- Three `DisplayMode`s, in `DisplayMode::ALL` order: `IconOnly` (battery with a fill bar, the
+  default), `DeviceAndBattery` (the kind's silhouette over a thin battery), `PercentOnly` (digits
+  as large as fit). Only `DeviceAndBattery` shows the kind; `percent_in_icon`, a removed mode,
+  loads as `PercentOnly`.
+- `DeviceAndBattery` at 22 px: a 14 × 14 `icon::silhouette` bitmap, one pixel per cell,
+  centred on the top edge (rows 0–13); the bar's outline over rows 16–21 with the nub in the
+  last column, the fill one pixel clear of the outline. Other sizes scale the 22 px layout and
+  round to whole pixels. `DeviceKind::Other` has no silhouette and renders as `IconOnly`.
 - Colour from `PrimaryStatus` through `Theme::new(palette, scheme)` ([Readability](#readability)).
-  Offline is a crossed battery (`draw_cross_line`) in the neutral at `DIM`.
+  Offline is a crossed battery (`draw_cross_line`) in the neutral at `DIM`; in
+  `DeviceAndBattery` the silhouette over an empty bar with one diagonal slash.
 - Status marks (`status_mark`), drawn whole in the full status colour behind a clear halo: a bolt
   for charging, a warning triangle for low — the icon's `CHARGING_SIGN` and `LOW_SIGN`. `IconOnly`
-  puts the mark in the body, left of the kind glyph; `PercentOnly` bottom-left, opposite the
-  kind glyph, with the digits above both; `PercentInIcon` on the battery's top edge, above the
-  digits. The mark never meets the kind glyph or its ring, and cells are whole pixels (1 px at
-  22 px).
-- A retained reading: a dashed outline (`IconOnly`, `PercentInIcon`), dotted digits
-  (`PercentOnly`, which has no outline), and in `IconOnly` the fill dimmed by `DIM`; the status
-  mark, nub and glyph stay solid at full colour. `Low` renders as if live.
+  puts the mark in the middle of the body; `DeviceAndBattery` in the top-right corner, its halo
+  cut out of the silhouette; `PercentOnly` bottom-left, with the digits above it. Cells are
+  whole pixels (1 px at 22 px).
+- A retained reading: a dashed outline (`IconOnly`, and the bar in `DeviceAndBattery`), dotted
+  digits (`PercentOnly`, which has no outline), and the fill dimmed by `DIM`; the status mark, nub
+  and silhouette stay solid at full colour. `Low` renders as if live.
 - The icon cache key (`IconKey`) holds the resolved `Theme`, so a palette change re-renders every
   icon.
-- The device-kind corner glyph (`maybe_draw_kind_glyph`) sits bottom-right, drawn from
-  `icon::kind_glyph`, a bitmap only the tray icon draws; the windows use emoji. `DeviceKind::Other`
-  is a battery in both and in the menu (`battery`); the icon, itself a battery, draws no corner
-  glyph for it. In the percent modes the digits are drawn after the glyph and win the overlap.
-- COSMIC shows no hover tooltip, so the SNI title names the device (`Tray::title`) and the glyph
-  identifies its kind. The tooltip carries `device_line` for hosts that show it.
+- The tray icon draws its own silhouettes; the windows use emoji (`gui::kind_glyph`), and the
+  menu the freedesktop icon (`battery` for `DeviceKind::Other`).
+- COSMIC shows no hover tooltip, so the SNI title names the device (`Tray::title`) and
+  `DeviceAndBattery` shows its kind. The tooltip carries `device_line` for hosts that show it.
 - The Appearance tab's style tiles are rendered by the same renderer in the chosen palette
-  (`render_style_previews`), so a preview cannot drift from the real icon.
+  (`render_style_previews`), so a preview cannot drift from the real icon; the
+  `DeviceAndBattery` tile shows a mouse.
 
 ## Text
 
@@ -427,8 +432,9 @@ Window tests run headless on `src/egui_test.rs` and assert what was painted, not
   emoji painted whole inside the glyph column.
 - The tray icon is tested on its pixels: `charging_and_low_differ_from_ok_in_shape_alone` and
   `a_retained_reading_differs_in_shape_in_every_mode` render with a one-colour theme and compare
-  masks; `the_status_mark_is_whole_and_clear_of_the_kind_glyph`,
-  `the_corner_glyph_is_the_shared_kind_bitmap`. `cargo test dump_icons -- --ignored` writes
-  contact sheets of every state, mode, palette and scheme to the temp directory.
+  masks; `the_status_mark_is_drawn_whole`, `the_silhouette_and_the_bar_keep_to_their_rows`,
+  `every_kind_has_its_own_device_and_battery_icon`, `only_device_and_battery_draws_the_kind`.
+  `cargo test dump_icons -- --ignored` writes contact sheets of every state, mode, palette and
+  scheme, and `rigbat-icons.txt` with each 22 px icon as text, to the temp directory.
 - The tray menu is tested as text: `describe` renders it one line per item (`[x]` checkmark,
   `#icon`, `---` separator) and a test compares whole menus per mode.

@@ -105,8 +105,8 @@ palette-nord = Nord
 group-tray-icon = Tray icon
 tray-icon-style = Icon style
 display-icon-only = Battery icon only
+display-device-and-battery = Device type and battery
 display-percent-only = Percentage as text
-display-percent-in-icon = Percentage inside icon
 
 ## Settings window: Devices tab
 

@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn serde_round_trip() {
         let cfg = Config {
-            display_mode: DisplayMode::PercentInIcon,
+            display_mode: DisplayMode::DeviceAndBattery,
             hidden_devices: vec!["mouse".to_string(), "keyboard".to_string()],
             notifications_enabled: false,
             tray_mode: TrayMode::PerDevice,
@@ -468,9 +468,15 @@ mod tests {
 
     #[test]
     fn display_mode_snake_case() {
-        let mode = DisplayMode::PercentInIcon;
+        let mode = DisplayMode::DeviceAndBattery;
         let json = serde_json::to_string(&mode).unwrap();
-        assert_eq!(json, r#""percent_in_icon""#);
+        assert_eq!(json, r#""device_and_battery""#);
+    }
+
+    #[test]
+    fn a_config_with_percent_in_icon_loads_percent_only() {
+        let cfg: Config = serde_json::from_str(r#"{"display_mode":"percent_in_icon"}"#).unwrap();
+        assert_eq!(cfg.display_mode, DisplayMode::PercentOnly);
     }
 
     #[test]

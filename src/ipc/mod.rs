@@ -69,7 +69,7 @@ mod tests {
     #[test]
     fn snapshot_round_trips_through_json() {
         let snapshot = Snapshot {
-            display_mode: DisplayMode::PercentInIcon,
+            display_mode: DisplayMode::DeviceAndBattery,
             devices: vec![DeviceCard {
                 name: "MX Anywhere 3".to_owned(),
                 kind: DeviceKind::Mouse,
@@ -88,6 +88,13 @@ mod tests {
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         assert_eq!(serde_json::from_str::<Snapshot>(&json).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn a_snapshot_from_a_tray_with_percent_in_icon_reads_percent_only() {
+        let json = r#"{"display_mode":"percent_in_icon","devices":[]}"#;
+        let snapshot: Snapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snapshot.display_mode, DisplayMode::PercentOnly);
     }
 
     /// A tray that predates `hidden` and `locator` still answers readably.

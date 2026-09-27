@@ -2,7 +2,7 @@ use eframe::egui;
 
 use super::{SettingsApp, widgets};
 use crate::appearance::ColorScheme;
-use crate::domain::{DisplayMode, Palette, PrimaryStatus, WindowTheme};
+use crate::domain::{DeviceKind, DisplayMode, Palette, PrimaryStatus, WindowTheme};
 use crate::i18n::{fl, loader};
 use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
 use crate::palette::{self, Rgb, Swatches};
@@ -192,7 +192,7 @@ fn scheme(dark: bool) -> ColorScheme {
 }
 
 /// Tray icons for `STYLE_PREVIEW_STATUS` in every `DisplayMode`, in the
-/// palette's colours, without a device-type corner glyph.
+/// palette's colours; `DeviceAndBattery` shows a mouse.
 fn render_style_previews(
     ctx: &egui::Context,
     scheme: ColorScheme,
@@ -206,8 +206,9 @@ fn render_style_previews(
     DisplayMode::ALL
         .into_iter()
         .filter_map(|mode| {
+            let kind = (mode == DisplayMode::DeviceAndBattery).then_some(DeviceKind::Mouse);
             let icon = renderer
-                .render(STYLE_PREVIEW_STATUS, None, &theme, mode, false)
+                .render(STYLE_PREVIEW_STATUS, kind, &theme, mode, false)
                 .into_iter()
                 .next()?;
             let size = [

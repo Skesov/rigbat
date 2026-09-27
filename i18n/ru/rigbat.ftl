@@ -104,8 +104,8 @@ palette-nord = Nord
 group-tray-icon = Значок в трее
 tray-icon-style = Вид значка
 display-icon-only = Только значок
+display-device-and-battery = Тип устройства и батарейка
 display-percent-only = Проценты текстом
-display-percent-in-icon = Проценты внутри значка
 
 ## Settings window: Devices tab
 

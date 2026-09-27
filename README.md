@@ -226,7 +226,7 @@ language (`System` follows `LANG`).
 **Appearance** — how it looks: the theme of the settings window and the device overview
 (`System`, `Light` or `Dark`; the tray icon always follows the system, whose panel it sits on),
 the colour palette for charge states (Catppuccin, Everforest, GNOME or Nord), and the tray icon's
-display mode.
+display mode: a battery, the device type over a battery, or the percentage as digits.
 
 <p align="center">
   <img src="docs/screenshots/appearance.png" width="720"

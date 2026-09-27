@@ -15,7 +15,7 @@ whose mouse is switched off is not a battery level. It keeps being polled and re
 answer. A device whose node the user may not open (`sources::AccessDenied`, typically a missing
 udev rule) reads `NoAccess` ("no access", pointing at `rigbat doctor`) instead of offline: it
 keeps its tray entry, never notifies, and is never featured over an online device. Tray: left click opens the dashboard (a row per device), right click the menu listing
-device status (in single-icon mode a checkmark per device pins the icon to it; unpinned, it shows the online device with the lowest charge); device-type glyph, light/dark theme, display modes, time-remaining estimate, low-battery notifications
+device status (in single-icon mode a checkmark per device pins the icon to it; unpinned, it shows the online device with the lowest charge); light/dark theme, display modes (battery, device type over a battery, digits), time-remaining estimate, low-battery notifications
 (confirmed by two distinct readings), separate settings window listing every device seen (expander rows),
 per-device poll intervals/thresholds and aggregate-icon pin, config persistence. UI in English and
 Russian (Fluent, `i18n/`), switchable live; the CLI stays English. A second `rigbat tray` exits
@@ -105,7 +105,7 @@ src/
 ├── cli/           # output adapter: table / --json / --wide; waybar.rs: --waybar line + loop
 ├── tray/          # manager.rs (icon set + run loop), item.rs (SNI item + menu),
 │                 # resolve.rs (device per icon), launch.rs, state service for the dashboard
-├── icon/          # IconRenderer (tiny-skia), status marks, kind glyph bitmaps
+├── icon/          # IconRenderer (tiny-skia), status marks, kind silhouettes
 ├── gui/           # shared egui theme for dashboard and settings
 ├── palette.rs     # colour tables per Palette + WCAG readable(): shared by icon/gui/settings
 ├── dashboard/     # eframe device overview (separate process, left click)
@@ -192,7 +192,7 @@ General — apply on every host:
 COSMIC-specific — the strictest SNI host; these workarounds are safe everywhere:
 
 - No hover tooltip for tray icons, so the icon image and the menu are the only identification
-  channels (drives the device-type corner glyph and the full-roster menu).
+  channels (drives the `DeviceAndBattery` icon style and the full-roster menu).
 - `ksni` `RadioGroup`/nested submenus drop clicks — use plain `StandardItem` for actions and
   `CheckmarkItem` for a choice (`cosmic-applets` 1.8 draws `toggle-state 1` as a checkmark). A
   disabled item gets no press handler. Labels follow the DBusMenu mnemonic rule: a single `_`
