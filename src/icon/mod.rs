@@ -490,20 +490,12 @@ const BOLT: Bitmap = Bitmap {
     ],
 };
 
-const WARNING: Bitmap = Bitmap {
-    cols: 7,
-    rows: &[
-        0b0001000, 0b0011100, 0b0010100, 0b0110110, 0b0111110, 0b1110111, 0b1111111,
-    ],
-};
-
-/// The shape that tells charging and low apart from an ordinary reading
-/// without colour — the icon's `CHARGING_SIGN` and `LOW_SIGN`.
+/// The shape that tells charging apart from an ordinary reading without
+/// colour — the icon's `CHARGING_SIGN`; low is marked by colour alone.
 fn status_mark(status: PrimaryStatus) -> Option<Bitmap> {
     match status {
         PrimaryStatus::Charging { .. } => Some(BOLT),
-        PrimaryStatus::Low { .. } => Some(WARNING),
-        PrimaryStatus::Ok { .. } | PrimaryStatus::Offline => None,
+        PrimaryStatus::Ok { .. } | PrimaryStatus::Low { .. } | PrimaryStatus::Offline => None,
     }
 }
 
@@ -1761,18 +1753,42 @@ mod tests {
     }
 
     #[test]
-    fn charging_and_low_differ_from_ok_in_shape_alone() {
+    fn charging_differs_from_ok_in_shape_and_low_in_colour_alone() {
+        let renderer = TinySkiaRenderer {
+            sizes: PUBLISHED_SIZES.to_vec(),
+        };
+        let mouse = Some(DeviceKind::Mouse);
+        let theme = Theme::dark();
         for mode in DisplayMode::ALL {
             for percent in [8, 15, 88, 100] {
                 let ok = masks(PrimaryStatus::Ok { percent }, mode, false);
                 let charging = masks(PrimaryStatus::Charging { percent }, mode, false);
                 let low = masks(PrimaryStatus::Low { percent }, mode, false);
+                let ok_colour =
+                    renderer.render(PrimaryStatus::Ok { percent }, mouse, &theme, mode, false);
+                let low_colour =
+                    renderer.render(PrimaryStatus::Low { percent }, mouse, &theme, mode, false);
                 for (i, size) in PUBLISHED_SIZES.iter().enumerate() {
                     let at = format!("{mode:?} {percent}% at {size} px");
                     assert_ne!(ok[i], charging[i], "{at}: charging looks like ok");
-                    assert_ne!(ok[i], low[i], "{at}: low looks like ok");
-                    assert_ne!(charging[i], low[i], "{at}: charging looks like low");
+                    assert_eq!(ok[i], low[i], "{at}: low differs from ok in shape");
+                    assert_ne!(
+                        ok_colour[i].data, low_colour[i].data,
+                        "{at}: low looks like ok in colour"
+                    );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_low_reading_keeps_the_full_size_digits() {
+        let mode = DisplayMode::PercentOnly;
+        for percent in [5, 8, 15, 19] {
+            let ok = masks(PrimaryStatus::Ok { percent }, mode, false);
+            let low = masks(PrimaryStatus::Low { percent }, mode, false);
+            for (i, size) in PUBLISHED_SIZES.iter().enumerate() {
+                assert_eq!(ok[i], low[i], "{percent}% at {size} px");
             }
         }
     }
@@ -1809,7 +1825,6 @@ mod tests {
             for status in [
                 PrimaryStatus::Charging { percent: 100 },
                 PrimaryStatus::Charging { percent: 40 },
-                PrimaryStatus::Low { percent: 8 },
             ] {
                 let mark = status_mark(status).expect("a mark");
                 let layout = Layout::new(mode, Some(DeviceKind::Mouse));
