@@ -5,6 +5,7 @@ pub mod roster;
 pub mod text;
 pub mod time;
 pub mod types;
+pub mod version;
 
 pub use display::*;
 pub use estimate::*;

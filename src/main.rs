@@ -141,7 +141,7 @@ fn main() {
             std::process::exit(0);
         }
         Invocation::Version => {
-            println!("rigbat {}", env!("CARGO_PKG_VERSION"));
+            println!("rigbat {}", domain::version::Build::current());
             std::process::exit(0);
         }
         Invocation::Unknown(tok) => {

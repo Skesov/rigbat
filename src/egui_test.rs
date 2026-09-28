@@ -70,9 +70,31 @@ pub fn run_frame(
     ctx: &egui::Context,
     size: [f32; 2],
     events: Vec<egui::Event>,
+    contents: impl FnMut(&mut egui::Ui),
+) -> egui::FullOutput {
+    frame(ctx, size, None, events, contents)
+}
+
+/// `run_frame` with the input clock at `time`, seconds; left unset, egui
+/// advances it a sixtieth of a second per frame.
+pub fn run_frame_at(
+    ctx: &egui::Context,
+    size: [f32; 2],
+    time: f64,
+    contents: impl FnMut(&mut egui::Ui),
+) -> egui::FullOutput {
+    frame(ctx, size, Some(time), Vec::new(), contents)
+}
+
+fn frame(
+    ctx: &egui::Context,
+    size: [f32; 2],
+    time: Option<f64>,
+    events: Vec<egui::Event>,
     mut contents: impl FnMut(&mut egui::Ui),
 ) -> egui::FullOutput {
     let input = egui::RawInput {
+        time,
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(size[0], size[1]),

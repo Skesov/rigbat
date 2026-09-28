@@ -3,6 +3,7 @@ use eframe::egui;
 use super::{LOW_THRESHOLD_RANGE, SettingsApp, open_uri, widgets};
 use crate::autostart;
 use crate::domain::TrayMode;
+use crate::domain::version::Build;
 use crate::i18n::{self, Lang, fl, loader};
 
 /// Every poll-interval choice, default and per device, seconds.
@@ -24,9 +25,17 @@ impl SettingsApp {
             self.render_battery_group(ui);
             self.render_system_group(ui);
             let l = loader(self.config.lang());
+            let build = Build::current();
+            let (copied, label) = (fl!(l, "about-commit-copied"), fl!(l, "about-commit-copy"));
+            let commit = build.commit.map(|hash| widgets::CommitHash {
+                hash,
+                copied: &copied,
+                label: &label,
+            });
             let link = widgets::footer(
                 ui,
-                &format!("rigbat {} ·", env!("CARGO_PKG_VERSION")),
+                &format!("rigbat {}", build.version()),
+                commit.as_ref(),
                 &fl!(l, "about-github"),
             );
             if link.clicked() {
@@ -389,7 +398,9 @@ mod tests {
                     lang,
                 ));
                 expected.push(lang.native_name().to_owned());
-                expected.push(format!("rigbat {} ·", env!("CARGO_PKG_VERSION")));
+                let build = Build::current();
+                expected.push(format!("rigbat {}", build.version()));
+                expected.extend(build.commit.map(str::to_owned));
                 expected.push(if per_device {
                     l.get("autostart-managed-by-systemd")
                 } else {

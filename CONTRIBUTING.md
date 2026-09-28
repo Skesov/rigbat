@@ -173,7 +173,9 @@ own code.
 ## Build requirements
 
 A C compiler (`cc`) must be on `PATH`: `rusqlite`'s `bundled` feature compiles SQLite from
-source. Everything else in the dependency tree is pure Rust.
+source. Everything else in the dependency tree is pure Rust. `git` is optional: `build.rs` asks it
+for the commit hash and the commits since the last `v*` tag that `rigbat -V` and the settings
+footer show (`0.4.0+3 (abc1234)`), and leaves them out without it.
 
 ## Checks before opening a PR
 

@@ -85,6 +85,8 @@ section-language = Язык / Language
 language-system = Системный
 
 about-github = GitHub
+about-commit-copy = Скопировать хэш коммита
+about-commit-copied = Скопировано
 
 ## Settings window: Appearance tab
 
