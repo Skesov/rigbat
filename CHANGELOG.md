@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/Skesov/rigbat/compare/v0.4.0...v0.5.0) (2026-09-28)
+
+
+### Features
+
+* show the commit and commits since the last tag beside the version ([94f82e6](https://github.com/Skesov/rigbat/commit/94f82e6791508f654038c9f5a4c1a26656272aa1))
+
+
+### Bug Fixes
+
+* **settings:** open the GitHub link through the xdg-desktop-portal ([a739232](https://github.com/Skesov/rigbat/commit/a7392327dcd5e84e7716dc8419cdda5d56c6a570))
+
 ## [0.4.0](https://github.com/Skesov/rigbat/compare/v0.3.0...v0.4.0) (2026-09-28)
 
 
