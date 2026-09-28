@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.0](https://github.com/Skesov/rigbat/compare/v0.3.0...v0.4.0) (2026-09-28)
+
+
+### Features
+
+* **icon:** device-and-battery tray style; drop the corner glyph and PercentInIcon ([34bd598](https://github.com/Skesov/rigbat/commit/34bd598fc985e38ff9d318ae9ded48431dba26a8))
+* **icon:** mark a low reading by colour alone in the tray icon ([898693c](https://github.com/Skesov/rigbat/commit/898693c51793bdf3a95df7e35106af126267e3fe))
+* **settings:** configurable period an offline device stays in the tray ([e711a29](https://github.com/Skesov/rigbat/commit/e711a2973abcf9bff0a4565311aec7299e1a92ba))
+
+
+### Bug Fixes
+
+* **gui:** draw device kinds as emoji in the windows again ([9f4fa7e](https://github.com/Skesov/rigbat/commit/9f4fa7e5bc34ede2460dc23c3a09b0e822e50887))
+
+
+### Documentation
+
+* **claude:** note that releases run only in CI ([359e168](https://github.com/Skesov/rigbat/commit/359e168bc6903670c19d048b981635377bef15d4))
+* **readme:** screenshots after the emoji glyphs and tray icon styles ([4562f57](https://github.com/Skesov/rigbat/commit/4562f57d93614d50ab4c92df750e78705ec7d974))
+
 ## [0.3.0](https://github.com/Skesov/rigbat/compare/v0.2.0...v0.3.0) (2026-09-26)
 
 
