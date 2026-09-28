@@ -8,7 +8,7 @@ System tray battery monitor for gaming peripherals on Linux.
 
 <p align="center">
   <img src="docs/screenshots/dashboard.png" width="380"
-       alt="The device overview: an 8BitDo controller and a NuPhy keyboard at 100% and a SteelSeries mouse at 65%, each with its device glyph and a charge bar">
+       alt="The device overview: a NuPhy keyboard at 100% and a SteelSeries mouse at 50% with a time-remaining estimate, and an 8BitDo controller and a UGREEN headset shown as disconnected with the age of their last reading">
 </p>
 
 ## What it does
@@ -221,7 +221,7 @@ language (`System` follows `LANG`).
 
 <p align="center">
   <img src="docs/screenshots/general.png" width="720"
-       alt="The General tab: the one-icon-per-device switch, the low battery threshold, the poll interval, notifications, start with session and language">
+       alt="The General tab: the one-icon-per-device switch, how long an offline device stays in the tray, the low battery threshold, the poll interval, notifications, start with session and language">
 </p>
 
 **Appearance** — how it looks: the theme of the settings window and the device overview
@@ -231,7 +231,7 @@ display mode: a battery, the device type over a battery, or the percentage as di
 
 <p align="center">
   <img src="docs/screenshots/appearance.png" width="720"
-       alt="The Appearance tab: the window theme, colour palette tiles for Catppuccin, Everforest, GNOME and Nord, and the tray icon style tiles">
+       alt="The Appearance tab: the window theme, colour palette tiles for Catppuccin, Everforest, GNOME and Nord, and the tray icon style tiles: battery, device type and battery, percentage">
 </p>
 
 **Devices** — every device rigbat has ever seen on this machine, in two groups: `Connected now`,
@@ -246,7 +246,7 @@ rigbat recognises the hardware, not the label.
 
 <p align="center">
   <img src="docs/screenshots/devices.png" width="720"
-       alt="The Devices tab: three connected devices with their charge and a show-in-tray switch, and four devices seen before with when they were last seen">
+       alt="The Devices tab: two connected devices with their charge and a show-in-tray switch, and five devices seen before with when they were last seen">
 </p>
 
 Changes are written immediately and the tray picks them up through a file watch — no restart.
