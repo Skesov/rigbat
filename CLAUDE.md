@@ -115,7 +115,7 @@ src/
 ├── session/       # logind PrepareForSleep → resume re-poll
 ├── settings/      # eframe/egui settings window (separate process): mod.rs shell,
 │                 # general_tab.rs, appearance_tab.rs, devices_tab.rs, devices.rs (row state), widgets.rs,
-│                 # scan.rs (tray roster, or a local poll when no tray runs)
+│                 # scan.rs (tray roster, or a local poll when no tray runs), open_uri.rs (links via the portal)
 ├── autostart/     # ~/.config/autostart/rigbat.desktop + systemd user unit state
 ├── doctor/        # `rigbat doctor`: setup checks with a fix per problem
 ├── i18n/          # Lang, per-language Fluent loaders, locale detection (catalogues in /i18n)

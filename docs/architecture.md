@@ -445,6 +445,10 @@ SNI host — KDE Plasma (native), GNOME (AppIndicator extension), Waybar/wlroots
 `org.freedesktop.Notifications`, and logind; battery data is read from BlueZ/sysfs/hidraw. There
 are no DE-specific dependencies.
 
+Links in the windows open through the portal's `OpenURI`: a browser started as our child runs
+inside `rigbat.service` and inherits its sandbox, where it crashes. Without a portal, egui opens
+the link itself.
+
 Hosts differ in capability. COSMIC — the primary development/test environment — has the youngest,
 strictest SNI host (no hover tooltip, squares the icon, drops some menu-item clicks), and those
 constraints shape a few rendering and menu choices. The agent-facing list of "things that will

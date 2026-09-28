@@ -85,7 +85,7 @@ autostart-systemd-disable = Disable it with: systemctl --user disable --now rigb
 section-language = Language / Язык
 language-system = System
 
-about-project-page = Project page
+about-github = GitHub
 
 ## Settings window: Appearance tab
 

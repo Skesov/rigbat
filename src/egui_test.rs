@@ -84,21 +84,27 @@ pub fn run_frame(
 }
 
 /// A primary-button click at `pos`: move, press, release, one frame each.
+/// Returns the release frame's output, where a click's commands land.
 pub fn click_at(
     ctx: &egui::Context,
     size: [f32; 2],
     pos: egui::Pos2,
     mut contents: impl FnMut(&mut egui::Ui),
-) {
+) -> egui::FullOutput {
     let button = |pressed| egui::Event::PointerButton {
         pos,
         button: egui::PointerButton::Primary,
         pressed,
         modifiers: egui::Modifiers::default(),
     };
-    for event in [egui::Event::PointerMoved(pos), button(true), button(false)] {
-        run_frame(ctx, size, vec![event], &mut contents);
-    }
+    run_frame(
+        ctx,
+        size,
+        vec![egui::Event::PointerMoved(pos)],
+        &mut contents,
+    );
+    run_frame(ctx, size, vec![button(true)], &mut contents);
+    run_frame(ctx, size, vec![button(false)], &mut contents)
 }
 
 fn collect_text(

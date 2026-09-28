@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use super::{LOW_THRESHOLD_RANGE, SettingsApp, widgets};
+use super::{LOW_THRESHOLD_RANGE, SettingsApp, open_uri, widgets};
 use crate::autostart;
 use crate::domain::TrayMode;
 use crate::i18n::{self, Lang, fl, loader};
@@ -24,12 +24,15 @@ impl SettingsApp {
             self.render_battery_group(ui);
             self.render_system_group(ui);
             let l = loader(self.config.lang());
-            widgets::footer(
+            let link = widgets::footer(
                 ui,
                 &format!("rigbat {} ·", env!("CARGO_PKG_VERSION")),
-                &fl!(l, "about-project-page"),
-                env!("CARGO_PKG_REPOSITORY"),
+                &fl!(l, "about-github"),
             );
+            if link.clicked() {
+                let url = env!("CARGO_PKG_REPOSITORY");
+                open_uri::open(&self.rt, &self.open_uri, ui.ctx(), url);
+            }
         });
     }
 
@@ -313,6 +316,7 @@ mod tests {
     };
     use crate::settings::WINDOW_MIN_SIZE;
     use crate::settings::tests::{app_saving_to, settings_app_with};
+    use std::sync::{Arc, mpsc};
 
     /// The narrowest the window gets, tall enough that the General tab's
     /// column does not scroll: its rows are checked, not the scroll area.
@@ -373,7 +377,7 @@ mod tests {
                     "group-system",
                     "autostart-enabled",
                     "section-language",
-                    "about-project-page",
+                    "about-github",
                 ]
                 .into_iter()
                 .map(|id| l.get(id))
@@ -475,6 +479,71 @@ mod tests {
         });
         assert!(announced, "{:?}", output.platform_output.events);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// Clicks the footer link with a recording URL opener; returns the
+    /// release frame and the URLs the opener was given.
+    fn click_footer_link(
+        app: &mut SettingsApp,
+        portal_answers: bool,
+    ) -> (egui::Context, egui::FullOutput, mpsc::Receiver<String>) {
+        let (tx, rx) = mpsc::channel();
+        app.open_uri = Arc::new(move |url| {
+            tx.send(url).expect("the test holds the receiver");
+            let result = if portal_answers {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("no portal"))
+            };
+            Box::pin(std::future::ready(result))
+        });
+        let ctx = egui::Context::default();
+        let size = GENERAL_TAB_TEST_SIZE;
+        let output = run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
+        let link = crate::egui_test::painted(&output)
+            .into_iter()
+            .find(|p| p.text == "GitHub")
+            .expect("the link was painted");
+        let output = click_at(&ctx, size, link.rect.center(), |ui| {
+            app.render_general_tab(ui)
+        });
+        (ctx, output, rx)
+    }
+
+    fn opens_url(output: &egui::FullOutput) -> bool {
+        output.platform_output.commands.iter().any(|command| {
+            matches!(command, egui::OutputCommand::OpenUrl(open)
+                if open.url == env!("CARGO_PKG_REPOSITORY"))
+        })
+    }
+
+    /// egui's own path starts the browser as our child, inside the tray
+    /// unit's sandbox, where it crashes.
+    #[test]
+    fn clicking_the_footer_link_opens_the_repository_through_the_portal() {
+        let mut app = settings_app_with(Config::default());
+
+        let (_, output, opened) = click_footer_link(&mut app, true);
+
+        assert_eq!(
+            opened.try_recv().ok().as_deref(),
+            Some(env!("CARGO_PKG_REPOSITORY"))
+        );
+        assert!(!opens_url(&output), "{:?}", output.platform_output.commands);
+    }
+
+    #[test]
+    fn the_footer_link_falls_back_to_egui_when_the_portal_fails() {
+        let mut app = settings_app_with(Config::default());
+
+        let (ctx, _, opened) = click_footer_link(&mut app, false);
+        assert!(opened.try_recv().is_ok());
+        app.rt.block_on(tokio::task::yield_now());
+        let output = run_frame(&ctx, GENERAL_TAB_TEST_SIZE, Vec::new(), |ui| {
+            app.render_general_tab(ui)
+        });
+
+        assert!(opens_url(&output), "{:?}", output.platform_output.commands);
     }
 
     #[test]

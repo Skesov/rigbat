@@ -2,6 +2,7 @@ mod appearance_tab;
 mod devices;
 mod devices_tab;
 mod general_tab;
+mod open_uri;
 mod scan;
 mod widgets;
 
@@ -118,6 +119,7 @@ struct SettingsApp {
     delete_state: DeleteState,
     style_previews: Option<StylePreviews>,
     palette_swatches: Option<PaletteSwatches>,
+    open_uri: open_uri::Opener,
     /// The language the window title was last set in.
     title_lang: Lang,
     /// What the window's look follows; `gui::follow` re-applies on every change.
@@ -381,6 +383,7 @@ pub fn run(tab: Tab) -> anyhow::Result<()> {
                 delete_state: DeleteState::default(),
                 style_previews: None,
                 palette_swatches: None,
+                open_uri: open_uri::portal(),
                 title_lang,
                 theme,
             };
@@ -439,6 +442,7 @@ mod tests {
             delete_state: DeleteState::default(),
             style_previews: None,
             palette_swatches: None,
+            open_uri: Arc::new(|_| Box::pin(std::future::ready(Ok(())))),
             title_lang,
             theme,
         }

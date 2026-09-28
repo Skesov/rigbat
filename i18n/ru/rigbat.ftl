@@ -84,7 +84,7 @@ autostart-systemd-disable = Отключить: systemctl --user disable --now r
 section-language = Язык / Language
 language-system = Системный
 
-about-project-page = Страница проекта
+about-github = GitHub
 
 ## Settings window: Appearance tab
 

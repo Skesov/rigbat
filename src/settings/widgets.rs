@@ -581,16 +581,18 @@ pub fn trailing<R>(ui: &mut egui::Ui, width: f32, control: impl FnOnce(&mut egui
     .inner
 }
 
-/// One weak, centred line: `text` followed by a link.
-pub fn footer(ui: &mut egui::Ui, text: &str, link: &str, url: &str) {
+/// One weak, centred line: `text` followed by a link, whose response it
+/// returns; the caller opens the target.
+pub fn footer(ui: &mut egui::Ui, text: &str, link: &str) -> egui::Response {
     let font = secondary_font(ui);
     let width = text_width(ui, text, &font) + FOOTER_SPACING + text_width(ui, link, &font);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = FOOTER_SPACING;
         ui.add_space(((ui.available_width() - width) / 2.0 - FOOTER_SPACING).max(0.0));
         ui.label(secondary(ui, text));
-        ui.hyperlink_to(egui::RichText::new(link).size(font.size), url);
-    });
+        ui.link(egui::RichText::new(link).size(font.size))
+    })
+    .inner
 }
 
 fn text_width(ui: &egui::Ui, text: &str, font: &egui::FontId) -> f32 {
@@ -643,7 +645,7 @@ mod tests {
                 trailing(ui, 120.0, |ui| ui.label("Trailing"))
             });
         });
-        footer(ui, "rigbat 1.0 ·", "Project page", "https://example.org");
+        footer(ui, "rigbat 1.0 ·", "GitHub");
     }
 
     fn painted_color(theme: egui::Theme, text: &str, add: impl Fn(&mut egui::Ui)) -> egui::Color32 {
@@ -724,7 +726,7 @@ mod tests {
             "Plain row",
             "Trailing",
             "rigbat 1.0 ·",
-            "Project page",
+            "GitHub",
         ] {
             let lines = painted.iter().find(|p| p.text == text).map(|p| p.lines);
             assert_eq!(

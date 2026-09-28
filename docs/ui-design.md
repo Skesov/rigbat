@@ -211,7 +211,7 @@ The settings building blocks live in `src/settings/widgets.rs`.
 | `tile(…)` + `tile_width`              | Image above caption, accent outline when selected                                                                                                       | A choice whose options are best shown as pictures (icon style, palette) |
 | `tab_bar(ui, labels, selected)`       | Centred tabs, accent underline on the selected one, full-width rule below                                                                               | Switching between a window's top-level views                            |
 | `trailing(ui, width, control)`        | A fixed-width, left-to-right box at the row's right edge                                                                                                | A composite control, such as a slider with its value                    |
-| `footer(ui, text, link, url)`         | One centred secondary line ending in a link                                                                                                             | Version and project page at the bottom of General                       |
+| `footer(ui, text, link)`              | One centred secondary line ending in a link; returns its response, the caller opens the target                                                          | Version and GitHub link at the bottom of General                        |
 
 Stock egui widgets fill the other roles inside a row: `egui::ComboBox` for a list of values (poll
 interval, offline period, language, theme), `egui::Slider` with a unit suffix inside `trailing` for a range (low-battery
