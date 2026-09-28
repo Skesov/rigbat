@@ -59,7 +59,7 @@ fluent-syntax = "0.12"
 # Property tests for the byte-level parsers in sources::*.
 proptest = "1"
 # Parses src/ for the module dependency rules in tests/architecture.rs.
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "3", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 # Paused clock for timer-driven loops (supervisor sweep cadence).
 tokio = { version = "1", features = ["test-util"] }
