@@ -7,8 +7,9 @@ mod scan;
 mod widgets;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
+use std::sync::{Arc, OnceLock};
 
 use eframe::egui;
 
@@ -17,6 +18,8 @@ use crate::config::{self, Config};
 use crate::domain::{DeviceId, WindowTheme};
 use crate::gui;
 use crate::i18n::{Lang, fl, loader};
+use crate::ipc::single_instance::{SingleInstance, acquire_named};
+use crate::ipc::{SETTINGS_NAME, SETTINGS_PATH, Settings1Proxy};
 use crate::state;
 use appearance_tab::{PaletteSwatches, StylePreviews};
 use devices::{DeleteState, DeviceRow};
@@ -313,32 +316,113 @@ where
     Ok(on_disk)
 }
 
-/// Opens the settings window. Blocks until the user closes it.
-///
+/// Serves `org.rigbat.Settings1`: a second launch asks the open window to come forward.
+#[derive(Clone, Default)]
+struct Raiser {
+    window: Arc<OnceLock<egui::Context>>,
+    /// Set when `Raise` arrives before the window exists.
+    pending: Arc<AtomicBool>,
+}
+
+#[zbus::interface(name = "org.rigbat.Settings1")]
+impl Raiser {
+    fn raise(&self) {
+        match self.window.get() {
+            Some(window) => raise_window(window),
+            None => self.pending.store(true, Ordering::SeqCst),
+        }
+    }
+}
+
+impl Raiser {
+    /// Called from the eframe creator: applies a `Raise` that came before the window.
+    fn attach(&self, window: &egui::Context) {
+        let _ = self.window.set(window.clone());
+        if self.pending.swap(false, Ordering::SeqCst) {
+            raise_window(window);
+        }
+    }
+}
+
+/// On Wayland winit 0.30 ignores `Focus` and un-minimizing; only the
+/// attention request reaches the compositor.
+fn raise_window(window: &egui::Context) {
+    window.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+    window.send_viewport_cmd(egui::ViewportCommand::Focus);
+    window.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+        egui::UserAttentionType::Informational,
+    ));
+    window.request_repaint();
+}
+
+async fn raise_running() {
+    let result = async {
+        let conn = zbus::Connection::session().await?;
+        Settings1Proxy::new(&conn).await?.raise().await
+    }
+    .await;
+    if let Err(e) = result {
+        tracing::warn!("could not raise the open settings window: {e}");
+    }
+}
+
 /// Keeps a tokio runtime alive for the life of the window (unlike the old
 /// discover-once-and-drop approach) so devices that connect after the window
 /// opens still show up: a scan is spawned on it at startup and again on
 /// every "Refresh" click, never entered blockingly from `ui()`.
-type Background = (
-    Arc<tokio::runtime::Runtime>,
-    tokio::sync::watch::Receiver<crate::appearance::Appearance>,
-);
-
-/// The runtime setup `run` does from its own thread, which is not a runtime thread.
-fn start() -> anyhow::Result<Background> {
+fn runtime() -> anyhow::Result<Arc<tokio::runtime::Runtime>> {
     use anyhow::Context as _;
 
-    let rt = Arc::new(
+    Ok(Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .context("building the tokio runtime for device discovery")?,
-    );
-    let appearance = rt.block_on(crate::appearance::window_appearance());
-    Ok((rt, appearance))
+    ))
 }
 
+enum Startup {
+    /// Another settings window holds the name: this launch only raises it.
+    AlreadyRunning,
+    Started {
+        /// Holds the name and serves `Raiser` for as long as it lives.
+        bus: Option<zbus::Connection>,
+        appearance: tokio::sync::watch::Receiver<crate::appearance::Appearance>,
+    },
+}
+
+/// The bus setup `run` does from its own thread, which is not a runtime thread.
+fn start(rt: &tokio::runtime::Runtime, raiser: Raiser) -> Startup {
+    let bus = match rt.block_on(acquire_named(SETTINGS_NAME)) {
+        SingleInstance::AlreadyRunning => return Startup::AlreadyRunning,
+        SingleInstance::Acquired(conn) => {
+            // `object_server()` spawns zbus's dispatch task, so it must run inside the runtime.
+            if let Err(e) =
+                rt.block_on(async { conn.object_server().at(SETTINGS_PATH, raiser).await })
+            {
+                tracing::warn!("a second launch will not raise this window: {e}");
+            }
+            Some(conn)
+        }
+        SingleInstance::Unavailable => None,
+    };
+    let appearance = rt.block_on(crate::appearance::window_appearance());
+    Startup::Started { bus, appearance }
+}
+
+/// Opens the settings window, or raises the one already open. Blocks until the user closes it.
 pub fn run(tab: Tab) -> anyhow::Result<()> {
+    let rt = runtime()?;
+    // Dropping zbus objects can spawn a task, so `_bus` drops with the runtime entered.
+    let _entered = rt.enter();
+    let raiser = Raiser::default();
+    let (_bus, appearance) = match start(&rt, raiser.clone()) {
+        Startup::AlreadyRunning => {
+            rt.block_on(raise_running());
+            return Ok(());
+        }
+        Startup::Started { bus, appearance } => (bus, appearance),
+    };
     let config = config::load();
     let title_lang = config.lang();
     // A second connection to the same database the tray writes through —
@@ -347,7 +431,6 @@ pub fn run(tab: Tab) -> anyhow::Result<()> {
     // file) degrades to today's scan-only device list, same as the tray
     // treats a missing store as an optimisation, never a dependency.
     let store = state::open();
-    let (rt, appearance) = start()?;
     let discovery_ctx = Arc::new(crate::sources::Context::new());
     let text_scale = appearance.borrow().text_scale;
     let (theme, theme_rx) = tokio::sync::watch::channel(config.theme);
@@ -363,6 +446,7 @@ pub fn run(tab: Tab) -> anyhow::Result<()> {
         "rigbat",
         options,
         Box::new(move |cc| {
+            raiser.attach(&cc.egui_ctx);
             gui::follow(rt.handle(), cc.egui_ctx.clone(), appearance, theme_rx);
             let mut app = SettingsApp {
                 config,
@@ -641,6 +725,54 @@ mod tests {
         app.apply_scan_result(scan_result(vec![device("mouse")]));
         assert!(!app.tray_unanswered);
     }
+
+    fn commands(output: &egui::FullOutput) -> Vec<egui::ViewportCommand> {
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|viewport| viewport.commands.clone())
+            .unwrap_or_default()
+    }
+
+    fn raises(commands: &[egui::ViewportCommand]) -> bool {
+        commands.contains(&egui::ViewportCommand::Focus)
+            && commands.contains(&egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ))
+    }
+
+    #[test]
+    fn a_raise_before_the_window_exists_is_applied_when_it_opens() {
+        let raiser = Raiser::default();
+        raiser.raise();
+        assert!(raiser.pending.load(Ordering::SeqCst));
+
+        let window = egui::Context::default();
+        raiser.attach(&window);
+        let output = crate::egui_test::run_frame(&window, WINDOW_DEFAULT_SIZE, Vec::new(), |_| {});
+        assert!(raises(&commands(&output)), "{:?}", commands(&output));
+        assert!(!raiser.pending.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_window_opened_without_a_raise_is_left_alone() {
+        let raiser = Raiser::default();
+        let window = egui::Context::default();
+        raiser.attach(&window);
+        let output = crate::egui_test::run_frame(&window, WINDOW_DEFAULT_SIZE, Vec::new(), |_| {});
+        assert!(!raises(&commands(&output)));
+    }
+
+    #[test]
+    fn a_raise_after_the_window_opened_raises_it_at_once() {
+        let raiser = Raiser::default();
+        let window = egui::Context::default();
+        raiser.attach(&window);
+        raiser.raise();
+        let output = crate::egui_test::run_frame(&window, WINDOW_DEFAULT_SIZE, Vec::new(), |_| {});
+        assert!(raises(&commands(&output)));
+        assert!(!raiser.pending.load(Ordering::SeqCst));
+    }
 }
 
 #[cfg(test)]
@@ -651,7 +783,10 @@ mod bus_tests {
     use zbus::object_server::SignalEmitter;
     use zbus::zvariant::{OwnedValue, Value};
 
-    use super::start;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::{Raiser, Startup, raise_running, runtime, start};
     use crate::appearance::ColorScheme;
     use crate::bus_test::isolated;
     use crate::gui;
@@ -706,7 +841,13 @@ mod bus_tests {
             })
             .expect("fake portal");
 
-        let (rt, appearance) = start().expect("start");
+        let rt = runtime().expect("runtime");
+        let (_bus, appearance) = match start(&rt, Raiser::default()) {
+            Startup::Started { bus, appearance } => (bus, Some(appearance)),
+            Startup::AlreadyRunning => (None, None),
+        };
+        let appearance =
+            appearance.expect("no other settings window holds the name on the private bus");
         assert_eq!(appearance.borrow().scheme, ColorScheme::Light);
 
         let window = egui::Context::default();
@@ -726,5 +867,40 @@ mod bus_tests {
                 .expect("SettingChanged");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Called from the test thread, which no runtime has entered — as `run` calls it.
+    #[test]
+    fn a_second_start_raises_the_first_from_a_plain_thread() {
+        if !isolated(
+            module_path!(),
+            "a_second_start_raises_the_first_from_a_plain_thread",
+        ) {
+            return;
+        }
+        let rt = runtime().expect("runtime");
+        let pending = Arc::new(AtomicBool::new(false));
+        let first = start(
+            &rt,
+            Raiser {
+                window: Arc::default(),
+                pending: pending.clone(),
+            },
+        );
+        assert!(
+            matches!(first, Startup::Started { bus: Some(_), .. }),
+            "the first launch owns the name"
+        );
+
+        let second = start(&rt, Raiser::default());
+        assert!(matches!(second, Startup::AlreadyRunning));
+        rt.block_on(raise_running());
+        assert!(
+            pending.load(Ordering::SeqCst),
+            "Raise reached the first window"
+        );
+
+        let _entered = rt.enter();
+        drop(first);
     }
 }

@@ -11,6 +11,8 @@ pub const TRAY_NAME: &str = "org.rigbat.Tray";
 pub const TRAY_PATH: &str = "/org/rigbat/Tray";
 pub const DASHBOARD_NAME: &str = "org.rigbat.Dashboard";
 pub const DASHBOARD_PATH: &str = "/org/rigbat/Dashboard";
+pub const SETTINGS_NAME: &str = "org.rigbat.Settings";
+pub const SETTINGS_PATH: &str = "/org/rigbat/Settings";
 
 /// What `org.rigbat.Tray1.State` returns, as JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +62,15 @@ pub trait Tray1 {
 )]
 pub trait Dashboard1 {
     fn close(&self) -> zbus::Result<()>;
+}
+
+#[zbus::proxy(
+    interface = "org.rigbat.Settings1",
+    default_service = "org.rigbat.Settings",
+    default_path = "/org/rigbat/Settings"
+)]
+pub trait Settings1 {
+    fn raise(&self) -> zbus::Result<()>;
 }
 
 #[cfg(test)]

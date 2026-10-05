@@ -1,5 +1,5 @@
-//! Single-instance guard: `rigbat tray` and `rigbat dashboard` each claim a
-//! well-known session-bus name.
+//! Single-instance guard: `rigbat tray`, `rigbat dashboard` and
+//! `rigbat settings` each claim a well-known session-bus name.
 //!
 //! `ksni` publishes each tray icon under `org.kde.StatusNotifierItem-<pid>-<n>`,
 //! which is keyed by PID and therefore never collides — so two `rigbat tray`
