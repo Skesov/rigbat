@@ -82,6 +82,8 @@ pub struct View {
     mode: TrayMode,
     automatic: bool,
     lang: Lang,
+    /// A device this icon stands for is low and not charging.
+    attention: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,11 +127,13 @@ impl View {
         };
         let pinned = featured_id(state, cfg, now)
             .filter(|id| cfg.primary_device.as_deref() == Some(id.name.as_str()));
+        let mut any_low = false;
         let rows = visible(state, cfg, now)
             .devices()
             .iter()
             .map(|d| {
                 let (status, _) = device_status(d, cfg.effective_low_threshold(&d.info.name));
+                any_low |= matches!(status, PrimaryStatus::Low { .. });
                 MenuRow {
                     name: d.info.name.clone(),
                     label: mnemonic_escape(&device_line(d, status, now, lang)),
@@ -138,7 +142,13 @@ impl View {
                 }
             })
             .collect();
+        // A per-device icon speaks for its own device; the single icon for every shown one.
+        let attention = match key {
+            Some(_) => matches!(icon.status, PrimaryStatus::Low { .. }),
+            None => any_low,
+        };
         Self {
+            attention,
             title,
             icon,
             tool_tip,
@@ -199,6 +209,16 @@ impl Tray for RigbatTray {
     /// icon this is the only textual channel naming the device it stands for.
     fn title(&self) -> String {
         self.view.title.clone()
+    }
+
+    /// `NeedsAttention` is the SNI spec's own example for a battery running
+    /// out; it names low without relying on the icon's colour.
+    fn status(&self) -> ksni::Status {
+        if self.view.attention {
+            ksni::Status::NeedsAttention
+        } else {
+            ksni::Status::Active
+        }
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
@@ -704,6 +724,39 @@ mod tests {
 
     /// Unchanged state still renders new text once an age crosses a unit;
     /// a live reading's line does not age.
+    /// Low and not charging asks the host for attention: the single icon for
+    /// any shown device, a per-device icon for its own.
+    #[test]
+    fn a_low_device_that_is_not_charging_needs_attention() {
+        let charging_low = BatteryReading::new(10, ChargeState::Charging);
+        let state = make_state(vec![
+            (make_info("mouse"), Some(make_reading(62))),
+            (make_info("keyboard"), Some(make_reading(15))),
+            (make_info("headset"), Some(charging_low)),
+        ]);
+        let status = |key: Option<DeviceId>| tray_for(key, state.clone()).status();
+        assert_eq!(status(None), ksni::Status::NeedsAttention);
+        assert_eq!(status(Some(key("keyboard"))), ksni::Status::NeedsAttention);
+        assert_eq!(status(Some(key("mouse"))), ksni::Status::Active);
+        assert_eq!(status(Some(key("headset"))), ksni::Status::Active);
+
+        let fine = make_state(vec![
+            (make_info("mouse"), Some(make_reading(62))),
+            (make_info("headset"), Some(charging_low)),
+        ]);
+        assert_eq!(tray_for(None, fine).status(), ksni::Status::Active);
+
+        let hidden = Config {
+            hidden_devices: vec!["keyboard".to_owned()],
+            ..Config::default()
+        };
+        assert_eq!(
+            tray_with(None, state, hidden, saved).status(),
+            ksni::Status::Active,
+            "a hidden device asks for nothing"
+        );
+    }
+
     #[test]
     fn a_view_changes_with_time_only_where_text_ages() {
         let state = TrayState {
