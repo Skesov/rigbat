@@ -24,12 +24,6 @@ estimate-minutes = ~{ $count } мин
 estimate-hours = ~{ $count } ч
 estimate-over-days = >{ $count } д
 
-entry-online = { $name }: { $percent }%  { $state }
-entry-online-estimate = { $name }: { $percent }%  { $state }  осталось { $estimate }
-entry-offline = { $name }: не на связи
-entry-offline-retained = { $name }: { $percent }%  не на связи ({ $age })
-entry-no-access = { $name }: нет доступа (запустите rigbat doctor)
-
 note-last-reading = последние данные { $age }
 note-no-access = запустите rigbat doctor
 note-remaining = осталось { $estimate }

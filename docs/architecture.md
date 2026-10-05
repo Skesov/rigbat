@@ -162,7 +162,7 @@ minute, and a worker per core only adds idle wakeups. `TOKIO_WORKER_THREADS` sti
 - **Presence and retention**: each device carries a `Presence`
   (`Online`/`Unreachable`/`Disconnected`/`NoAccess`) alongside its last reading. A source that starts
   erroring flips to `Unreachable` without discarding that reading, so consumers can render
-  "88% offline (2h ago)" instead of losing the value; `Disconnected` is reserved for a device
+  "unreachable · last reading 2h ago" instead of losing the value; `Disconnected` is reserved for a device
   reconcile no longer sees at all; such an entry is pruned from the roster once it has been gone
   for `DISCONNECTED_RETENTION` (24 h), or immediately if it never produced a reading. A source
   whose open fails with a permission error returns the typed `sources::AccessDenied`; the device

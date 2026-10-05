@@ -6,7 +6,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 use crate::config::Config;
 use crate::domain::{AGE_STEP, BootTime, DeviceState, PrimaryStatus, Roster, TrayState};
-use crate::domain::{device_status, format_device_entry};
+use crate::domain::{device_line, device_status};
 use crate::i18n::Lang;
 
 /// The device the waybar module features and its status: the aggregate tray
@@ -53,7 +53,10 @@ pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: BootTime) -> Value {
             .devices()
             .iter()
             // CLI surface: always English.
-            .map(|d| format_device_entry(d, now, Lang::En))
+            .map(|d| {
+                let (status, _) = device_status(d, cfg.effective_low_threshold(&d.info.name));
+                device_line(d, status, now, Lang::En)
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -154,7 +157,7 @@ pub async fn run(mut rx: watch::Receiver<TrayState>, mut cfg_rx: watch::Receiver
     .await;
 
     let mut last_line: Option<String> = None;
-    // The tooltip's "offline (2h ago)" ages with nothing published.
+    // The tooltip's "last reading 2h ago" ages with nothing published.
     let mut age_tick = interval_at(Instant::now() + AGE_STEP, AGE_STEP);
     age_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -278,7 +281,7 @@ mod tests {
         assert_eq!(value["class"], "ok");
         assert_eq!(value["percentage"], 88);
         let tooltip = value["tooltip"].as_str().expect("tooltip is a string");
-        assert_eq!(tooltip, "mouse: 88%  offline (5m ago)");
+        assert_eq!(tooltip, "mouse: unreachable · last reading 5m ago");
     }
 
     #[test]
@@ -315,7 +318,10 @@ mod tests {
         let lines: Vec<&str> = tooltip.lines().collect();
         assert_eq!(
             lines,
-            ["mouse: 80%  charging", "keyboard: 50%  offline (5m ago)"]
+            [
+                "mouse: ⚡ 80%",
+                "keyboard: unreachable · last reading 5m ago"
+            ]
         );
     }
 
@@ -330,7 +336,7 @@ mod tests {
         let value = to_waybar(&states, &Config::default(), crate::clock::now());
         assert_eq!(value["text"], "60%");
         let tooltip = value["tooltip"].as_str().expect("tooltip is a string");
-        assert!(tooltip.contains("mouse: no access (run rigbat doctor)"));
+        assert!(tooltip.contains("mouse: no access · run rigbat doctor"));
     }
 
     #[test]

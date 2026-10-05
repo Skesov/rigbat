@@ -200,8 +200,8 @@ mod tests {
     #[test]
     fn substitutions_carry_no_isolation_marks() {
         assert_eq!(
-            fl!(loader(Lang::Ru), "entry-offline", name = "MX Master 3"),
-            "MX Master 3: не на связи"
+            fl!(loader(Lang::Ru), "device-seen-ago", age = "вчера"),
+            "замечено вчера"
         );
     }
 

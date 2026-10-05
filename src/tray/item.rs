@@ -6,8 +6,8 @@ use super::resolve::{featured_id, resolve_for, visible};
 use crate::appearance::ColorScheme;
 use crate::config::Config;
 use crate::domain::{
-    BootTime, DeviceId, PrimaryStatus, TrayMode, TrayState, device_line, device_status,
-    freedesktop_icon_name,
+    BootTime, DeviceId, PrimaryStatus, TrayMode, TrayState, absent_line, device_line,
+    device_status, freedesktop_icon_name,
 };
 use crate::i18n::{Lang, fl, loader};
 use crate::icon::{IconKey, Theme};
@@ -111,7 +111,7 @@ impl View {
         };
         let tool_tip = match (&resolved, key) {
             (Some(r), _) => device_line(&r.state, r.status, now, lang),
-            (None, Some(id)) => fl!(l, "entry-offline", name = id.name.as_str()),
+            (None, Some(id)) => absent_line(&id.name, lang),
             (None, None) => fl!(l, "tray-no-devices"),
         };
         let icon = IconKey {
@@ -678,6 +678,12 @@ mod tests {
         let mut tray = tray_with(None, every_row_shape(), Config::default(), unsavable);
         click(&mut tray, "Ear: ⚡ 40%");
         assert_eq!(tray.config.borrow().primary_device, None);
+    }
+
+    #[test]
+    fn an_icon_whose_device_is_gone_uses_the_presence_word() {
+        let tray = tray_for(Some(key("gone")), TrayState { devices: vec![] });
+        assert_eq!(tray.tool_tip().title, "gone: disconnected");
     }
 
     #[test]

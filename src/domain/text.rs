@@ -1,6 +1,6 @@
 //! Human-facing text for a device's state: the charge-state word, a coarse
 //! age, the value and note the dashboard and the Devices tab render, the line
-//! the tray menu and tooltip render, and the entry `--waybar` prints.
+//! the tray menu, its tooltip and the `--waybar` tooltip render.
 //!
 //! In `domain` rather than in any one surface because several render the same
 //! words and none of them owns them: an adapter importing another adapter is
@@ -51,69 +51,6 @@ pub fn format_age(age: Duration, lang: Lang) -> String {
     } else {
         let count = secs / 86400;
         fl!(l, "age-days", count = count)
-    }
-}
-
-/// Formats a device entry string for the `--waybar` tooltip.
-///
-/// `Online` renders the live reading. `Unreachable`/`Disconnected` render the
-/// retained reading with its age (e.g. "88%  offline (2h ago)"), or plain
-/// "offline" when there is nothing retained. `now` is a parameter, not
-/// `BootTime::TEST_NOW` inside the function, so callers can render deterministically.
-pub fn format_device_entry(state: &DeviceState, now: BootTime, lang: Lang) -> String {
-    let l = loader(lang);
-    let name = state.info.name.as_str();
-
-    if state.presence == Presence::NoAccess {
-        return fl!(l, "entry-no-access", name = name);
-    }
-
-    if state.presence == Presence::Online {
-        return match state.last_reading {
-            Some(r) => {
-                let percent = r.percent;
-                let charge = state_label(r.state, lang);
-                let charge = charge.as_str();
-                match state.estimate {
-                    Estimate::Remaining(d) => {
-                        let estimate = format_coarse(d, lang);
-                        let estimate = estimate.as_str();
-                        fl!(
-                            l,
-                            "entry-online-estimate",
-                            name = name,
-                            percent = percent,
-                            state = charge,
-                            estimate = estimate
-                        )
-                    }
-                    Estimate::Unknown => fl!(
-                        l,
-                        "entry-online",
-                        name = name,
-                        percent = percent,
-                        state = charge
-                    ),
-                }
-            }
-            None => fl!(l, "entry-offline", name = name),
-        };
-    }
-
-    match (state.last_reading, state.last_seen) {
-        (Some(r), Some(seen)) => {
-            let percent = r.percent;
-            let age = format_age(now.saturating_duration_since(seen), lang);
-            let age = age.as_str();
-            fl!(
-                l,
-                "entry-offline-retained",
-                name = name,
-                percent = percent,
-                age = age
-            )
-        }
-        _ => fl!(l, "entry-offline", name = name),
     }
 }
 
@@ -238,6 +175,12 @@ pub fn device_line(
     }
 }
 
+/// The tooltip of a per-device icon whose device has left the roster.
+pub fn absent_line(name: &str, lang: Lang) -> String {
+    let word = presence_label(Presence::Disconnected, lang);
+    format!("{name}: {word}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,197 +259,7 @@ mod tests {
         );
     }
 
-    // --- format_device_entry ------------------------------------------------
-
-    #[test]
-    fn format_device_entry_online_offline_reading() {
-        let now = BootTime::TEST_NOW;
-        assert_eq!(
-            format_device_entry(&state("mouse", Presence::Online, None, None), now, Lang::En),
-            "mouse: offline"
-        );
-    }
-
-    #[test]
-    fn format_device_entry_online_discharging() {
-        let now = BootTime::TEST_NOW;
-        let r = BatteryReading::new(75, ChargeState::Discharging);
-        assert_eq!(
-            format_device_entry(
-                &state("keyboard", Presence::Online, Some(r), Some(now)),
-                now,
-                Lang::En
-            ),
-            "keyboard: 75%  discharging"
-        );
-    }
-
-    #[test]
-    fn format_device_entry_online_charging() {
-        let now = BootTime::TEST_NOW;
-        let r = BatteryReading::new(42, ChargeState::Charging);
-        assert_eq!(
-            format_device_entry(
-                &state("headset", Presence::Online, Some(r), Some(now)),
-                now,
-                Lang::En
-            ),
-            "headset: 42%  charging"
-        );
-    }
-
-    #[test]
-    fn format_device_entry_online_full() {
-        let now = BootTime::TEST_NOW;
-        let r = BatteryReading::new(100, ChargeState::Full);
-        assert_eq!(
-            format_device_entry(
-                &state("controller", Presence::Online, Some(r), Some(now)),
-                now,
-                Lang::En
-            ),
-            "controller: 100%  full"
-        );
-    }
-
-    #[test]
-    fn format_device_entry_retained_reading_shows_age() {
-        let seen = BootTime::TEST_NOW;
-        let now = seen + Duration::from_secs(2 * 3600);
-        let r = BatteryReading::new(88, ChargeState::Discharging);
-        assert_eq!(
-            format_device_entry(
-                &state("NuPhy Air75", Presence::Disconnected, Some(r), Some(seen)),
-                now,
-                Lang::En
-            ),
-            "NuPhy Air75: 88%  offline (2h ago)"
-        );
-    }
-
-    #[test]
-    fn format_device_entry_unreachable_with_retained_reading() {
-        let seen = BootTime::TEST_NOW;
-        let now = seen + Duration::from_secs(300);
-        let r = BatteryReading::new(50, ChargeState::Discharging);
-        assert_eq!(
-            format_device_entry(
-                &state("mouse", Presence::Unreachable, Some(r), Some(seen)),
-                now,
-                Lang::En
-            ),
-            "mouse: 50%  offline (5m ago)"
-        );
-    }
-
-    #[test]
-    fn format_device_entry_appends_remaining_when_estimate_is_remaining() {
-        let r = BatteryReading::new(62, ChargeState::Discharging);
-        let s = state_with_estimate(
-            "MX Anywhere 3",
-            Some(r),
-            Estimate::Remaining(Duration::from_secs(7 * 3600)),
-        );
-        assert_eq!(
-            format_device_entry(&s, BootTime::TEST_NOW, Lang::En),
-            "MX Anywhere 3: 62%  discharging  ~7h left"
-        );
-    }
-
-    #[test]
-    fn format_device_entry_appends_nothing_when_estimate_is_unknown() {
-        let r = BatteryReading::new(62, ChargeState::Discharging);
-        let s = state_with_estimate("mouse", Some(r), Estimate::Unknown);
-        assert_eq!(
-            format_device_entry(&s, BootTime::TEST_NOW, Lang::En),
-            "mouse: 62%  discharging"
-        );
-    }
-
-    #[test]
-    fn format_device_entry_shows_a_charging_device_without_an_estimate() {
-        let r = BatteryReading::new(62, ChargeState::Charging);
-        let s = state_with_estimate("mouse", Some(r), Estimate::Unknown);
-        assert_eq!(
-            format_device_entry(&s, BootTime::TEST_NOW, Lang::En),
-            "mouse: 62%  charging"
-        );
-    }
-
-    #[test]
-    fn format_device_entry_disconnected_without_reading() {
-        let now = BootTime::TEST_NOW;
-        assert_eq!(
-            format_device_entry(
-                &state("gamepad", Presence::Disconnected, None, None),
-                now,
-                Lang::En
-            ),
-            "gamepad: offline"
-        );
-    }
-
-    #[test]
-    fn format_device_entry_no_access_points_at_doctor_even_with_a_retained_reading() {
-        let seen = BootTime::TEST_NOW;
-        let r = BatteryReading::new(88, ChargeState::Discharging);
-        let denied = state("mouse", Presence::NoAccess, Some(r), Some(seen));
-        assert_eq!(
-            format_device_entry(&denied, seen, Lang::En),
-            "mouse: no access (run rigbat doctor)"
-        );
-        assert_eq!(
-            format_device_entry(&denied, seen, Lang::Ru),
-            "mouse: нет доступа (запустите rigbat doctor)"
-        );
-    }
-
     // --- Russian ------------------------------------------------------------
-
-    #[test]
-    fn russian_entries_render_every_shape() {
-        let seen = BootTime::TEST_NOW;
-        let now = seen + Duration::from_secs(2 * 3600);
-        let r = BatteryReading::new(88, ChargeState::Discharging);
-        let remaining = state_with_estimate(
-            "MX Anywhere 3",
-            Some(BatteryReading::new(62, ChargeState::Discharging)),
-            Estimate::Remaining(Duration::from_secs(7 * 3600)),
-        );
-        for (entry, expected) in [
-            (
-                format_device_entry(
-                    &state("mouse", Presence::Online, Some(r), Some(seen)),
-                    seen,
-                    Lang::Ru,
-                ),
-                "mouse: 88%  разряжается",
-            ),
-            (
-                format_device_entry(&remaining, BootTime::TEST_NOW, Lang::Ru),
-                "MX Anywhere 3: 62%  разряжается  осталось ~7 ч",
-            ),
-            (
-                format_device_entry(
-                    &state("mouse", Presence::Disconnected, Some(r), Some(seen)),
-                    now,
-                    Lang::Ru,
-                ),
-                "mouse: 88%  не на связи (2 ч назад)",
-            ),
-            (
-                format_device_entry(
-                    &state("gamepad", Presence::Disconnected, None, None),
-                    now,
-                    Lang::Ru,
-                ),
-                "gamepad: не на связи",
-            ),
-        ] {
-            assert_eq!(entry, expected);
-        }
-    }
-
     #[test]
     fn russian_ages_use_abbreviated_units() {
         assert_eq!(format_age(Duration::from_secs(5), Lang::Ru), "только что");
@@ -522,6 +275,100 @@ mod tests {
             format_age(Duration::from_secs(3 * 86400), Lang::Ru),
             "3 д назад"
         );
+    }
+
+    // --- device_line ---------------------------------------------------------
+
+    fn line(device: &DeviceState, now: BootTime, lang: Lang) -> String {
+        let (status, _) = crate::domain::device_status(device, 20);
+        device_line(device, status, now, lang)
+    }
+
+    #[test]
+    fn device_line_reads_every_state_in_one_wording() {
+        let seen = BootTime::TEST_NOW;
+        let now = seen + Duration::from_secs(2 * 3600);
+        let reading = |percent, state| Some(BatteryReading::new(percent, state));
+        let discharging = reading(75, ChargeState::Discharging);
+        let estimate = state_with_estimate(
+            "MX Anywhere 3",
+            reading(62, ChargeState::Discharging),
+            Estimate::Remaining(Duration::from_secs(7 * 3600)),
+        );
+        let cases = [
+            (
+                state("kb", Presence::Online, discharging, Some(now)),
+                "kb: 75%",
+                "kb: 75%",
+            ),
+            (
+                state(
+                    "ear",
+                    Presence::Online,
+                    reading(42, ChargeState::Charging),
+                    Some(now),
+                ),
+                "ear: \u{26A1} 42%",
+                "ear: \u{26A1} 42%",
+            ),
+            (
+                state(
+                    "pad",
+                    Presence::Online,
+                    reading(100, ChargeState::Full),
+                    Some(now),
+                ),
+                "pad: 100% · full",
+                "pad: 100% · заряжено",
+            ),
+            (
+                state(
+                    "mouse",
+                    Presence::Online,
+                    reading(5, ChargeState::Discharging),
+                    Some(now),
+                ),
+                "mouse: \u{26A0} 5%",
+                "mouse: \u{26A0} 5%",
+            ),
+            (
+                state("mouse", Presence::Online, None, None),
+                "mouse: —",
+                "mouse: —",
+            ),
+            (
+                state("NuPhy", Presence::Unreachable, discharging, Some(seen)),
+                "NuPhy: unreachable · last reading 2h ago",
+                "NuPhy: недоступно · последние данные 2 ч назад",
+            ),
+            (
+                state("NuPhy", Presence::Disconnected, discharging, Some(seen)),
+                "NuPhy: disconnected · last reading 2h ago",
+                "NuPhy: отключено · последние данные 2 ч назад",
+            ),
+            (
+                state("pad", Presence::Disconnected, None, None),
+                "pad: disconnected",
+                "pad: отключено",
+            ),
+            (
+                state("mouse", Presence::NoAccess, discharging, Some(seen)),
+                "mouse: no access · run rigbat doctor",
+                "mouse: нет доступа · запустите rigbat doctor",
+            ),
+        ];
+        for (device, en, ru) in cases {
+            assert_eq!(line(&device, now, Lang::En), en);
+            assert_eq!(line(&device, now, Lang::Ru), ru);
+        }
+        let estimate = line(&estimate, BootTime::TEST_NOW, Lang::En);
+        assert_eq!(estimate, "MX Anywhere 3: 62% · ~7h left");
+    }
+
+    #[test]
+    fn an_absent_device_reads_disconnected() {
+        assert_eq!(absent_line("pad", Lang::En), "pad: disconnected");
+        assert_eq!(absent_line("pad", Lang::Ru), "pad: отключено");
     }
 
     // --- presence words ------------------------------------------------------

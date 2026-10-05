@@ -24,12 +24,6 @@ estimate-minutes = ~{ $count }m
 estimate-hours = ~{ $count }h
 estimate-over-days = >{ $count }d
 
-entry-online = { $name }: { $percent }%  { $state }
-entry-online-estimate = { $name }: { $percent }%  { $state }  { $estimate } left
-entry-offline = { $name }: offline
-entry-offline-retained = { $name }: { $percent }%  offline ({ $age })
-entry-no-access = { $name }: no access (run rigbat doctor)
-
 note-last-reading = last reading { $age }
 note-no-access = run rigbat doctor
 note-remaining = { $estimate } left
