@@ -133,7 +133,9 @@ minute, and a worker per core only adds idle wakeups. `TOKIO_WORKER_THREADS` sti
   fired. A refresh-triggered sweep resets the interval.
 - Each discovered device gets its own **source task** that polls on that device's effective
   interval and sends `(DeviceId, reading)` to the manager over an `mpsc` channel. One failing
-  source never affects the others. A source whose device announces its level
+  source never affects the others. A config change moves the next poll to the last poll plus the
+  new interval, so a shortened interval applies at once and a cosmetic change (palette, display
+  mode, language, pin) sends no query to any device. A source whose device announces its level
   (`BatterySource::pushed`, BlueZ `Battery1.Percentage`) hands that reading to its own task, which
   sends it like a polled one: no other device is polled and no sweep runs.
 - **Refresh** ("re-poll and re-discover now") is a `RefreshSignal`: `watch` channels carrying a

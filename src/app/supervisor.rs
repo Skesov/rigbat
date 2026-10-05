@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 use tokio::task::AbortHandle;
-use tokio::time::{MissedTickBehavior, interval_at, sleep};
+use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep_until};
 
 use super::migration::migrate_shown_devices_once;
 use crate::config::Config;
@@ -966,19 +966,31 @@ fn spawn_source_task(
             }
 
             // effective_poll_interval_secs clamps to >= 1, so a hostile 0 in
-            // config.json cannot spin this loop.
-            let interval =
-                Duration::from_secs(config_rx.borrow().effective_poll_interval_secs(&name));
-            // The borrow above is dropped before the select below — a
-            // watch::Ref must never be held across an .await.
+            // config.json cannot spin this loop. The borrow ends in the
+            // closure: a watch::Ref must never be held across an .await.
+            let polled_at = Instant::now();
+            let next_poll = |config_rx: &watch::Receiver<Config>| {
+                polled_at
+                    + Duration::from_secs(config_rx.borrow().effective_poll_interval_secs(&name))
+            };
+            let mut due = next_poll(&config_rx);
+            let mut config_open = true;
 
-            tokio::select! {
-                _ = sleep(interval) => {}
-                _ = waiter.wait() => {}
-                // A config change wakes the task immediately so a shortened
-                // interval applies at once instead of after the old sleep.
-                _ = config_rx.changed() => {}
-                r = src.pushed() => pushed = Some(r),
+            loop {
+                tokio::select! {
+                    _ = sleep_until(due) => break,
+                    _ = waiter.wait() => break,
+                    // Only this device's interval moves the next poll; a
+                    // palette or language change polls nothing.
+                    r = config_rx.changed(), if config_open => match r {
+                        Ok(()) => due = next_poll(&config_rx),
+                        Err(_) => config_open = false,
+                    },
+                    r = src.pushed() => {
+                        pushed = Some(r);
+                        break;
+                    }
+                }
             }
         }
     });
@@ -1320,6 +1332,62 @@ mod tests {
         })
         .await
         .expect("poll count did not rise after config update");
+    }
+
+    /// A change that does not touch the polling interval (palette, theme,
+    /// language) re-renders, it does not send a query to every device.
+    #[tokio::test(start_paused = true)]
+    async fn a_cosmetic_config_change_polls_nothing() {
+        let initial = Config {
+            poll_interval_secs: 3600,
+            ..Config::default()
+        };
+        let (tx, _config_rx) = config_channel(initial.clone());
+        let poll_count = Arc::new(AtomicUsize::new(0));
+        let poll_count_clone = poll_count.clone();
+
+        struct CountingSource {
+            info: DeviceInfo,
+            count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl BatterySource for CountingSource {
+            fn device(&self) -> &DeviceInfo {
+                &self.info
+            }
+
+            async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
+                self.count.fetch_add(1, Ordering::Relaxed);
+                Ok(reading_discharging(50))
+            }
+        }
+
+        let (mut rx, _refresh) = Supervisor::spawn_with(
+            tx.clone(),
+            move || {
+                let sources: Vec<Box<dyn BatterySource>> = vec![Box::new(CountingSource {
+                    info: device("mouse"),
+                    count: poll_count_clone.clone(),
+                })];
+                async move { vec![ok_sweep("sysfs", sources)] }
+            },
+            no_migration_load,
+            no_migration_save,
+            None,
+        );
+        wait_for_connected(&mut rx).await;
+        let before = poll_count.load(Ordering::Relaxed);
+
+        tx.send(Config {
+            palette: crate::domain::Palette::Nord,
+            language: Some("ru".to_owned()),
+            ..initial
+        })
+        .expect("config receiver still alive");
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+        assert_eq!(poll_count.load(Ordering::Relaxed), before);
     }
 
     // --- DeviceRegistry -------------------------------------------------
