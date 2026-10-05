@@ -1130,6 +1130,43 @@ mod tests {
         assert!(!fills.contains(&accent), "{fills:?}");
     }
 
+    /// Opacity is never the only sign of a retained reading: under high
+    /// contrast too, its row names the presence and the reading's age, not a percentage.
+    #[test]
+    fn a_retained_reading_says_so_in_words_under_high_contrast() {
+        let ctx = egui::Context::default();
+        gui::apply(
+            &ctx,
+            &crate::appearance::Appearance {
+                high_contrast: true,
+                ..crate::appearance::Appearance::default()
+            },
+        );
+        let mut d = dashboard(
+            vec![
+                card("NuPhy", Presence::Disconnected, Some(88)),
+                card("Aerox", Presence::Unreachable, Some(12)),
+            ],
+            Lang::En,
+        );
+        let size = d.wanted_size();
+        run_frame(&ctx, size, Vec::new(), |ui| d.show(ui));
+        let painted: Vec<String> =
+            crate::egui_test::painted(&run_frame(&ctx, size, Vec::new(), |ui| d.show(ui)))
+                .into_iter()
+                .map(|p| p.text)
+                .collect();
+        for text in [
+            "Disconnected".to_owned(),
+            format!("{LOW_SIGN} Unreachable"),
+            "last reading 2\u{a0}h ago".to_owned(),
+        ] {
+            assert!(painted.contains(&text), "{text:?}: {painted:?}");
+        }
+        assert!(!painted.iter().any(|t| t.contains("88%")), "{painted:?}");
+        assert_eq!(gui::targets(&ctx), crate::palette::Targets::HIGH);
+    }
+
     #[test]
     fn a_retained_reading_dims_its_bar_by_the_shared_factor() {
         let mut d = dashboard(
