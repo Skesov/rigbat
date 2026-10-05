@@ -43,7 +43,9 @@ kind-other = other
 ## Desktop notification
 
 notify-low-title = { $name } battery low
-notify-low-body = { $percent }% remaining
+notify-low-body = { $percent }% left. Charge it soon.
+notify-critical-body = { $percent }% left. Charge it now.
+notify-open-overview = Open device overview
 
 ## Settings window: shared
 

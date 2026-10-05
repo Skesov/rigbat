@@ -389,7 +389,9 @@ async fn run_tray() {
     });
     // Spawn the notifier after config_tx is available so it can receive the
     // notifications_enabled flag and per-device thresholds via a config receiver.
-    crate::notifications::spawn(rx.clone(), config_tx.subscribe());
+    crate::notifications::spawn(rx.clone(), config_tx.subscribe(), || {
+        crate::launch::spawn("dashboard");
+    });
 
     // Wait for the first discovery pass so the initial roster can be logged.
     let mut probe = rx.clone();

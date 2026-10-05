@@ -13,3 +13,4 @@ Terminal=false
 Categories=Settings;HardwareSettings;
 StartupWMClass=rigbat
 NoDisplay=false
+X-GNOME-UsesNotifications=true

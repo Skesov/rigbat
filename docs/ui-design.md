@@ -348,6 +348,30 @@ Rendered by `TinySkiaRenderer` behind the `IconRenderer` port (`src/icon/mod.rs`
   (`render_style_previews`), so a preview cannot drift from the real icon; the
   `DeviceAndBattery` tile shows a mouse.
 
+### Notifications
+
+The low-battery notification (`src/notifications/`) is the only surface outside the tray and the
+windows. Rules follow the
+[Desktop Notifications spec](https://specifications.freedesktop.org/notification/latest/) and the
+[GNOME HIG](https://developer.gnome.org/hig/patterns/feedback/notifications.html).
+
+- **Urgency.** Normal at the device's threshold; critical only at `CRITICAL_PERCENT` (5 %) or
+  below, where the device is about to switch off. The spec reserves critical for that kind of
+  emergency, and hosts show it through Do Not Disturb. Expiry is the server's default (`-1`).
+- **One per device.** The id `Notify` returns is passed back as `replaces_id`: a crossing that
+  deepens to critical replaces its toast instead of stacking a second one.
+- **Withdraw when stale.** `CloseNotification` when the device charges, reads `REARM_MARGIN`
+  above its threshold, is hidden, or leaves the roster. A toast the server reports closed is
+  forgotten, never replaced.
+- **Default action.** A click on the body opens the device overview, the same window as the
+  tray's left click. No other buttons: actions must not duplicate the default one.
+- **Identity.** Hints `desktop-entry = rigbat` (the shipped desktop file id) and
+  `category = device`, so hosts group rigbat's notifications and can mute them per app.
+- **Text.** The title alone names the device and the problem (`{ $name } battery low`); the body
+  gives the level and what to do, in full sentences ("15% left. Charge it soon.").
+- **Never the only channel.** The tray icon and the overview show the same low state; the
+  notification only draws attention to it.
+
 ## Text
 
 - Every UI string comes from `i18n/<lang>/rigbat.ftl` through `fl!`; `i18n/en` is the reference.

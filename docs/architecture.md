@@ -438,7 +438,12 @@ without the device present.
   `TrayState`, and other changes republish it too. One bad sample from a noisy BLE device therefore costs nothing;
   a real low battery is announced one poll interval later than it used to be. The deliberate
   consequence: a device that reports low exactly once and then dies or vanishes is never announced,
-  since a non-Online device is skipped and its streak can no longer advance.
+  since a non-Online device is skipped and its streak can no longer advance. Urgency is normal,
+  critical only once `LOW_CONFIRMATIONS` readings sit at or below 5 % (then the toast is replaced
+  in place, via the kept `replaces_id`). Re-arming, hiding, or leaving the roster withdraws the
+  toast (`CloseNotification`); `ActionInvoked("default")` on its id opens the dashboard through
+  a callback `main.rs` passes in, and `NotificationClosed` forgets the id. Text and hint rules:
+  [`ui-design.md`](ui-design.md#notifications).
 - **autostart** — writes/removes `~/.config/autostart/rigbat.desktop`.
 
 ## Diagnostics

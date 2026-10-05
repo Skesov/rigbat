@@ -16,7 +16,8 @@ answer. A device whose node the user may not open (`sources::AccessDenied`, typi
 udev rule) reads `NoAccess` ("no access", pointing at `rigbat doctor`) instead of offline: it
 keeps its tray entry, never notifies, and is never featured over an online device. Tray: left click opens the dashboard (a row per device), right click the menu listing
 device status (in single-icon mode a checkmark per device pins the icon to it; unpinned, it shows the online device with the lowest charge); light/dark theme, display modes (battery, device type over a battery, digits), time-remaining estimate, low-battery notifications
-(confirmed by two distinct readings), separate settings window listing every device seen (expander rows),
+(confirmed by two distinct readings; normal urgency, critical at ≤ 5 %; one per device, withdrawn on charge/recovery/hide,
+a click opens the dashboard), separate settings window listing every device seen (expander rows),
 per-device poll intervals/thresholds and aggregate-icon pin, config persistence. UI in English and
 Russian (Fluent, `i18n/`), switchable live; the CLI stays English. A second `rigbat tray` exits
 instead of doubling every icon. Diagnostics via `tracing`. Packaging: udev rule, desktop entry,

@@ -43,7 +43,9 @@ kind-other = другое
 ## Desktop notification
 
 notify-low-title = { $name }: низкий заряд
-notify-low-body = Осталось { $percent }%
+notify-low-body = Осталось { $percent }%. Зарядите в ближайшее время.
+notify-critical-body = Осталось { $percent }%. Зарядите сейчас.
+notify-open-overview = Открыть обзор устройств
 
 ## Settings window: shared
 
