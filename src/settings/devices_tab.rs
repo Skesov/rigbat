@@ -75,7 +75,8 @@ impl SettingsApp {
             });
         });
         if self.tray_unanswered {
-            let warn = gui::status_colors(ui.visuals(), self.config.palette).warn;
+            let warn =
+                gui::status_colors(ui.visuals(), self.config.palette, gui::targets(ui.ctx())).warn;
             ui.label(egui::RichText::new(fl!(l, "devices-tray-unanswered")).color(warn));
         }
         ui.add_space(widgets::TOOLBAR_GAP);
@@ -101,6 +102,7 @@ impl SettingsApp {
             .into_iter()
             .partition(|row| row.presence != Presence::Disconnected);
         let visuals = ui.visuals().clone();
+        let colors = gui::status_colors(&visuals, self.config.palette, gui::targets(ui.ctx()));
         let now = state::now_unix();
         for (title, group) in [
             (fl!(l, "devices-connected"), connected),
@@ -111,7 +113,7 @@ impl SettingsApp {
             }
             widgets::group(ui, &title, None, |rows| {
                 for row in &group {
-                    self.render_device(rows, row, &visuals, now);
+                    self.render_device(rows, row, (&visuals, &colors), now);
                 }
             });
         }
@@ -128,7 +130,8 @@ impl SettingsApp {
             return;
         }
         let l = loader(self.config.lang());
-        let warn = gui::status_colors(ui.visuals(), self.config.palette).warn;
+        let warn =
+            gui::status_colors(ui.visuals(), self.config.palette, gui::targets(ui.ctx())).warn;
         let title = fl!(l, "devices-no-access-title", count = count);
         let (copy, copied) = (fl!(l, "button-copy"), fl!(l, "button-copied"));
         let mut help = false;
@@ -147,14 +150,14 @@ impl SettingsApp {
         &mut self,
         rows: &mut widgets::Rows<'_>,
         row: &DeviceRow,
-        visuals: &egui::Visuals,
+        look: (&egui::Visuals, &gui::StatusColors),
         now: i64,
     ) {
         let lang = self.config.lang();
         let l = loader(lang);
         let name = row.device.name.as_str();
         let connected = row.presence != Presence::Disconnected;
-        let (value, note) = self.device_value(row, visuals, now);
+        let (value, note) = self.device_value(row, look, now);
         let hover = device_about(row, lang);
         let header = widgets::Expander {
             id: egui::Id::new(("device-row", &row.device)),
@@ -196,11 +199,10 @@ impl SettingsApp {
     fn device_value(
         &self,
         row: &DeviceRow,
-        visuals: &egui::Visuals,
+        (visuals, colors): (&egui::Visuals, &gui::StatusColors),
         now: i64,
     ) -> (egui::RichText, Option<String>) {
         let lang = self.config.lang();
-        let colors = gui::status_colors(visuals, self.config.palette);
         if row.presence == Presence::Disconnected {
             let seen = row.last_seen.map_or_else(
                 || "—".to_owned(),
@@ -210,7 +212,7 @@ impl SettingsApp {
                 },
             );
             return (
-                gui::charge_value_text(visuals, &colors, seen, false, false),
+                gui::charge_value_text(visuals, colors, seen, false, false),
                 None,
             );
         }
@@ -235,7 +237,7 @@ impl SettingsApp {
             .map(|at| Duration::from_secs(u64::try_from(now.saturating_sub(at)).unwrap_or(0)));
         let note = status_note(row.presence, row.remaining, seen_ago, lang);
         (
-            gui::charge_value_text(visuals, &colors, text, low, online),
+            gui::charge_value_text(visuals, colors, text, low, online),
             note,
         )
     }
@@ -350,7 +352,12 @@ impl SettingsApp {
                     .clicked()
                     .then_some(RemoveStep::Arm),
                 DeleteCell::Confirm => {
-                    let error = gui::status_colors(ui.visuals(), self.config.palette).low;
+                    let error = gui::status_colors(
+                        ui.visuals(),
+                        self.config.palette,
+                        gui::targets(ui.ctx()),
+                    )
+                    .low;
                     let confirm = egui::RichText::new(fl!(l, "device-remove-confirm")).color(error);
                     let confirmed = ui.button(confirm).clicked();
                     let cancelled = ui.button(fl!(l, "button-cancel")).clicked();

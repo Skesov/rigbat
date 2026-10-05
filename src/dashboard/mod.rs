@@ -315,6 +315,15 @@ fn refresh_button(ui: &mut egui::Ui, enabled: bool, lang: Lang) -> egui::Respons
     response
 }
 
+/// A spinner, or with reduced motion the same news as still text.
+fn progress(ui: &mut egui::Ui, lang: Lang) {
+    if gui::reduced_motion(ui.ctx()) {
+        ui.label(fl!(loader(lang), "button-refreshing"));
+    } else {
+        ui.add(egui::Spinner::new());
+    }
+}
+
 struct Dashboard {
     snapshot: Option<Snapshot>,
     received_at: BootTime,
@@ -438,7 +447,7 @@ impl Dashboard {
             }
             Some(snapshot) => {
                 let lang = self.lang;
-                let status = gui::status_colors(ui.visuals(), self.palette);
+                let status = gui::status_colors(ui.visuals(), self.palette, gui::targets(ui.ctx()));
                 let elapsed = crate::clock::now()
                     .saturating_duration_since(self.received_at)
                     .as_secs();
@@ -492,7 +501,7 @@ impl Dashboard {
                 });
             }
             if in_flight {
-                ui.add(egui::Spinner::new());
+                progress(&mut ui, self.lang);
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1047,7 +1056,7 @@ mod tests {
         ctx.set_theme(egui::Theme::Dark);
         d.palette = palette;
         let output = run_frame(&ctx, d.wanted_size(), Vec::new(), |ui| d.show(ui));
-        let status = gui::status_colors(&ctx.global_style().visuals, palette);
+        let status = gui::status_colors(&ctx.global_style().visuals, palette, gui::targets(&ctx));
         let mut fills = Vec::new();
         let mut texts = Vec::new();
         for clipped in &output.shapes {
@@ -1141,6 +1150,32 @@ mod tests {
     }
 
     #[test]
+    fn with_reduced_motion_progress_is_still_text_not_a_spinner() {
+        for reduced_motion in [false, true] {
+            let ctx = egui::Context::default();
+            gui::apply(
+                &ctx,
+                &crate::appearance::Appearance {
+                    reduced_motion,
+                    ..crate::appearance::Appearance::default()
+                },
+            );
+            let output = run_frame(&ctx, [200.0, 60.0], Vec::new(), |ui| {
+                progress(ui, Lang::En);
+            });
+            let text = crate::egui_test::painted(&output)
+                .into_iter()
+                .any(|p| p.text == "Refreshing…");
+            assert_eq!(text, reduced_motion);
+            let spinner = output
+                .shapes
+                .iter()
+                .any(|clipped| matches!(clipped.shape, egui::Shape::Path(_)));
+            assert_eq!(spinner, !reduced_motion);
+        }
+    }
+
+    #[test]
     fn a_forced_theme_overrides_the_portal_scheme() {
         use crate::appearance::{Appearance, ColorScheme};
 
@@ -1161,7 +1196,11 @@ mod tests {
             let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
 
             assert_eq!(ctx.global_style().visuals.dark_mode, dark, "{theme:?}");
-            let status = gui::status_colors(&ctx.global_style().visuals, Palette::Nord);
+            let status = gui::status_colors(
+                &ctx.global_style().visuals,
+                Palette::Nord,
+                gui::targets(&ctx),
+            );
             let scheme = if dark {
                 egui::Visuals::dark()
             } else {
@@ -1169,7 +1208,7 @@ mod tests {
             };
             assert_eq!(
                 status,
-                gui::status_colors(&scheme, Palette::Nord),
+                gui::status_colors(&scheme, Palette::Nord, crate::palette::Targets::NORMAL),
                 "{theme:?}: the palette follows the forced scheme"
             );
         }

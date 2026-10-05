@@ -4,6 +4,8 @@ use anyhow::Context as _;
 use futures_util::StreamExt;
 use tokio::sync::watch;
 
+use ashpd::desktop::settings::{Contrast, ReducedMotion};
+
 use crate::domain::WindowTheme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,12 +49,17 @@ fn set_scheme(tx: &watch::Sender<ColorScheme>, scheme: ColorScheme) -> bool {
     })
 }
 
-/// What a window draws with: the session's scheme, accent and text scale.
+/// What a window draws with: the session's scheme, accent, text scale, and
+/// its contrast and motion preferences.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Appearance {
     pub scheme: ColorScheme,
     pub accent: Option<[u8; 3]>,
     pub text_scale: f32,
+    /// The portal's `contrast` is 1, "higher contrast".
+    pub high_contrast: bool,
+    /// The portal's `reduced-motion` is 1.
+    pub reduced_motion: bool,
 }
 
 impl Appearance {
@@ -74,6 +81,8 @@ impl Default for Appearance {
             scheme: ColorScheme::Light,
             accent: None,
             text_scale: 1.0,
+            high_contrast: false,
+            reduced_motion: false,
         }
     }
 }
@@ -86,6 +95,8 @@ enum Change {
     Scheme(ColorScheme),
     Accent(Option<[u8; 3]>),
     TextScale(f32),
+    HighContrast(bool),
+    ReducedMotion(bool),
 }
 
 /// Waits at most `INITIAL_READ_TIMEOUT` for the first portal read, then follows its signals.
@@ -119,6 +130,12 @@ async fn follow_portal(tx: watch::Sender<Appearance>) {
     {
         initial.text_scale = clamp_text_scale(scale);
     }
+    if let Ok(contrast) = settings.contrast().await {
+        initial.high_contrast = contrast == Contrast::High;
+    }
+    if let Ok(motion) = settings.reduced_motion().await {
+        initial.reduced_motion = motion == ReducedMotion::ReducedMotion;
+    }
     tx.send_replace(initial);
 
     let mut changes = Vec::new();
@@ -144,6 +161,17 @@ async fn follow_portal(tx: watch::Sender<Appearance>) {
         ),
         Err(e) => tracing::warn!("xdg-portal text-scaling signal unavailable: {e}"),
     }
+    match settings.receive_contrast_changed().await {
+        Ok(s) => changes.push(s.map(|c| Change::HighContrast(c == Contrast::High)).boxed()),
+        Err(e) => tracing::warn!("xdg-portal contrast signal unavailable: {e}"),
+    }
+    match settings.receive_reduced_motion_changed().await {
+        Ok(s) => changes.push(
+            s.map(|m| Change::ReducedMotion(m == ReducedMotion::ReducedMotion))
+                .boxed(),
+        ),
+        Err(e) => tracing::warn!("xdg-portal reduced-motion signal unavailable: {e}"),
+    }
     if changes.is_empty() {
         return;
     }
@@ -167,6 +195,8 @@ fn apply_change(appearance: &mut Appearance, change: Change) -> bool {
         Change::Scheme(scheme) => appearance.scheme = scheme,
         Change::Accent(accent) => appearance.accent = accent,
         Change::TextScale(scale) => appearance.text_scale = scale,
+        Change::HighContrast(high) => appearance.high_contrast = high,
+        Change::ReducedMotion(reduced) => appearance.reduced_motion = reduced,
     }
     *appearance != before
 }
@@ -251,6 +281,8 @@ mod tests {
             scheme: ColorScheme::Dark,
             accent: Some([1, 2, 3]),
             text_scale: 1.25,
+            high_contrast: true,
+            reduced_motion: true,
         };
         assert_eq!(portal.with_theme(WindowTheme::System), portal);
         assert_eq!(
@@ -280,6 +312,9 @@ mod tests {
         ));
         assert!(apply_change(&mut appearance, Change::TextScale(1.5)));
         assert_eq!(appearance.text_scale, 1.5);
+        assert!(apply_change(&mut appearance, Change::HighContrast(true)));
+        assert!(apply_change(&mut appearance, Change::ReducedMotion(true)));
+        assert!(appearance.high_contrast && appearance.reduced_motion);
     }
 }
 

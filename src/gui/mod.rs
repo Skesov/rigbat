@@ -5,7 +5,7 @@ use tokio::sync::watch;
 
 use crate::appearance::{Appearance, ColorScheme};
 use crate::domain::{DeviceKind, Palette, WindowTheme};
-use crate::palette::{self, DIM, GRAPHIC_CONTRAST, Rgb, TEXT_CONTRAST};
+use crate::palette::{self, DIM, Rgb, Targets};
 
 /// A device row in either window, and the least height of a settings row.
 pub const ROW_HEIGHT: f32 = 48.0;
@@ -14,6 +14,32 @@ pub const GLYPH_SIZE: f32 = 20.0;
 /// WCAG 2.2 SC 2.5.8: the least width and height of anything a pointer operates.
 pub const MIN_TARGET: f32 = 24.0;
 
+/// The session's contrast and motion preferences, as `apply` last set them.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Preferences {
+    high_contrast: bool,
+    reduced_motion: bool,
+}
+
+fn preferences_id() -> egui::Id {
+    egui::Id::new("rigbat-session-preferences")
+}
+
+fn preferences(ctx: &egui::Context) -> Preferences {
+    ctx.data(|d| d.get_temp(preferences_id()))
+        .unwrap_or_default()
+}
+
+/// The contrast the window's status colours must reach.
+pub fn targets(ctx: &egui::Context) -> Targets {
+    Targets::for_contrast(preferences(ctx).high_contrast)
+}
+
+/// The session asks for no motion: no animation, no spinner.
+pub fn reduced_motion(ctx: &egui::Context) -> bool {
+    preferences(ctx).reduced_motion
+}
+
 /// Accent goes into both styles so a scheme switch keeps it.
 pub fn apply(ctx: &egui::Context, appearance: &Appearance) {
     ctx.set_theme(match appearance.scheme {
@@ -21,13 +47,32 @@ pub fn apply(ctx: &egui::Context, appearance: &Appearance) {
         ColorScheme::Light => egui::ThemePreference::Light,
     });
     ctx.set_zoom_factor(appearance.text_scale);
+    ctx.data_mut(|d| {
+        d.insert_temp(
+            preferences_id(),
+            Preferences {
+                high_contrast: appearance.high_contrast,
+                reduced_motion: appearance.reduced_motion,
+            },
+        );
+    });
+    let animation_time = if appearance.reduced_motion {
+        0.0
+    } else {
+        egui::Style::default().animation_time
+    };
     ctx.all_styles_mut(|style| {
         style.spacing.interact_size.y = MIN_TARGET;
+        style.animation_time = animation_time;
         let defaults = if style.visuals.dark_mode {
             egui::Visuals::dark()
         } else {
             egui::Visuals::light()
         };
+        style.visuals = defaults.clone();
+        if appearance.high_contrast {
+            raise_contrast(&mut style.visuals);
+        }
         style.visuals.selection = match appearance.accent {
             Some([r, g, b]) => {
                 let fill = egui::Color32::from_rgb(r, g, b);
@@ -39,6 +84,25 @@ pub fn apply(ctx: &egui::Context, appearance: &Appearance) {
             None => defaults.selection,
         };
     });
+}
+
+/// Every text and hairline in the scheme's strongest text colour, so body
+/// text clears 7:1 and strokes read as clearly as text.
+fn raise_contrast(visuals: &mut egui::Visuals) {
+    let strong = visuals.strong_text_color();
+    visuals.override_text_color = Some(strong);
+    visuals.weak_text_color = Some(strong);
+    for widget in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        widget.fg_stroke.color = strong;
+    }
+    visuals.widgets.noninteractive.bg_stroke.color = strong;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, strong);
 }
 
 /// Applies the session's look under `theme` now, and again on every change of
@@ -143,9 +207,9 @@ pub struct StatusColors {
     pub track: egui::Color32,
 }
 
-/// Text roles reach 4.5:1 on every surface text is painted on; bars reach
-/// 3:1 on the panel, dimmed included.
-pub fn status_colors(visuals: &egui::Visuals, palette: Palette) -> StatusColors {
+/// Text roles reach `targets.text` on every surface text is painted on; bars
+/// reach `targets.graphic` on the panel, dimmed included.
+pub fn status_colors(visuals: &egui::Visuals, palette: Palette, targets: Targets) -> StatusColors {
     let scheme = if visuals.dark_mode {
         ColorScheme::Dark
     } else {
@@ -157,10 +221,10 @@ pub fn status_colors(visuals: &egui::Visuals, palette: Palette) -> StatusColors 
         text_surfaces(visuals)
             .into_iter()
             .fold(color, |c, surface| {
-                palette::readable(c, rgb(surface), TEXT_CONTRAST, 1.0)
+                palette::readable(c, rgb(surface), targets.text, 1.0)
             })
     };
-    let bar = |color| palette::readable(color, panel, GRAPHIC_CONTRAST, DIM);
+    let bar = |color| palette::readable(color, panel, targets.graphic, DIM);
     StatusColors {
         normal: opaque(bar(s.fg)),
         charging: opaque(bar(s.charging)),
@@ -235,6 +299,7 @@ mod tests {
                 scheme: ColorScheme::Light,
                 accent: Some([0x40, 0xA0, 0x2B]),
                 text_scale: 1.25,
+                ..Appearance::default()
             },
         );
         run_pass(&ctx);
@@ -258,7 +323,7 @@ mod tests {
         let mut appearance = Appearance {
             scheme: ColorScheme::Dark,
             accent: Some([200, 0, 0]),
-            text_scale: 1.0,
+            ..Appearance::default()
         };
         apply(&ctx, &appearance);
         appearance.accent = None;
@@ -359,30 +424,100 @@ mod tests {
         }
     }
 
+    /// Raised contrast included: WCAG AAA 7:1 text, 4.5:1 bars.
     #[test]
     fn every_palette_status_colour_is_readable_where_the_window_paints_it() {
-        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
-            for palette in Palette::ALL {
-                let status = status_colors(&visuals, palette);
-                let at = |role| format!("{palette:?} dark_mode={} {role}", visuals.dark_mode);
-                for (role, color) in [("low", status.low), ("warn", status.warn)] {
-                    for surface in text_surfaces(&visuals) {
-                        let ratio = contrast_ratio(color, surface);
-                        assert!(ratio >= TEXT_CONTRAST, "{}: {ratio:.2}:1", at(role));
-                    }
+        for (high_contrast, targets) in [(false, Targets::NORMAL), (true, Targets::HIGH)] {
+            for mut visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
+                if high_contrast {
+                    raise_contrast(&mut visuals);
                 }
-                for (role, color, opacity) in [
-                    ("normal", status.normal, DIM),
-                    ("charging", status.charging, DIM),
-                    ("low", status.low, 1.0),
-                ] {
-                    let panel = rgb(visuals.panel_fill);
-                    let painted = palette::over(rgb(color), panel, opacity);
-                    let ratio = palette::contrast_ratio(painted, panel);
-                    assert!(ratio >= GRAPHIC_CONTRAST, "{}: {ratio:.2}:1", at(role));
+                for palette in Palette::ALL {
+                    let status = status_colors(&visuals, palette, targets);
+                    let at = |role| {
+                        format!(
+                            "{palette:?} dark_mode={} high={high_contrast} {role}",
+                            visuals.dark_mode
+                        )
+                    };
+                    for (role, color) in [("low", status.low), ("warn", status.warn)] {
+                        for surface in text_surfaces(&visuals) {
+                            let ratio = contrast_ratio(color, surface);
+                            assert!(ratio >= targets.text, "{}: {ratio:.2}:1", at(role));
+                        }
+                    }
+                    for (role, color, opacity) in [
+                        ("normal", status.normal, DIM),
+                        ("charging", status.charging, DIM),
+                        ("low", status.low, 1.0),
+                    ] {
+                        let panel = rgb(visuals.panel_fill);
+                        let painted = palette::over(rgb(color), panel, opacity);
+                        let ratio = palette::contrast_ratio(painted, panel);
+                        assert!(ratio >= targets.graphic, "{}: {ratio:.2}:1", at(role));
+                    }
                 }
             }
         }
+    }
+
+    #[test]
+    fn high_contrast_raises_text_and_hairlines_to_7_to_1() {
+        let ctx = egui::Context::default();
+        for scheme in [ColorScheme::Dark, ColorScheme::Light] {
+            apply(
+                &ctx,
+                &Appearance {
+                    scheme,
+                    high_contrast: true,
+                    ..Appearance::default()
+                },
+            );
+            run_pass(&ctx);
+            let visuals = ctx.global_style().visuals.clone();
+            for surface in text_surfaces(&visuals) {
+                for (role, color) in [
+                    ("text", visuals.text_color()),
+                    ("secondary", secondary_text(&visuals)),
+                    ("weak", visuals.weak_text_color()),
+                    ("hairline", visuals.widgets.noninteractive.bg_stroke.color),
+                ] {
+                    let ratio = contrast_ratio(color, surface);
+                    assert!(ratio >= 7.0, "{scheme:?} {role}: {ratio:.2}:1");
+                }
+            }
+            assert_eq!(targets(&ctx), Targets::HIGH);
+        }
+        apply(&ctx, &Appearance::default());
+        run_pass(&ctx);
+        assert_eq!(targets(&ctx), Targets::NORMAL);
+        assert_eq!(
+            ctx.global_style().visuals.text_color(),
+            egui::Visuals::light().text_color()
+        );
+    }
+
+    #[test]
+    fn reduced_motion_turns_animation_off() {
+        let ctx = egui::Context::default();
+        apply(
+            &ctx,
+            &Appearance {
+                reduced_motion: true,
+                ..Appearance::default()
+            },
+        );
+        run_pass(&ctx);
+        assert!(reduced_motion(&ctx));
+        assert_eq!(ctx.global_style().animation_time, 0.0);
+        let id = egui::Id::new("switch");
+        ctx.animate_bool_responsive(id, false);
+        assert_eq!(ctx.animate_bool_responsive(id, true), 1.0);
+
+        apply(&ctx, &Appearance::default());
+        run_pass(&ctx);
+        assert!(!reduced_motion(&ctx));
+        assert!(ctx.global_style().animation_time > 0.0);
     }
 
     #[test]

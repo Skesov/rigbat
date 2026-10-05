@@ -344,7 +344,8 @@ impl SettingsApp {
         let lang = self.config.lang();
         let (text, detail) = problem.text(lang);
         let title = fl!(loader(lang), "config-not-saved");
-        let warn = gui::status_colors(ui.visuals(), self.config.palette).low;
+        let warn =
+            gui::status_colors(ui.visuals(), self.config.palette, gui::targets(ui.ctx())).low;
         widgets::banner(ui, &title, warn, |ui| {
             ui.label(&text);
             if let Some(detail) = detail {

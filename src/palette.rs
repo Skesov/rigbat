@@ -13,6 +13,31 @@ pub const TEXT_CONTRAST: f32 = 4.5;
 /// WCAG 2.1 SC 1.4.11, graphical objects.
 pub const GRAPHIC_CONTRAST: f32 = 3.0;
 
+/// The ratios a text role and a graphical role must reach on their surface.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Targets {
+    pub text: f32,
+    pub graphic: f32,
+}
+
+impl Targets {
+    /// WCAG AA.
+    pub const NORMAL: Self = Self {
+        text: TEXT_CONTRAST,
+        graphic: GRAPHIC_CONTRAST,
+    };
+    /// The session asks for higher contrast: text at WCAG AAA's 7:1 (SC 1.4.6),
+    /// graphical objects at AA's text ratio.
+    pub const HIGH: Self = Self {
+        text: 7.0,
+        graphic: TEXT_CONTRAST,
+    };
+
+    pub const fn for_contrast(high: bool) -> Self {
+        if high { Self::HIGH } else { Self::NORMAL }
+    }
+}
+
 const BLACK: Rgb = [0, 0, 0];
 const WHITE: Rgb = [255, 255, 255];
 const STEPS: u16 = 255;
