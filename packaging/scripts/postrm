@@ -1,0 +1,7 @@
+#!/bin/sh
+# deb postrm and rpm %postun: drop the removed udev rule from udev's loaded set.
+set -e
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules || true
+fi
+exit 0

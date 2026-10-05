@@ -74,6 +74,7 @@ section = "utils"
 extended-description = """\
 Shows the charge of mice, keyboards, headsets and controllers in the system \
 tray, read from sysfs, BlueZ and vendor HID protocols."""
+maintainer-scripts = "packaging/scripts/"
 assets = [
     ["target/release/rigbat", "usr/bin/", "755"],
     ["packaging/70-rigbat.rules", "usr/lib/udev/rules.d/", "644"],
@@ -87,6 +88,8 @@ assets = [
 ]
 
 [package.metadata.generate-rpm]
+post_install_script = "packaging/scripts/postinst"
+post_uninstall_script = "packaging/scripts/postrm"
 assets = [
     { source = "target/release/rigbat", dest = "/usr/bin/rigbat", mode = "755" },
     { source = "packaging/70-rigbat.rules", dest = "/usr/lib/udev/rules.d/70-rigbat.rules", mode = "644" },

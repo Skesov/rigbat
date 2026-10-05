@@ -94,8 +94,9 @@ The [releases page](https://github.com/Skesov/rigbat/releases) has builds for `x
 `aarch64` (built on Ubuntu 26.04: glibc 2.43 or newer), each file with a `.sha256` and a build provenance attestation
 (`gh attestation verify <file> --repo Skesov/rigbat`):
 
-- **Packages** — `.deb` and `.rpm`. They install `/usr/bin/rigbat`, the udev rule, the systemd
-  user unit, the desktop entry and the icon; then run
+- **Packages** — `.deb` and `.rpm`. They install `/usr/bin/rigbat`, the udev rule (applied at
+  once, also to a receiver already plugged in), the systemd user unit, the desktop entry and the
+  icon; then run
   `systemctl --user enable --now rigbat.service`.
 - **Tarball** — `rigbat-v<version>-<target>.tar.gz`: the binary plus the `packaging/` files.
 - **Binary** — `rigbat-v<version>-<target>`, the executable alone. A USB HID device also needs
