@@ -40,6 +40,9 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
 const RESTART_RETRIES: u32 = 10;
 const RESTART_RETRY_DELAY: Duration = Duration::from_millis(500);
 const REFRESH_SPINNER_LIMIT: Duration = Duration::from_secs(5);
+/// A refresh shows progress only once it has run this long: a spinner that
+/// flashes for a moment distracts more than it informs (GNOME HIG, spinners).
+const PROGRESS_DELAY: Duration = Duration::from_millis(300);
 
 /// Rows of height an empty state gets: a line saying why and one saying what to do.
 const EMPTY_ROWS: usize = 2;
@@ -479,6 +482,13 @@ impl Dashboard {
         self.refreshing.is_some()
     }
 
+    /// How long the refresh in flight waits before showing progress; zero once it shows.
+    fn progress_wait(&self, now: Instant) -> Duration {
+        self.refreshing.as_ref().map_or(Duration::ZERO, |r| {
+            PROGRESS_DELAY.saturating_sub(now.saturating_duration_since(r.since))
+        })
+    }
+
     fn render_footer(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         let l = loader(self.lang);
         let in_flight = self.refresh_in_flight();
@@ -501,7 +511,10 @@ impl Dashboard {
                 });
             }
             if in_flight {
-                progress(&mut ui, self.lang);
+                match self.progress_wait(Instant::now()) {
+                    Duration::ZERO => progress(&mut ui, self.lang),
+                    wait => ui.ctx().request_repaint_after(wait),
+                }
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1147,6 +1160,20 @@ mod tests {
 
         let _pending = start_refresh(&mut d, Instant::now() - REFRESH_SPINNER_LIMIT);
         assert!(!d.refresh_in_flight(), "the limit ends it");
+    }
+
+    #[test]
+    fn progress_shows_only_after_the_delay() {
+        let mut d = dashboard(roster(), Lang::En);
+        let since = Instant::now();
+        let _pending = start_refresh(&mut d, since);
+        assert_eq!(d.progress_wait(since), PROGRESS_DELAY);
+        assert_eq!(
+            d.progress_wait(since + Duration::from_millis(100)),
+            Duration::from_millis(200)
+        );
+        assert_eq!(d.progress_wait(since + PROGRESS_DELAY), Duration::ZERO);
+        assert!(d.refresh_in_flight());
     }
 
     #[test]

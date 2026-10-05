@@ -317,8 +317,10 @@ running tray's state over the session bus and never polls a device.
   the palette neutral for an ordinary reading, over the palette's track.
 - Kind, transport and tray membership are in the row's hover text (`details`), not in the row.
 - Footer: a "↻" button (`refresh_button`: the `REFRESH` font glyph, not a symbolic icon) that a
-  screen reader announces, and hover shows, as "Refresh"; a spinner while the refresh is in
-  flight, at most `REFRESH_SPINNER_LIMIT`; "Settings" on the right.
+  screen reader announces, and hover shows, as "Refresh"; a spinner once the refresh has run
+  `PROGRESS_DELAY` (300 ms) and until it ends, at most `REFRESH_SPINNER_LIMIT` (GNOME: a spinner
+  shown for a moment distracts); with reduced motion, the still text "Refreshing…" instead
+  (`progress`); "Settings" on the right.
 - Empty states say why and what to do ([Errors and empty states](#errors-and-empty-states)): the
   tray is not running, with a "Start tray" button; there are no devices, with how one appears.
   The footer stays.
