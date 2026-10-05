@@ -456,7 +456,10 @@ per-discovery detail; `trace` for raw protocol bytes.
 
 rigbat is desktop-environment-agnostic. The tray is a standard StatusNotifierItem and runs on any
 SNI host — KDE Plasma (native), GNOME (AppIndicator extension), Waybar/wlroots, XFCE (via
-`snixembed`), COSMIC. Theme, notifications, and resume use xdg-desktop-portal,
+`snixembed`), COSMIC. At login `rigbat.service` often starts before the panel owns
+`org.kde.StatusNotifierWatcher`; icons are spawned with `ksni`'s `assume_sni_available(true)`, so
+each one registers the moment the watcher appears and the race logs at `info`, not `error`.
+Theme, notifications, and resume use xdg-desktop-portal,
 `org.freedesktop.Notifications`, and logind; battery data is read from BlueZ/sysfs/hidraw. There
 are no DE-specific dependencies.
 

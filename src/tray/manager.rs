@@ -139,7 +139,7 @@ async fn reconcile(
             save_config,
             refresh: refresh.clone(),
         };
-        match tray.spawn().await {
+        match tray.assume_sni_available(true).spawn().await {
             Ok(handle) => {
                 items.live.insert(key, Item { handle, view });
                 touched += 1;
@@ -311,6 +311,70 @@ mod tests {
                 .build()
                 .await
                 .expect("fake watcher")
+        }
+
+        struct RecordingWatcher(tokio::sync::mpsc::UnboundedSender<String>);
+
+        #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
+        impl RecordingWatcher {
+            fn register_status_notifier_item(&self, service: &str) {
+                let _ = self.0.send(service.to_owned());
+            }
+
+            #[zbus(property)]
+            fn is_status_notifier_host_registered(&self) -> bool {
+                true
+            }
+        }
+
+        /// At login the tray often starts before the panel's watcher: the
+        /// icon must register as soon as the watcher appears, not on the
+        /// next state change or age tick.
+        #[tokio::test]
+        async fn an_icon_spawned_before_the_watcher_registers_when_it_appears() {
+            if !isolated(
+                module_path!(),
+                "an_icon_spawned_before_the_watcher_registers_when_it_appears",
+            ) {
+                return;
+            }
+            let (_state_tx, state_rx) = watch::channel(make_state(vec![(
+                make_info("mouse"),
+                Some(make_reading(80)),
+            )]));
+            let (_theme_tx, theme_rx) = watch::channel(ColorScheme::Dark);
+            let (config_tx, _config_rx) = watch::channel(Config::default());
+            tokio::spawn(run(
+                state_rx,
+                theme_rx,
+                config_tx,
+                saved,
+                RefreshSignal::new(),
+            ));
+
+            let client = zbus::Connection::session().await.expect("private bus");
+            let client = &client;
+            let item = eventually(
+                TIMEOUT,
+                || async move { item_named(client, "rigbat").await },
+            )
+            .await;
+
+            let (registered_tx, mut registered) = tokio::sync::mpsc::unbounded_channel();
+            let _watcher = zbus::connection::Builder::session()
+                .expect("private bus")
+                .serve_at("/StatusNotifierWatcher", RecordingWatcher(registered_tx))
+                .expect("path")
+                .name("org.kde.StatusNotifierWatcher")
+                .expect("name")
+                .build()
+                .await
+                .expect("late watcher");
+            let service = tokio::time::timeout(TIMEOUT, registered.recv())
+                .await
+                .expect("the icon never registered with the late watcher")
+                .expect("watcher alive");
+            assert_eq!(service, item);
         }
 
         async fn item_property(

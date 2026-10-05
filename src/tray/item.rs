@@ -182,6 +182,12 @@ impl Tray for RigbatTray {
         launch("dashboard");
     }
 
+    // The panel often starts after the tray at login; ksni registers once it appears.
+    fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
+        tracing::info!("no tray host yet, the icon shows once one starts: {reason:?}");
+        true
+    }
+
     fn id(&self) -> String {
         match &self.key {
             Some(k) => sni_id(k),
