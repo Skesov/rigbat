@@ -103,7 +103,8 @@ anyhow::Result<Vec<Box<dyn BatterySource>>>`. Finds devices and constructs sourc
 - **`IconRenderer`** (`icon`): `render(status, kind, theme, mode, stale) -> Vec<ksni::Icon>`. The
   tray depends on this trait, not on the renderer, and reaches it through `icon::IconCache`, which
   renders each distinct `IconKey` (those five inputs) once and keeps only the keys an icon shows.
-  The implementation is `tiny-skia`; an SVG/resvg renderer would be a new implementation behind
+  The implementation is `tiny-skia`, with the digits filled from League Gothic outlines (`skrifa`,
+  fonts embedded from `assets/fonts/`); an SVG/resvg renderer would be a new implementation behind
   the same port.
 
 ## Concurrency model (tray)

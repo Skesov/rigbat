@@ -3008,6 +3008,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "skrifa",
  "syn 3.0.5",
  "tiny-skia",
  "tokio",

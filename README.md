@@ -372,5 +372,8 @@ at your option. Use it, change it, ship it in something you sell; keep the notic
 there is no warranty. Two licences because that is the Rust ecosystem's convention: MIT is short,
 Apache-2.0 carries an explicit patent grant that some legal departments require.
 
+The tray digits are drawn with [League Gothic](https://github.com/theleagueof/league-gothic), embedded
+under the SIL Open Font License 1.1 ([assets/fonts/OFL.txt](assets/fonts/OFL.txt)).
+
 Unless you state otherwise, any contribution you intentionally submit for inclusion in this work,
 as defined in the Apache-2.0 license, is dual-licensed as above, with no additional terms.

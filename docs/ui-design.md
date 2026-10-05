@@ -318,7 +318,9 @@ Rendered by `TinySkiaRenderer` behind the `IconRenderer` port (`src/icon/mod.rs`
 
 - Three `DisplayMode`s, in `DisplayMode::ALL` order: `IconOnly` (battery with a fill bar, the
   default), `DeviceAndBattery` (the kind's silhouette over a thin battery), `PercentOnly` (digits
-  as large as fit). Only `DeviceAndBattery` shows the kind; `percent_in_icon`, a removed mode,
+  as large as fit, drawn from the embedded League Gothic outlines in `icon::digits`: `100` in its
+  condensed width so it keeps the height of two digits; digits sit apart by their ink, not their
+  advances). Only `DeviceAndBattery` shows the kind; `percent_in_icon`, a removed mode,
   loads as `PercentOnly`.
 - `DeviceAndBattery` at 22 px: a 14 × 14 `icon::silhouette` bitmap, one pixel per cell,
   centred on the top edge (rows 0–13); the bar's outline over rows 16–21 with the nub in the
@@ -333,7 +335,8 @@ Rendered by `TinySkiaRenderer` behind the `IconRenderer` port (`src/icon/mod.rs`
   its halo cut out of the silhouette; `PercentOnly` bottom-left, with the digits above it. Cells
   are whole pixels (1 px at 22 px).
 - A retained reading: a dashed outline (`IconOnly`, and the bar in `DeviceAndBattery`), dotted
-  digits (`PercentOnly`, which has no outline), and the fill dimmed by `DIM`; the status mark, nub
+  digits (`PercentOnly`, which has no outline: a clear 1 px grid cut through them, every 4 px up to
+  24 px and every `size / 11` px above), and the fill dimmed by `DIM`; the status mark, nub
   and silhouette stay solid at full colour. `Low` renders as if live.
 - The icon cache key (`IconKey`) holds the resolved `Theme`, so a palette change re-renders every
   icon.

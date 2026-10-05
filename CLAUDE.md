@@ -105,7 +105,7 @@ src/
 ├── cli/           # output adapter: table / --json / --wide; waybar.rs: --waybar line + loop
 ├── tray/          # manager.rs (icon set + run loop), item.rs (SNI item + menu),
 │                 # resolve.rs (device per icon), launch.rs, state service for the dashboard
-├── icon/          # IconRenderer (tiny-skia), status marks, kind silhouettes
+├── icon/          # IconRenderer (tiny-skia), status marks, kind silhouettes, digits (skrifa)
 ├── gui/           # shared egui theme for dashboard and settings
 ├── palette.rs     # colour tables per Palette + WCAG readable(): shared by icon/gui/settings
 ├── dashboard/     # eframe device overview (separate process, left click)
@@ -181,8 +181,9 @@ which fails on any other edge and on any cycle.
 General — apply on every host:
 
 - Most SNI hosts fit the icon into a square slot — keep pixmaps square and fill them.
-- `tiny-skia` can panic on thin anti-aliased rects — all paints use `anti_alias = false`. Pure
-  rendering, unrelated to any desktop.
+- `tiny-skia` can panic on thin anti-aliased rects — all paints use `anti_alias = false`, except
+  the digit glyph paths (`icon::digits`): paths, not rects, and tested at every size. Pure rendering,
+  unrelated to any desktop.
 - `ksni` does not re-publish the icon after a menu event — menu actions that change the icon must
   route config through the `watch` channel so the main loop calls `handle.update`.
 - A udev rule granting `TAG+="uaccess"` must sort lexically before `73-seat-late.rules` — that

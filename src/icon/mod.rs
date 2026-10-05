@@ -1,6 +1,9 @@
+mod digits;
+
 use crate::appearance::ColorScheme;
 use crate::domain::{DeviceKind, DisplayMode, Palette, PrimaryStatus};
 use crate::palette::{self, DIM, GRAPHIC_CONTRAST, Rgb};
+use digits::draw_percent_in_region;
 use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, StrokeDash,
     Transform,
@@ -771,97 +774,6 @@ fn draw_mark(pixmap: &mut Pixmap, mark: Bitmap, area: Area, color: Color) {
 // Percent / digit drawing
 // ---------------------------------------------------------------------------
 
-/// 3×5 bitmap for digits 0–9 (rows top→bottom, columns left→right).
-/// Each entry is a 5-element array of row bitmasks (3 bits wide, MSB = leftmost column).
-const DIGITS: [[u8; 5]; 10] = [
-    // 0: full rectangle, hollow centre
-    [0b111, 0b101, 0b101, 0b101, 0b111],
-    // 1: right column only
-    [0b010, 0b110, 0b010, 0b010, 0b111],
-    // 2: top, middle, bottom with turns
-    [0b111, 0b001, 0b111, 0b100, 0b111],
-    // 3: top, middle, bottom aligned right
-    [0b111, 0b001, 0b111, 0b001, 0b111],
-    // 4: sides top, join middle, right column bottom
-    [0b101, 0b101, 0b111, 0b001, 0b001],
-    // 5: top-left, middle, bottom-right
-    [0b111, 0b100, 0b111, 0b001, 0b111],
-    // 6: top-left, middle, full bottom
-    [0b111, 0b100, 0b111, 0b101, 0b111],
-    // 7: top, right column
-    [0b111, 0b001, 0b001, 0b001, 0b001],
-    // 8: full rectangle with middle
-    [0b111, 0b101, 0b111, 0b101, 0b111],
-    // 9: full top, middle, bottom-right
-    [0b111, 0b101, 0b111, 0b001, 0b111],
-];
-
-/// Gap between adjacent digits, as a fraction of one font cell.
-const DIGIT_GAP: f32 = 0.4;
-
-/// Total width of `n` digits at the given `cell` size (columns + gaps).
-fn digits_width(n: usize, cell: f32) -> f32 {
-    n as f32 * 3.0 * cell + (n.saturating_sub(1)) as f32 * DIGIT_GAP * cell
-}
-
-/// Number of decimal digits used to render `value` (0–100).
-fn digit_count(value: u8) -> usize {
-    if value >= 100 {
-        3
-    } else if value >= 10 {
-        2
-    } else {
-        1
-    }
-}
-
-/// Draws the decimal digits of `value` (0–100) starting at pixel `(x, y)`.
-/// Each font cell is `cell` pixels wide and tall. Digits are 3 cells wide,
-/// 5 cells tall, separated by `DIGIT_GAP` of a cell. `dotted` leaves a pixel
-/// between cells.
-fn draw_number(
-    pixmap: &mut Pixmap,
-    value: u8,
-    x: f32,
-    y: f32,
-    cell: f32,
-    color: Color,
-    dotted: bool,
-) {
-    if cell <= 0.0 {
-        return;
-    }
-
-    // Build the list of digit indices for `value` (left to right).
-    let digits: Vec<usize> = if value >= 100 {
-        vec![1, 0, 0]
-    } else if value >= 10 {
-        vec![(value / 10) as usize, (value % 10) as usize]
-    } else {
-        vec![value as usize]
-    };
-
-    let digit_stride = 3.0 * cell + DIGIT_GAP * cell; // 3 columns + gap
-    let dot = if dotted { cell - 1.0 } else { cell };
-    let paint = solid_paint(color);
-
-    for (i, &d) in digits.iter().enumerate() {
-        let ox = x + i as f32 * digit_stride;
-        for (row, &mask) in DIGITS[d].iter().enumerate() {
-            let oy = y + row as f32 * cell;
-            for col in 0..3_u8 {
-                // MSB of the 3-bit mask is the leftmost column.
-                if mask & (0b100 >> col) != 0 {
-                    let px = ox + col as f32 * cell;
-                    if let Some(rect) = Rect::from_xywh(px, oy, dot, dot) {
-                        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Where the digits may go, in pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Region {
@@ -889,30 +801,6 @@ fn digit_region(size: u32, mark: Option<Bitmap>) -> Region {
         h: (bottom - region.y).max(0.0),
         ..region
     }
-}
-
-/// Draws `value` centred in `region`, as large as fits in both width and height.
-fn draw_percent_in_region(
-    pixmap: &mut Pixmap,
-    region: Region,
-    value: u8,
-    color: Color,
-    dotted: bool,
-) {
-    let n = digit_count(value);
-
-    // Largest cell that fits 5 rows in height and the digit block in width.
-    let cell_from_h = region.h / 5.0;
-    let cols = n as f32 * 3.0 + (n.saturating_sub(1)) as f32 * DIGIT_GAP;
-    let cell_from_w = region.w / cols;
-    let cell = cell_from_h.min(cell_from_w).max(0.0);
-
-    let total_w = digits_width(n, cell);
-    let total_h = 5.0 * cell;
-
-    let x = region.x + ((region.w - total_w) / 2.0).max(0.0);
-    let y = region.y + ((region.h - total_h) / 2.0).max(0.0);
-    draw_number(pixmap, value, x, y, cell, color, dotted);
 }
 
 // ---------------------------------------------------------------------------
@@ -992,6 +880,117 @@ mod tests {
                     .filter(|(i, pixel)| pixel.alpha() > 0 && icon.data[i * 4] == 0)
                     .count();
                 assert_eq!(lost, 0, "{status:?} at {w}x{h}: {lost} digit pixels erased");
+            }
+        }
+    }
+
+    // --- digits ------------------------------------------------------------
+
+    const WHITE: Color = Color::WHITE;
+
+    fn digits(size: u32, value: u8, mark: Option<Bitmap>, dotted: bool) -> (Pixmap, Region) {
+        let mut pixmap = Pixmap::new(wide_width(size), size).expect("digit pixmap");
+        let region = digit_region(size, mark);
+        draw_percent_in_region(&mut pixmap, region, value, WHITE, dotted);
+        (pixmap, region)
+    }
+
+    /// Painted pixels as `(x, y)`.
+    fn ink(pixmap: &Pixmap) -> Vec<(u32, u32)> {
+        let w = pixmap.width();
+        pixmap
+            .pixels()
+            .iter()
+            .enumerate()
+            .filter(|(_, px)| px.alpha() > 0)
+            .map(|(i, _)| (i as u32 % w, i as u32 / w))
+            .collect()
+    }
+
+    fn ink_height(pixmap: &Pixmap) -> u32 {
+        let rows = ink(pixmap).into_iter().map(|(_, y)| y);
+        let (top, bottom) = rows.fold((u32::MAX, 0), |(t, b), y| (t.min(y), b.max(y)));
+        bottom + 1 - top
+    }
+
+    #[test]
+    fn every_value_paints_inside_the_digit_region_at_every_size() {
+        let sizes = PUBLISHED_SIZES.into_iter().chain(16..=64);
+        for size in sizes {
+            for mark in [None, Some(BOLT)] {
+                for dotted in [false, true] {
+                    for value in 0..=100 {
+                        let at = format!("{value} at {size} px, mark {mark:?}, dotted {dotted}");
+                        let (pixmap, region) = digits(size, value, mark, dotted);
+                        let painted = ink(&pixmap);
+                        assert!(!painted.is_empty(), "{at}: no ink");
+                        let (x0, y0) = (region.x.floor() as u32, region.y.floor() as u32);
+                        let x1 = (region.x + region.w).ceil() as u32;
+                        let y1 = (region.y + region.h).ceil() as u32;
+                        let outside = painted
+                            .iter()
+                            .filter(|&&(x, y)| x < x0 || x >= x1 || y < y0 || y >= y1)
+                            .count();
+                        assert_eq!(outside, 0, "{at}: {outside} px outside the region");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_hundred_is_as_tall_as_two_digits() {
+        for size in [32, 64] {
+            let hundred = ink_height(&digits(size, 100, None, false).0);
+            let eighty_eight = ink_height(&digits(size, 88, None, false).0);
+            assert!(
+                hundred.abs_diff(eighty_eight) <= 1,
+                "{size} px: 100 is {hundred} px tall, 88 is {eighty_eight}"
+            );
+            for h in [hundred, eighty_eight] {
+                assert!(h as f32 >= 0.8 * size as f32, "{size} px: {h} px tall");
+            }
+        }
+    }
+
+    #[test]
+    fn ink_density_does_not_depend_on_the_digit() {
+        let fifty_seven = ink(&digits(64, 57, None, false).0).len() as f32;
+        let eighty_six = ink(&digits(64, 86, None, false).0).len() as f32;
+        let ratio = fifty_seven / eighty_six;
+        // The font's own 7 has 0.64 of an 8's ink, so 57/86 sits near 0.77; the 3×5 bitmap gave 0.72.
+        assert!((0.75..=1.33).contains(&ratio), "57 / 86 = {ratio}");
+    }
+
+    #[test]
+    fn dotted_digits_paint_less_but_stay_visible() {
+        for size in PUBLISHED_SIZES.into_iter().chain([16, 48, 64]) {
+            for value in [7, 11, 57, 86, 100] {
+                let solid = ink(&digits(size, value, None, false).0).len();
+                let dotted = ink(&digits(size, value, None, true).0).len();
+                assert!(dotted < solid, "{value} at {size} px: {dotted} vs {solid}");
+                assert!(dotted > 0, "{value} at {size} px: dotted is empty");
+            }
+        }
+    }
+
+    /// PNGs of a few values, live and dotted, for visual review.
+    /// Run with: `RIGBAT_DIGITS_DIR=<dir> cargo test dump_digits -- --ignored`.
+    #[test]
+    #[ignore]
+    fn dump_digits() {
+        let dir = std::env::var_os("RIGBAT_DIGITS_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&dir).expect("output dir");
+        for size in [22, 32, 44] {
+            for value in [57, 86, 80, 95, 38, 100, 7, 11] {
+                for (dotted, look) in [(false, "live"), (true, "dotted")] {
+                    let (pixmap, _) = digits(size, value, None, dotted);
+                    pixmap
+                        .save_png(dir.join(format!("{value}-{size}px-{look}.png")))
+                        .expect("saving the png");
+                }
             }
         }
     }
@@ -1222,43 +1221,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    // --- digit table -----------------------------------------------------
-
-    #[test]
-    fn digit_table_has_ten_entries() {
-        assert_eq!(DIGITS.len(), 10);
-    }
-
-    #[test]
-    fn each_digit_has_five_rows() {
-        for (i, digit) in DIGITS.iter().enumerate() {
-            assert_eq!(digit.len(), 5, "digit {i} must have 5 rows");
-        }
-    }
-
-    #[test]
-    fn draw_number_produces_non_transparent_pixels() {
-        let size = 32_u32;
-        let mut pixmap = Pixmap::new(size, size).unwrap();
-        let color = Color::from_rgba8(255, 255, 255, 255);
-        draw_number(&mut pixmap, 5, 2.0, 2.0, 3.0, color, false);
-
-        // At least one pixel must be non-transparent after drawing.
-        let has_opaque = pixmap.data().as_chunks::<4>().0.iter().any(|px| px[3] != 0);
-        assert!(has_opaque, "draw_number produced no visible pixels");
-    }
-
-    #[test]
-    fn draw_number_100_fits_three_digits() {
-        let size = 64_u32;
-        let mut pixmap = Pixmap::new(size, size).unwrap();
-        let color = Color::from_rgba8(255, 255, 255, 255);
-        // Cell of 4 px → three digits use 3*(3*4 + 4) - 4 = 44 px wide, fits in 64.
-        draw_number(&mut pixmap, 100, 0.0, 0.0, 4.0, color, false);
-        let has_opaque = pixmap.data().as_chunks::<4>().0.iter().any(|px| px[3] != 0);
-        assert!(has_opaque);
     }
 
     // --- legacy-compatible tests (themes, charging, low) -----------------

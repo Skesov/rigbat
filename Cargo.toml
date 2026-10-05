@@ -4,7 +4,7 @@ version = "0.4.0"
 edition = "2024"
 rust-version = "1.96"
 description = "System tray battery monitor for gaming peripherals"
-license = "MIT OR Apache-2.0"
+license = "(MIT OR Apache-2.0) AND OFL-1.1"
 repository = "https://github.com/Skesov/rigbat"
 homepage = "https://github.com/Skesov/rigbat"
 readme = "README.md"
@@ -23,6 +23,8 @@ serde_json = "1"
 directories = "6"
 ksni = { version = "0.3.6", features = ["tokio"] }
 tiny-skia = "0.12"
+# Tray digit outlines from the embedded League Gothic; already in the tree through epaint.
+skrifa = { version = "0.40", default-features = false, features = ["std"] }
 ashpd = { version = "0.13.11", default-features = false, features = ["tokio", "settings"] }
 futures-util = { version = "0.3", default-features = false }
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
@@ -80,6 +82,7 @@ assets = [
     ["packaging/icons/hicolor/scalable/apps/rigbat.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
     ["LICENSE-MIT", "usr/share/doc/rigbat/", "644"],
     ["LICENSE-APACHE", "usr/share/doc/rigbat/", "644"],
+    ["assets/fonts/OFL.txt", "usr/share/doc/rigbat/OFL-LeagueGothic.txt", "644"],
     ["README.md", "usr/share/doc/rigbat/", "644"],
 ]
 
@@ -92,6 +95,7 @@ assets = [
     { source = "packaging/icons/hicolor/scalable/apps/rigbat.svg", dest = "/usr/share/icons/hicolor/scalable/apps/rigbat.svg", mode = "644" },
     { source = "LICENSE-MIT", dest = "/usr/share/licenses/rigbat/LICENSE-MIT", mode = "644", doc = true },
     { source = "LICENSE-APACHE", dest = "/usr/share/licenses/rigbat/LICENSE-APACHE", mode = "644", doc = true },
+    { source = "assets/fonts/OFL.txt", dest = "/usr/share/licenses/rigbat/OFL-LeagueGothic.txt", mode = "644", doc = true },
     { source = "README.md", dest = "/usr/share/doc/rigbat/README.md", mode = "644", doc = true },
 ]
 

@@ -109,6 +109,7 @@ jobs:
           mkdir -p "${staging}"
           cp "target/${TARGET}/release/rigbat" "${staging}/"
           cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "${staging}/"
+          cp assets/fonts/OFL.txt "${staging}/OFL-LeagueGothic.txt"
           cp -r packaging "${staging}/"
           tar czf "dist/${name}.tar.gz" -C "$(dirname "${staging}")" "${name}"
 

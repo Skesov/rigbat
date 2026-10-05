@@ -81,6 +81,7 @@ const INFRA_CRATES: &[&str] = &[
     "nix",
     "notify",
     "rusqlite",
+    "skrifa",
     "tiny_skia",
     "tokio",
     "zbus",

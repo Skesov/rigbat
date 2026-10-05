@@ -459,4 +459,26 @@ mod tests {
             assert_eq!(texture.size(), [64, 64], "{mode:?}");
         }
     }
+
+    #[test]
+    fn the_digits_preview_has_ink_at_any_scale() {
+        for pixels in [32, 45, 56, STYLE_PREVIEW_MAX_PIXELS] {
+            let ctx = egui::Context::default();
+            let previews =
+                render_style_previews(&ctx, ColorScheme::Dark, Palette::default(), pixels);
+            let (_, texture) = previews
+                .iter()
+                .find(|(mode, _)| *mode == DisplayMode::PercentOnly)
+                .expect("a digits preview");
+            let delta = ctx.tex_manager().write().take_delta();
+            let (_, image) = delta
+                .set
+                .iter()
+                .find(|(id, _)| *id == texture.id())
+                .expect("the digits texture upload");
+            let egui::ImageData::Color(image) = &image.image;
+            let ink = image.pixels.iter().filter(|px| px.a() > 0).count();
+            assert!(ink > 0, "{pixels} px: the digits preview is empty");
+        }
+    }
 }
