@@ -177,8 +177,9 @@ pub fn config_path() -> Option<PathBuf> {
         .map(|dirs| dirs.config_dir().join("config.json"))
 }
 
-/// Reads config. File missing or invalid → Config::default() (log invalid files,
-/// do not panic). Never panics.
+/// Reads config. File missing or invalid → Config::default() in memory only: an
+/// invalid file is logged and kept, since `save_to` refuses to write over it.
+/// Never panics.
 ///
 /// Never converts a legacy `shown_devices` whitelist into `hidden_devices`:
 /// that conversion needs a discovered device roster, which no caller of
@@ -199,7 +200,7 @@ pub(crate) fn load_from(path: &Path) -> Config {
     match read(path) {
         Ok(cfg) => cfg.unwrap_or_default(),
         Err(e) => {
-            tracing::warn!("{e:#}; using defaults");
+            tracing::warn!("{e:#}; using defaults, nothing is saved until it is fixed");
             Config::default()
         }
     }
@@ -236,8 +237,14 @@ pub fn save(config: &Config) -> anyhow::Result<()> {
 /// a settings window can both save around the same moment, and a fixed name
 /// let whichever process's `rename` won take a file the other was still
 /// writing. On any failure the temp file is removed rather than left behind.
+///
+/// Refuses with [`Unreadable`] while the file at `path` exists but does not
+/// read or parse — every writer goes through here, so none can replace a
+/// user's broken-but-recoverable file with defaults plus one change.
 pub(crate) fn save_to(path: &Path, config: &Config) -> anyhow::Result<()> {
     use anyhow::Context as _;
+
+    read(path).map_err(|e| e.context(Unreadable))?;
 
     let dir = path
         .parent()
@@ -259,6 +266,16 @@ pub(crate) fn save_to(path: &Path, config: &Config) -> anyhow::Result<()> {
         let _ = std::fs::remove_file(&tmp_path);
     }
     result
+}
+
+/// Why a save was refused: the file on disk does not read or parse.
+#[derive(Debug, Clone, Copy)]
+pub struct Unreadable;
+
+impl std::fmt::Display for Unreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("not saving over a config file that does not parse; fix or remove it first")
+    }
 }
 
 /// Builds the atomic-save temp path for `path`, unique to `pid` and to this
@@ -343,25 +360,45 @@ pub fn watch_file(tx: tokio::sync::watch::Sender<Config>) {
             return;
         }
 
+        // `load()` at startup already warned about a file that was broken then.
+        let mut broken = read(&path).is_err();
         // Keep `watcher` alive for the lifetime of this loop.
         for result in raw_rx {
             let Ok(event) = result else { continue };
             if is_content_change(&event.kind) && event_touches(&event, &path) {
-                let cfg = load();
-                let applied = tx.send_if_modified(|cur| {
-                    if *cur != cfg {
-                        *cur = cfg;
-                        true
-                    } else {
-                        false
-                    }
-                });
-                if applied {
-                    tracing::debug!("config reload applied");
-                }
+                reload(&path, &tx, &mut broken);
             }
         }
     });
+}
+
+/// Applies the file at `path` to `tx`. A file that does not parse keeps the
+/// current config live and warns once per broken spell; no file means defaults.
+fn reload(path: &Path, tx: &tokio::sync::watch::Sender<Config>, broken: &mut bool) {
+    let cfg = match read(path) {
+        Ok(cfg) => cfg.unwrap_or_default(),
+        Err(e) => {
+            if !*broken {
+                tracing::warn!("{e:#}; keeping the current settings until it is fixed");
+            }
+            *broken = true;
+            return;
+        }
+    };
+    if std::mem::take(broken) {
+        tracing::info!("config parses again");
+    }
+    let applied = tx.send_if_modified(|cur| {
+        if *cur != cfg {
+            *cur = cfg;
+            true
+        } else {
+            false
+        }
+    });
+    if applied {
+        tracing::debug!("config reload applied");
+    }
 }
 
 #[cfg(test)]
@@ -588,8 +625,47 @@ mod tests {
         let err = format!("{:#}", read(&path).unwrap_err());
         assert!(err.contains("config parse error"), "{err}");
         assert_eq!(load_from(&path), Config::default());
+        std::fs::remove_file(&path).unwrap();
         save_to(&path, &Config::default()).unwrap();
         assert_eq!(read(&path).unwrap(), Some(Config::default()));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn save_to_refuses_to_write_over_a_file_that_does_not_parse() {
+        let path = scratch_config_path("broken-save");
+        let broken = "{ \"low_threshold\": 30, typo }";
+        std::fs::write(&path, broken).unwrap();
+        let err = save_to(&path, &Config::default()).unwrap_err();
+        assert!(err.is::<Unreadable>(), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn reload_keeps_the_live_config_while_the_file_does_not_parse() {
+        let path = scratch_config_path("broken-reload");
+        let live = Config {
+            hidden_devices: vec!["mouse".to_string()],
+            low_threshold: 35,
+            ..Config::default()
+        };
+        let (tx, rx) = tokio::sync::watch::channel(live.clone());
+        let mut broken = false;
+
+        std::fs::write(&path, "{ not json").unwrap();
+        reload(&path, &tx, &mut broken);
+        assert_eq!(*rx.borrow(), live);
+        assert!(broken);
+
+        let fixed = Config {
+            low_threshold: 10,
+            ..live.clone()
+        };
+        std::fs::write(&path, serde_json::to_string(&fixed).unwrap()).unwrap();
+        reload(&path, &tx, &mut broken);
+        assert_eq!(*rx.borrow(), fixed);
+        assert!(!broken);
         std::fs::remove_file(&path).unwrap();
     }
 

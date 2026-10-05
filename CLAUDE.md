@@ -82,7 +82,8 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
   intent (thresholds, intervals, `hidden_devices`); a SQLite database under `XDG_STATE_HOME` holds
   observations (device inventory, reading history). The XDG spec defines `STATE_HOME` as data not
   important enough for `DATA_HOME` — a directory whose loss must be survivable — so decisions do
-  not belong there. Desktop practice agrees: Chrome keeps `Preferences` as JSON beside `History` as
+  not belong there. A `config.json` that does not parse is never written over: the running
+  config stays live and `config::save_to` refuses until the file is fixed. Desktop practice agrees: Chrome keeps `Preferences` as JSON beside `History` as
   SQLite. The store is optional: if it cannot be opened, monitoring continues without it. One
   thread owns the connection (`state::Store`, an actor); async callers await its reply.
 - **Hide, don't show:** the config records which devices to _hide_. A whitelist has to be rebuilt

@@ -147,7 +147,7 @@ impl SettingsApp {
         let save = |cfg: &Config| config::save_to(&path, cfg);
         match save_edit(&load, &save, edit) {
             Ok(on_disk) => self.config = on_disk,
-            Err(e) => tracing::error!("failed to save config: {e}"),
+            Err(e) => tracing::error!("failed to save config: {e:#}"),
         }
     }
 
@@ -649,6 +649,22 @@ mod tests {
 
         assert_eq!(result.hidden_devices, vec!["keyboard".to_string()]);
         assert!(!result.notifications_enabled);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn save_edit_refuses_to_write_over_a_config_that_does_not_parse() {
+        let path = scratch_config_path("broken-on-disk");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let broken = "{ \"hidden_devices\": [\"mouse\"], oops }";
+        std::fs::write(&path, broken).unwrap();
+
+        let load = || config::load_from(&path);
+        let save = |cfg: &Config| config::save_to(&path, cfg);
+        let err = save_edit(&load, &save, |target| target.low_threshold = 15).unwrap_err();
+
+        assert!(err.is::<config::Unreadable>(), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

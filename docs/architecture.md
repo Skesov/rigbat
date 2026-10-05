@@ -294,6 +294,11 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
 - A `notify` file watcher pushes reloads into a `watch<Config>` channel. It reacts only to
   content-changing events (create / data write / rename), never to `Access` events — reacting to
   reads would make the watcher's own `load()` feed an infinite loop.
+- A file that exists but does not parse (a typo, a truncating editor, a downgrade meeting an
+  unknown value) is never replaced: the watcher keeps the current config live and warns once, a
+  first start runs on defaults in memory only, and `save_to` — the one path every writer (settings
+  edit, tray pin, rename, migration) goes through — refuses with `config::Unreadable` until the
+  file parses again. `rigbat doctor` reports it as `fail` with the parse error.
 - Per-device overrides: `device_overrides: HashMap<name, DeviceSettings>` with optional poll
   interval and low threshold; `Config::effective_*` resolve override → global → built-in default.
 - `primary_device` pins the device the aggregate icon features; `None` means the connected visible

@@ -289,7 +289,7 @@ fn config_check(path: Option<&Path>, config: anyhow::Result<bool>) -> Check {
             path.display()
         )),
         Err(e) => Check::fail(
-            format!("config ignored, defaults apply: {e:#}"),
+            format!("config does not parse, no setting is saved until it does: {e:#}"),
             format!("fix the JSON in {0}, or reset it: rm {0}", path.display()),
         ),
     }
@@ -695,6 +695,11 @@ mod tests {
         assert!(missing.summary.contains("defaults"));
         let broken = config_check(Some(path), Err(anyhow::anyhow!("expected value")));
         assert_eq!(broken.status, Status::Fail);
+        assert!(
+            broken.summary.contains("expected value"),
+            "{}",
+            broken.summary
+        );
         assert!(
             broken
                 .fix
