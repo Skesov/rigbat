@@ -58,9 +58,18 @@ pub fn print_json(rows: &[Row]) {
 // See print_json: the battery table is program output on stdout.
 #[expect(clippy::print_stdout)]
 pub fn print_table(rows: &[Row]) {
+    print!("{}", table(rows));
+}
+
+// See print_json: the wide battery table is program output on stdout.
+#[expect(clippy::print_stdout)]
+pub fn print_table_wide(rows: &[Row]) {
+    print!("{}", table_wide(rows));
+}
+
+fn table(rows: &[Row]) -> String {
     if rows.is_empty() {
-        println!("No devices found");
-        return;
+        return "No devices found\n".to_owned();
     }
 
     // Width in chars, not bytes: names come from BlueZ Alias/hardware and can be
@@ -73,24 +82,23 @@ pub fn print_table(rows: &[Row]) {
         .max()
         .unwrap_or(0);
 
+    let mut out = String::new();
     for (info, outcome) in rows {
         let status = match outcome {
             PollOutcome::Reading(r) => format!("{}%  {}", r.percent, state_str(r.state)),
             PollOutcome::Failed | PollOutcome::NoAccess => state_word(*outcome).to_owned(),
         };
-        println!("{:<width$}  {}", info.name, status, width = name_width);
+        out += &format!("{:<width$}  {}\n", info.name, status, width = name_width);
     }
+    out
 }
 
-// See print_json: the wide battery table is program output on stdout.
-#[expect(clippy::print_stdout)]
-pub fn print_table_wide(rows: &[Row]) {
+fn table_wide(rows: &[Row]) -> String {
     if rows.is_empty() {
-        println!("No devices found");
-        return;
+        return "No devices found\n".to_owned();
     }
 
-    // Compute per-column widths from data plus header, in chars (see print_table
+    // Compute per-column widths from data plus header, in chars (see `table`
     // for why: names can be non-ASCII and `{:<width$}` pads by chars, not bytes).
     let name_w = rows
         .iter()
@@ -125,44 +133,39 @@ pub fn print_table_wide(rows: &[Row]) {
         .unwrap_or(0)
         .max("STATE".chars().count());
 
-    println!(
-        "{:<nw$}  {:<kw$}  {:<tw$}  {:<lw$}  {:<pw$}  {:<sw$}",
-        "NAME",
-        "KIND",
-        "TRANSPORT",
-        "LOCATOR",
-        "PERCENT",
-        "STATE",
-        nw = name_w,
-        kw = kind_w,
-        tw = transport_w,
-        lw = locator_w,
-        pw = percent_w,
-        sw = state_w,
-    );
-
-    for (info, outcome) in rows {
-        let percent_col = outcome
-            .reading()
-            .map_or_else(|| "-".to_owned(), |r| format!("{}%", r.percent));
-        let state_col = state_word(*outcome);
-        let locator_col = info.locator.as_deref().unwrap_or("-");
-        println!(
-            "{:<nw$}  {:<kw$}  {:<tw$}  {:<lw$}  {:<pw$}  {:<sw$}",
-            info.name,
-            info.kind.as_str(),
-            info.transport.as_str(),
-            locator_col,
-            percent_col,
-            state_col,
+    let line = |cells: [&str; 6]| {
+        format!(
+            "{:<nw$}  {:<kw$}  {:<tw$}  {:<lw$}  {:<pw$}  {:<sw$}\n",
+            cells[0],
+            cells[1],
+            cells[2],
+            cells[3],
+            cells[4],
+            cells[5],
             nw = name_w,
             kw = kind_w,
             tw = transport_w,
             lw = locator_w,
             pw = percent_w,
             sw = state_w,
-        );
+        )
+    };
+
+    let mut out = line(["NAME", "KIND", "TRANSPORT", "LOCATOR", "PERCENT", "STATE"]);
+    for (info, outcome) in rows {
+        let percent_col = outcome
+            .reading()
+            .map_or_else(|| "-".to_owned(), |r| format!("{}%", r.percent));
+        out += &line([
+            &info.name,
+            info.kind.as_str(),
+            info.transport.as_str(),
+            info.locator.as_deref().unwrap_or("-"),
+            &percent_col,
+            state_word(*outcome),
+        ]);
     }
+    out
 }
 
 #[cfg(test)]
@@ -296,23 +299,12 @@ mod tests {
         assert_eq!(obj["locator"], "AA:BB:CC:DD:EE:FF");
     }
 
-    #[test]
-    fn print_table_wide_columns_are_wide_enough() {
-        // Verify column width math: each column header must fit its widest data cell.
-        let transport_w = "bluetooth".len().max("TRANSPORT".len());
-        let locator_w = "AA:BB:CC:DD:EE:FF".len().max("LOCATOR".len());
-        let percent_w = "PERCENT".len();
-        let state_w = "discharging".len().max("STATE".len());
-
-        assert!(transport_w >= "TRANSPORT".len());
-        assert!(locator_w >= "AA:BB:CC:DD:EE:FF".len());
-        assert_eq!(percent_w, "PERCENT".len());
-        assert!(state_w >= "discharging".len());
+    fn trimmed_lines(text: &str) -> Vec<&str> {
+        text.lines().map(str::trim_end).collect()
     }
 
     #[test]
-    fn print_table_wide_does_not_panic() {
-        // Smoke test: ensure print_table_wide runs without panic for mixed rows.
+    fn wide_table_aligns_every_column_under_its_header() {
         let reading = BatteryReading::new(80, ChargeState::Discharging);
         let rows: Vec<Row> = vec![
             (
@@ -322,26 +314,34 @@ mod tests {
             (device("keyboard"), PollOutcome::Failed),
             (device("mouse"), PollOutcome::NoAccess),
         ];
-        // print_table_wide writes to stdout; we just ensure no panic.
-        print_table_wide(&rows);
+        assert_eq!(
+            trimmed_lines(&table_wide(&rows)),
+            [
+                "NAME         KIND   TRANSPORT  LOCATOR            PERCENT  STATE",
+                "MX Master 3  other  bluetooth  AA:BB:CC:DD:EE:FF  80%      discharging",
+                "keyboard     other  sysfs      -                  -        offline",
+                "mouse        other  sysfs      -                  -        no access",
+            ]
+        );
     }
 
     #[test]
-    fn print_table_aligns_non_ascii_names_by_char_count() {
-        let name_width = ["Клавиатура", "mouse"]
-            .iter()
-            .map(|name| name.chars().count())
-            .max()
-            .unwrap_or(0);
+    fn tables_say_so_when_there_are_no_devices() {
+        assert_eq!(table(&[]), "No devices found\n");
+        assert_eq!(table_wide(&[]), "No devices found\n");
+    }
 
-        let cyrillic_prefix_len = format!("{:<width$}  ", "Клавиатура", width = name_width)
-            .chars()
-            .count();
-        let ascii_prefix_len = format!("{:<width$}  ", "mouse", width = name_width)
-            .chars()
-            .count();
-
-        assert_eq!(cyrillic_prefix_len, ascii_prefix_len);
+    #[test]
+    fn table_aligns_non_ascii_names_by_char_count() {
+        let reading = BatteryReading::new(50, ChargeState::Discharging);
+        let rows: Vec<Row> = vec![
+            (device("Клавиатура"), PollOutcome::Reading(reading)),
+            (device("mouse"), PollOutcome::Failed),
+        ];
+        assert_eq!(
+            trimmed_lines(&table(&rows)),
+            ["Клавиатура  50%  discharging", "mouse       offline"]
+        );
     }
 
     #[test]
