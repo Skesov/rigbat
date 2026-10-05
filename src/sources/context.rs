@@ -1,4 +1,11 @@
+use std::time::Duration;
+
 use anyhow::Context as _;
+
+/// Bound on every method call over the shared system bus. Neither zbus nor
+/// dbus-daemon/dbus-broker time out a pending reply by default, so one wedged
+/// service (`bluetoothd`) would otherwise block its caller forever.
+pub const BUS_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Shared infrastructure handles a backend may need. Built once at the
 /// composition root and passed down; a backend that needs none ignores it.
@@ -44,7 +51,10 @@ impl Context {
             tracing::info!("system D-Bus connection closed; reconnecting");
             *slot = None;
         }
-        let conn = zbus::Connection::system()
+        let conn = zbus::connection::Builder::system()
+            .context("system D-Bus address")?
+            .method_timeout(BUS_CALL_TIMEOUT)
+            .build()
             .await
             .context("connecting to system D-Bus")?;
         *slot = Some(conn.clone());

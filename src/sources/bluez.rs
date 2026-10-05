@@ -648,11 +648,12 @@ mod bus_tests {
     use tokio::time::timeout;
     use zbus::zvariant::{OwnedObjectPath, Value};
 
-    use super::{BluezSource, watch_events_inner};
+    use super::{BluezBackend, BluezSource, watch_events_inner};
     use crate::bus_test::isolated;
     use crate::domain::{BatteryReading, DeviceInfo, DeviceKind, Transport};
     use crate::refresh::{RefreshSignal, RefreshWaiter};
-    use crate::sources::{BatterySource as _, Context};
+    use crate::sources::context::BUS_CALL_TIMEOUT;
+    use crate::sources::{BatteryBackend as _, BatterySource as _, Context};
 
     const DEBOUNCE: Duration = Duration::from_millis(300);
     /// Room for a signal to cross the bus and the watcher to act on it.
@@ -811,6 +812,39 @@ mod bus_tests {
         fn percentage(&self) -> u8 {
             64
         }
+    }
+
+    struct WedgedObjectManager;
+
+    #[zbus::interface(name = "org.freedesktop.DBus.ObjectManager")]
+    impl WedgedObjectManager {
+        async fn get_managed_objects(&self) -> HashMap<OwnedObjectPath, HashMap<String, u8>> {
+            std::future::pending().await
+        }
+    }
+
+    /// A `bluetoothd` that takes the call and never replies fails the sweep
+    /// (which retires nothing) instead of blocking discovery for good.
+    #[tokio::test]
+    async fn discovery_against_a_bluez_that_never_replies_fails_in_bounded_time() {
+        if !isolated(
+            module_path!(),
+            "discovery_against_a_bluez_that_never_replies_fails_in_bounded_time",
+        ) {
+            return;
+        }
+        let bluez = fake_bluez().await;
+        bluez
+            .object_server()
+            .at("/", WedgedObjectManager)
+            .await
+            .expect("ObjectManager");
+
+        let found = timeout(BUS_CALL_TIMEOUT * 3, BluezBackend.discover(&Context::new()))
+            .await
+            .expect("discovery still waiting on the wedged bluetoothd");
+        let err = format!("{:#}", found.err().expect("a failed sweep"));
+        assert!(err.contains("GetManagedObjects"), "{err}");
     }
 
     /// A `dbus-daemon` restart closes the shared connection; the source must

@@ -88,7 +88,10 @@ translated.
   backend determines which kind it is before choosing.
 - **`BatteryBackend`** (`sources`): `async fn discover(&self, ctx: &Context) ->
 anyhow::Result<Vec<Box<dyn BatterySource>>>`. Finds devices and constructs sources; `Err` is a
-  failed sweep, distinct from `Ok(vec![])`. A hidraw backend also returns its `HidrawFamily`
+  failed sweep, distinct from `Ok(vec![])`. A backend that has not answered within 10 s fails
+  its sweep the same way, and every call on the shared system bus times out after 5 s
+  (`context::BUS_CALL_TIMEOUT`; zbus and the bus daemons set none), so a wedged `bluetoothd`
+  neither stalls the other backends nor keeps the first tray icon from appearing. A hidraw backend also returns its `HidrawFamily`
   (vendor, models, battery interface) from `hidraw_family()`: the shared discovery in
   `sources::hidraw`, `rigbat doctor` and the udev rule test all read that one table. Backends are
   listed in `discovery::registry::backends()`; what a backend must guarantee is the

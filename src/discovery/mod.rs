@@ -1,5 +1,7 @@
 pub mod registry;
 
+use std::time::Duration;
+
 use futures_util::future::join_all;
 
 use crate::sources::{BatteryBackend, BatterySource, Context};
@@ -23,8 +25,26 @@ pub async fn discover_all(ctx: &Context) -> Vec<BackendSweep> {
     sweep(registry::backends(), ctx).await
 }
 
+/// One backend's share of a sweep. Past it the backend's sweep fails, so a hung
+/// daemon (a wedged `bluetoothd`) cannot stall every other backend and the
+/// supervisor behind `join_all`. Longer than `context::BUS_CALL_TIMEOUT`, so a
+/// timed-out bus call reports its own error first.
+const BACKEND_TIMEOUT: Duration = Duration::from_secs(10);
+
 async fn sweep(backends: Vec<Box<dyn BatteryBackend>>, ctx: &Context) -> Vec<BackendSweep> {
-    let futures: Vec<_> = backends.iter().map(|b| b.discover(ctx)).collect();
+    let futures: Vec<_> = backends
+        .iter()
+        .map(|b| async {
+            tokio::time::timeout(BACKEND_TIMEOUT, b.discover(ctx))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "no answer within {}s",
+                        BACKEND_TIMEOUT.as_secs()
+                    ))
+                })
+        })
+        .collect();
     let results = join_all(futures).await;
     backends
         .into_iter()
@@ -149,5 +169,41 @@ mod tests {
             .map(|s| s.device().name.clone())
             .collect();
         assert_eq!(names, ["mouse", "headset"]);
+    }
+
+    struct Hung;
+
+    #[async_trait::async_trait]
+    impl BatteryBackend for Hung {
+        fn name(&self) -> &'static str {
+            "hung"
+        }
+
+        async fn discover(&self, _: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_backend_that_never_answers_fails_its_sweep_and_holds_up_no_other() {
+        let mut all = backends();
+        all.push(Box::new(Hung));
+        let sweeps = tokio::time::timeout(BACKEND_TIMEOUT * 2, sweep(all, &Context::new()))
+            .await
+            .expect("the sweep waited on the hung backend");
+
+        let outcomes: Vec<(&str, Option<usize>)> = sweeps
+            .iter()
+            .map(|s| (s.name, s.result.as_ref().ok().map(Vec::len)))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("empty", Some(0)),
+                ("failing", None),
+                ("found", Some(2)),
+                ("hung", None)
+            ]
+        );
     }
 }
