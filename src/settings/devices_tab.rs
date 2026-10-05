@@ -5,10 +5,11 @@ use eframe::egui;
 
 use super::devices::{self, DeleteCell, DeleteState, DeviceRow, Dismissible, EscapeAction};
 use super::general_tab::{interval_combo, interval_label, threshold_slider};
-use super::{SettingsApp, Tab, scan, widgets};
+use super::{SettingsApp, Tab, open_uri, scan, widgets};
 use crate::config::DeviceSettings;
 use crate::domain::{
-    DeviceId, Presence, PrimaryStatus, TrayMode, charge_value, classify, status_note,
+    DeviceId, INSTALL_UDEV_RULE, Presence, PrimaryStatus, TrayMode, charge_value, classify,
+    status_note,
 };
 use crate::gui;
 use crate::i18n::{Lang, fl, loader};
@@ -18,6 +19,8 @@ use crate::state;
 const SEARCH_MIN_DEVICES: usize = 8;
 const SEARCH_WIDTH: f32 = 220.0;
 const RESET: &str = "\u{21BA}";
+/// The README section on udev access.
+const PERMISSIONS_DOCS: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "#permissions");
 
 /// What the Remove row's buttons asked for this frame.
 enum RemoveStep {
@@ -76,6 +79,7 @@ impl SettingsApp {
             ui.label(egui::RichText::new(fl!(l, "devices-tray-unanswered")).color(warn));
         }
         ui.add_space(widgets::TOOLBAR_GAP);
+        self.render_no_access(ui);
 
         let query = if searchable {
             self.device_search.as_str()
@@ -110,6 +114,31 @@ impl SettingsApp {
                     self.render_device(rows, row, &visuals, now);
                 }
             });
+        }
+    }
+
+    /// What a device without access lacks and the command that grants it.
+    fn render_no_access(&self, ui: &mut egui::Ui) {
+        let count = self
+            .device_rows
+            .iter()
+            .filter(|row| row.presence == Presence::NoAccess)
+            .count();
+        if count == 0 {
+            return;
+        }
+        let l = loader(self.config.lang());
+        let warn = gui::status_colors(ui.visuals(), self.config.palette).warn;
+        let title = fl!(l, "devices-no-access-title", count = count);
+        let (copy, copied) = (fl!(l, "button-copy"), fl!(l, "button-copied"));
+        let mut help = false;
+        widgets::banner(ui, &title, warn, |ui| {
+            ui.label(fl!(l, "devices-no-access-body"));
+            widgets::command(ui, INSTALL_UDEV_RULE, &copy, &copied);
+            help = ui.link(fl!(l, "devices-no-access-help")).clicked();
+        });
+        if help {
+            open_uri::open(&self.rt, &self.open_uri, ui.ctx(), PERMISSIONS_DOCS);
         }
     }
 
@@ -812,6 +841,53 @@ mod tests {
             );
             crate::egui_test::assert_targets_at_least(&targets, gui::MIN_TARGET);
         }
+    }
+
+    /// A device without access gets a banner with the command that grants it
+    /// and a link to the README, not only "run rigbat doctor".
+    #[test]
+    fn no_access_shows_the_fix_command_and_the_docs_in_every_language_and_text_scale() {
+        for (lang, scale) in Lang::ALL
+            .into_iter()
+            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
+        {
+            let mut app = app_in(lang, Config::default());
+            let size = tab_size(scale, 2000.0);
+            let painted = fully_painted_text_at(size, |ui| app.render_devices_tab(ui));
+            let l = loader(lang);
+            let expected = [
+                fl!(l, "devices-no-access-title", count = 1),
+                l.get("devices-no-access-body"),
+                INSTALL_UDEV_RULE.to_owned(),
+                l.get("button-copy"),
+                l.get("devices-no-access-help"),
+            ];
+            assert_whole(&painted, &expected, &format!("{lang:?} at {scale}"));
+        }
+
+        let mut app = app_in(Lang::En, Config::default());
+        app.device_rows
+            .retain(|row| row.presence != Presence::NoAccess);
+        let painted = fully_painted_text_at(TEST_SIZE, |ui| app.render_devices_tab(ui));
+        assert!(!painted.iter().any(|p| p.text == INSTALL_UDEV_RULE));
+    }
+
+    #[test]
+    fn the_no_access_link_opens_the_permissions_section() {
+        let (tx, opened) = std::sync::mpsc::channel();
+        let mut app = app_in(Lang::En, Config::default());
+        app.open_uri = std::sync::Arc::new(move |url| {
+            tx.send(url).expect("the test holds the receiver");
+            Box::pin(std::future::ready(Ok(())))
+        });
+        let ctx = egui::Context::default();
+        let output = run_frame(&ctx, TEST_SIZE, Vec::new(), |ui| app.render_devices_tab(ui));
+        let link = text_rects(&output, "How to fix")[0];
+        click_at(&ctx, TEST_SIZE, link.center(), |ui| {
+            app.render_devices_tab(ui)
+        });
+        assert_eq!(opened.try_recv().ok().as_deref(), Some(PERMISSIONS_DOCS));
+        assert!(PERMISSIONS_DOCS.ends_with("#permissions"));
     }
 
     /// Kind, transport and the last-seen date are painted in the open row, not

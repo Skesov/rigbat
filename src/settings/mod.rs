@@ -82,10 +82,74 @@ struct ScanResult {
     records: Vec<state::DeviceRecord>,
 }
 
+/// Why changes are not being saved; a banner until the next save succeeds.
+#[derive(Debug, Clone, PartialEq)]
+enum SaveProblem {
+    NoConfigDir,
+    /// `config.json` does not read or parse, so no writer replaces it.
+    Unreadable {
+        path: PathBuf,
+        detail: String,
+    },
+    Unwritable {
+        path: PathBuf,
+        detail: String,
+    },
+}
+
+impl SaveProblem {
+    /// What is wrong with the config file at `path` as the window opens.
+    fn at_open(path: Option<&std::path::Path>) -> Option<Self> {
+        let Some(path) = path else {
+            return Some(Self::NoConfigDir);
+        };
+        config::read(path).err().map(|e| Self::Unreadable {
+            path: path.to_owned(),
+            detail: format!("{e:#}"),
+        })
+    }
+
+    /// Why saving to `path` failed with `err`.
+    fn of_save(path: &std::path::Path, err: &anyhow::Error) -> Self {
+        if err.is::<config::Unreadable>() {
+            let detail = config::read(path)
+                .err()
+                .map_or_else(|| format!("{err:#}"), |e| format!("{e:#}"));
+            Self::Unreadable {
+                path: path.to_owned(),
+                detail,
+            }
+        } else {
+            Self::Unwritable {
+                path: path.to_owned(),
+                detail: format!("{err:#}"),
+            }
+        }
+    }
+
+    /// What happened and what to do, then the technical detail if any.
+    fn text(&self, lang: Lang) -> (String, Option<&str>) {
+        let l = loader(lang);
+        match self {
+            Self::NoConfigDir => (fl!(l, "config-no-dir"), None),
+            Self::Unreadable { path, detail } => (
+                fl!(l, "config-unreadable", path = path.display().to_string()),
+                Some(detail),
+            ),
+            Self::Unwritable { path, detail } => {
+                let dir = path.parent().unwrap_or(path).display().to_string();
+                (fl!(l, "config-unwritable", dir = dir), Some(detail))
+            }
+        }
+    }
+}
+
 struct SettingsApp {
     config: Config,
     /// `None` when there is no home directory; every save then fails.
     config_path: Option<PathBuf>,
+    /// Shown above every tab while set.
+    save_problem: Option<SaveProblem>,
     /// The last scan that answered; kept when a later one fails.
     discovered: scan::Discovered,
     /// The last scan found a tray running that did not answer.
@@ -130,8 +194,8 @@ struct SettingsApp {
 }
 
 impl SettingsApp {
-    /// Saves one user edit. Logs on failure; every control then keeps showing
-    /// the value that is on disk.
+    /// Saves one user edit. On failure every control keeps showing the value
+    /// that is on disk, and the window says why until a save succeeds.
     ///
     /// `edit` names exactly the field the call site just changed — see
     /// `save_edit` for why. On success, `self.config` adopts the freshly
@@ -141,13 +205,20 @@ impl SettingsApp {
     fn persist(&mut self, edit: impl FnOnce(&mut Config)) {
         let Some(path) = self.config_path.clone() else {
             tracing::error!("failed to save config: cannot determine config directory");
+            self.save_problem = Some(SaveProblem::NoConfigDir);
             return;
         };
         let load = || config::load_from(&path);
         let save = |cfg: &Config| config::save_to(&path, cfg);
         match save_edit(&load, &save, edit) {
-            Ok(on_disk) => self.config = on_disk,
-            Err(e) => tracing::error!("failed to save config: {e:#}"),
+            Ok(on_disk) => {
+                self.config = on_disk;
+                self.save_problem = None;
+            }
+            Err(e) => {
+                tracing::error!("failed to save config: {e:#}");
+                self.save_problem = Some(SaveProblem::of_save(&path, &e));
+            }
         }
     }
 
@@ -241,6 +312,7 @@ impl eframe::App for SettingsApp {
         frame.show(ui, |ui| {
             self.render_tab_bar(ui);
             ui.add_space(widgets::TAB_BAR_GAP);
+            self.render_save_problem(ui);
             match self.tab {
                 Tab::General => self.render_general_tab(ui),
                 Tab::Appearance => self.render_appearance_tab(ui),
@@ -263,6 +335,22 @@ impl SettingsApp {
         let theme = self.config.theme;
         self.theme
             .send_if_modified(|current| std::mem::replace(current, theme) != theme);
+    }
+
+    fn render_save_problem(&self, ui: &mut egui::Ui) {
+        let Some(problem) = &self.save_problem else {
+            return;
+        };
+        let lang = self.config.lang();
+        let (text, detail) = problem.text(lang);
+        let title = fl!(loader(lang), "config-not-saved");
+        let warn = gui::status_colors(ui.visuals(), self.config.palette).low;
+        widgets::banner(ui, &title, warn, |ui| {
+            ui.label(&text);
+            if let Some(detail) = detail {
+                ui.label(widgets::secondary(ui, detail));
+            }
+        });
     }
 
     fn render_tab_bar(&mut self, ui: &mut egui::Ui) {
@@ -448,9 +536,11 @@ pub fn run(tab: Tab) -> anyhow::Result<()> {
         Box::new(move |cc| {
             raiser.attach(&cc.egui_ctx);
             gui::follow(rt.handle(), cc.egui_ctx.clone(), appearance, theme_rx);
+            let config_path = config::config_path();
             let mut app = SettingsApp {
                 config,
-                config_path: config::config_path(),
+                save_problem: SaveProblem::at_open(config_path.as_deref()),
+                config_path,
                 discovered: Vec::new(),
                 tray_unanswered: false,
                 autostart_enabled: autostart::is_enabled(),
@@ -506,6 +596,7 @@ mod tests {
         SettingsApp {
             config,
             config_path: None,
+            save_problem: None,
             discovered: Vec::new(),
             tray_unanswered: false,
             autostart_enabled: false,

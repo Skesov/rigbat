@@ -13,6 +13,10 @@ use super::estimate::format_coarse;
 use super::{BootTime, ChargeState, DeviceState, Estimate, Presence, PrimaryStatus};
 use crate::i18n::{Lang, fl, loader};
 
+/// Installs the shipped udev rule and applies it to the hidraw nodes already
+/// present; `rigbat doctor` and the Devices tab print the same command.
+pub const INSTALL_UDEV_RULE: &str = "rigbat udev-rule | sudo tee /etc/udev/rules.d/70-rigbat.rules >/dev/null && sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=hidraw --action=change";
+
 /// Wire value for `--json` and `list`; never translated (see `state_label`).
 pub fn state_str(state: ChargeState) -> &'static str {
     match state {

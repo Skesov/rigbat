@@ -52,6 +52,10 @@ button-refreshing = Refreshing…
 button-copy = Copy
 button-copied = Copied
 settings-title = rigbat — Settings
+config-not-saved = Changes are not saved
+config-unreadable = { $path } does not read, so rigbat will not write over it. Fix the file or remove it.
+config-unwritable = Check that { $dir } exists and is writable.
+config-no-dir = No home directory was found to keep the settings in.
 
 ## Settings window: General tab
 
@@ -117,6 +121,12 @@ device-search-hint = Search devices
 devices-empty = No devices recorded yet. Connect a device, then press Refresh.
 devices-no-match = No devices match your search.
 devices-tray-unanswered = The running tray did not answer; showing the devices it listed last.
+devices-no-access-title = { $count ->
+        [one] rigbat cannot read { $count } device
+       *[other] rigbat cannot read { $count } devices
+    }
+devices-no-access-body = A USB device needs a udev rule before rigbat may read it. Install the rule with:
+devices-no-access-help = How to fix
 devices-connected = Connected now
 devices-seen-before = Seen before
 device-seen-ago = seen { $age }
@@ -145,4 +155,6 @@ button-cancel = Cancel
 
 dashboard-title = rigbat — Device overview
 dashboard-tray-not-running = The rigbat tray is not running.
+dashboard-start-tray = Start tray
+dashboard-no-devices-hint = Connect a device and it appears here.
 dashboard-in-tray = in tray

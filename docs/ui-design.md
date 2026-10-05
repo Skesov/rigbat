@@ -218,7 +218,7 @@ The settings building blocks live in `src/settings/widgets.rs`.
 | `Rows::block(title, content)`         | Title above content that spans the row                                                                                                                                                                                                                                                 | A control too wide for the right edge (the tile picker)                                  |
 | `subtitle(text)` / `none`             | One secondary line that wraps if it must / nothing                                                                                                                                                                                                                                     | The `subtitle` argument of `Rows::row`                                                   |
 | `secondary(ui, text)`                 | Text at `SECONDARY_SCALE` in `gui::secondary_text`                                                                                                                                                                                                                                     | Hints and footers, including custom subtitles                                            |
-| `command(ui, command, copy, copied)`  | A shell command in monospace secondary text and a "Copy" button that reads "Copied" for `COPIED_FOR`; wraps under the command when the line is full                                                                                                                                    | A command the user needs to run (the systemd hand-off, the udev fix)                     |
+| `command(ui, command, copy, copied)`  | A shell command in monospace secondary text and under it a "Copy" button that reads "Copied" for `COPIED_FOR`                                                                                                                                                                          | A command the user needs to run (the systemd hand-off, the udev fix)                     |
 | `switch(ui, id, on, label)`           | Animated pill switch; `id` is global so a test can find it, `label` is what a screen reader announces                                                                                                                                                                                  | A boolean that applies at once                                                           |
 | `tile(…)` + `tile_width`              | Image above caption, accent outline when selected                                                                                                                                                                                                                                      | A choice whose options are best shown as pictures (icon style, palette)                  |
 | `tab_bar(ui, labels, selected)`       | Centred tabs, accent underline on the selected one, full-width rule below                                                                                                                                                                                                              | A view switcher (GNOME's term): a window's fixed top-level views, not a set of documents |
@@ -239,7 +239,8 @@ Patterns from `src/settings/general_tab.rs`:
 - **Save on commit.** Switches, tiles and combo boxes save on change; a slider saves on
   `drag_stopped()` or `lost_focus()`, never per dragged pixel (GNOME applies a text field on Return or focus loss; a slider follows the same rule). Every save goes through
   `SettingsApp::persist`, which re-reads `config.json`, changes one field and writes it back; if
-  the write fails, the controls keep showing what is on disk.
+  the write fails, the controls keep showing what is on disk and a banner says why
+  ([Errors and empty states](#errors-and-empty-states)).
 - **A setting rigbat does not own is shown, disabled, with the owner named.** With
   `rigbat.service` enabled, the autostart switch is disabled, and its subtitle names the service
   and shows the command that turns it off, with a button that copies it (`widgets::command`,
@@ -318,7 +319,9 @@ running tray's state over the session bus and never polls a device.
 - Footer: a "↻" button (`refresh_button`: the `REFRESH` font glyph, not a symbolic icon) that a
   screen reader announces, and hover shows, as "Refresh"; a spinner while the refresh is in
   flight, at most `REFRESH_SPINNER_LIMIT`; "Settings" on the right.
-- Empty states say why in one line: the tray is not running; there are no devices.
+- Empty states say why and what to do ([Errors and empty states](#errors-and-empty-states)): the
+  tray is not running, with a "Start tray" button; there are no devices, with how one appears.
+  The footer stays.
 
 ### Tray menu
 

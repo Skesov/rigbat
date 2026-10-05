@@ -513,6 +513,121 @@ mod tests {
         }
     }
 
+    fn frame(app: &mut SettingsApp, ui: &mut egui::Ui) {
+        app.render_save_problem(ui);
+        app.render_general_tab(ui);
+    }
+
+    /// A save refused over a broken config.json says so in the window, with
+    /// the parser's message, until a save goes through again.
+    #[test]
+    fn a_refused_save_is_shown_until_a_save_succeeds() {
+        let (mut app, path) = app_saving_to("refused-save", Config::default());
+        let ctx = egui::Context::default();
+        let size = GENERAL_TAB_TEST_SIZE;
+        for _ in 0..2 {
+            run_frame(&ctx, size, Vec::new(), |ui| frame(&mut app, ui));
+        }
+        let switch = ctx
+            .read_response(switch_id("notifications-enabled"))
+            .expect("the switch was laid out");
+        std::fs::write(&path, "{ oops").unwrap();
+
+        click_at(&ctx, size, switch.rect.center(), |ui| frame(&mut app, ui));
+
+        let painted = fully_painted_text_at(size, |ui| frame(&mut app, ui));
+        let unreadable = fl!(
+            loader(Lang::En),
+            "config-unreadable",
+            path = path.display().to_string()
+        );
+        for text in ["Changes are not saved", unreadable.as_str()] {
+            assert!(
+                painted.iter().any(|p| p.text == text),
+                "{text:?}: {painted:?}"
+            );
+        }
+        assert!(
+            painted
+                .iter()
+                .any(|p| p.text.contains("config parse error")),
+            "{painted:?}"
+        );
+        assert_no_overlap(&painted);
+
+        std::fs::write(&path, "{}").unwrap();
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            run_frame(&ctx, size, Vec::new(), |ui| frame(&mut app, ui));
+        }
+        let switch = ctx
+            .read_response(switch_id("notifications-enabled"))
+            .expect("the switch was laid out");
+        click_at(&ctx, size, switch.rect.center(), |ui| frame(&mut app, ui));
+        assert_eq!(app.save_problem, None);
+        let painted = fully_painted_text_at(size, |ui| frame(&mut app, ui));
+        assert!(!painted.iter().any(|p| p.text == "Changes are not saved"));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_config_that_does_not_parse_is_reported_when_the_window_opens() {
+        use crate::settings::SaveProblem;
+        let path = crate::settings::tests::scratch_config_path("unreadable-at-open");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[1,").unwrap();
+        let problem = SaveProblem::at_open(Some(&path));
+        assert!(
+            matches!(&problem, Some(SaveProblem::Unreadable { detail, .. })
+                if detail.contains("config parse error")),
+            "{problem:?}"
+        );
+        std::fs::write(&path, "{}").unwrap();
+        assert_eq!(SaveProblem::at_open(Some(&path)), None);
+        assert_eq!(SaveProblem::at_open(None), Some(SaveProblem::NoConfigDir));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// Every save problem's text, in every language and text scale.
+    #[test]
+    fn every_save_problem_is_whole_in_every_language_and_text_scale() {
+        use crate::settings::SaveProblem;
+        let path = std::path::PathBuf::from("/home/someone/.config/rigbat/config.json");
+        let problems = [
+            SaveProblem::NoConfigDir,
+            SaveProblem::Unreadable {
+                path: path.clone(),
+                detail: "config parse error (/home/someone/.config/rigbat/config.json): \
+                         key must be a string at line 1 column 3"
+                    .to_owned(),
+            },
+            SaveProblem::Unwritable {
+                path,
+                detail: "failed to create config directory: Permission denied (os error 13)"
+                    .to_owned(),
+            },
+        ];
+        for (lang, scale) in Lang::ALL
+            .into_iter()
+            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
+        {
+            for problem in &problems {
+                let mut app = settings_app_with(Config {
+                    language: Some(lang.tag().to_owned()),
+                    ..Config::default()
+                });
+                app.save_problem = Some(problem.clone());
+                let painted = fully_painted_text_at(tab_size(scale, 1800.0), |ui| {
+                    frame(&mut app, ui);
+                });
+                let (text, detail) = problem.text(lang);
+                let mut expected = vec![loader(lang).get("config-not-saved"), text];
+                expected.extend(detail.map(str::to_owned));
+                assert_whole(&painted, &expected, &format!("{lang:?} at {scale}"));
+            }
+        }
+    }
+
     #[test]
     fn general_tab_column_is_centred_and_capped() {
         let mut app = settings_app_with(Config::default());

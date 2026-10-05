@@ -41,9 +41,15 @@ const RESTART_RETRIES: u32 = 10;
 const RESTART_RETRY_DELAY: Duration = Duration::from_millis(500);
 const REFRESH_SPINNER_LIMIT: Duration = Duration::from_secs(5);
 
+/// Rows of height an empty state gets: a line saying why and one saying what to do.
+const EMPTY_ROWS: usize = 2;
+
 /// Exactly the rows, footer and margins; past `MAX_VISIBLE_ROWS` the list scrolls.
 fn window_size(devices: usize) -> [f32; 2] {
-    let rows = devices.clamp(1, MAX_VISIBLE_ROWS) as f32;
+    let rows = match devices {
+        0 => EMPTY_ROWS,
+        n => n.min(MAX_VISIBLE_ROWS),
+    } as f32;
     [
         WINDOW_WIDTH,
         2.0 * MARGIN + rows * ROW_HEIGHT + FOOTER_HEIGHT,
@@ -320,6 +326,8 @@ struct Dashboard {
     size: [f32; 2],
     was_focused: bool,
     refreshing: Option<Refreshing>,
+    /// Starts `rigbat tray`; a parameter so tests start nothing.
+    start_tray: Box<dyn Fn()>,
 }
 
 /// A Refresh click still waiting for its snapshot.
@@ -346,6 +354,7 @@ impl Dashboard {
             size: window_size(0),
             was_focused: false,
             refreshing: None,
+            start_tray: Box::new(|| crate::launch::spawn("tray")),
         };
         dashboard.accept(snapshot);
         dashboard.size = dashboard.wanted_size();
@@ -407,35 +416,46 @@ impl Dashboard {
 
     fn render(&mut self, ui: &mut egui::Ui) {
         let l = loader(self.lang);
-        let Some(snapshot) = &self.snapshot else {
-            ui.centered_and_justified(|ui| ui.label(fl!(l, "dashboard-tray-not-running")));
-            return;
-        };
-        if snapshot.devices.is_empty() {
-            ui.centered_and_justified(|ui| ui.label(fl!(l, "tray-no-devices")));
-            return;
-        }
-        let lang = self.lang;
-        let status = gui::status_colors(ui.visuals(), self.palette);
-        let elapsed = crate::clock::now()
-            .saturating_duration_since(self.received_at)
-            .as_secs();
         let (list, footer) = ui
             .max_rect()
             .split_top_bottom_at_y(ui.max_rect().bottom() - FOOTER_HEIGHT);
         let mut list_ui = ui.new_child(egui::UiBuilder::new().max_rect(list));
-        list_ui.spacing_mut().item_spacing.y = 0.0;
-        let rows = |ui: &mut egui::Ui| {
-            for card in &snapshot.devices {
-                render_row(ui, card, lang, elapsed, &status);
+        match &self.snapshot {
+            None => {
+                let start =
+                    empty_state(&mut list_ui, &fl!(l, "dashboard-tray-not-running"), |ui| {
+                        ui.button(fl!(l, "dashboard-start-tray")).clicked()
+                    });
+                if start {
+                    (self.start_tray)();
+                }
             }
-        };
-        if snapshot.devices.len() > MAX_VISIBLE_ROWS {
-            egui::ScrollArea::vertical()
-                .auto_shrink(false)
-                .show(&mut list_ui, rows);
-        } else {
-            rows(&mut list_ui);
+            Some(snapshot) if snapshot.devices.is_empty() => {
+                empty_state(&mut list_ui, &fl!(l, "tray-no-devices"), |ui| {
+                    let hint = fl!(l, "dashboard-no-devices-hint");
+                    ui.label(egui::RichText::new(hint).color(secondary_text(ui.visuals())));
+                });
+            }
+            Some(snapshot) => {
+                let lang = self.lang;
+                let status = gui::status_colors(ui.visuals(), self.palette);
+                let elapsed = crate::clock::now()
+                    .saturating_duration_since(self.received_at)
+                    .as_secs();
+                list_ui.spacing_mut().item_spacing.y = 0.0;
+                let rows = |ui: &mut egui::Ui| {
+                    for card in &snapshot.devices {
+                        render_row(ui, card, lang, elapsed, &status);
+                    }
+                };
+                if snapshot.devices.len() > MAX_VISIBLE_ROWS {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink(false)
+                        .show(&mut list_ui, rows);
+                } else {
+                    rows(&mut list_ui);
+                }
+            }
         }
         self.render_footer(ui, footer);
     }
@@ -493,6 +513,17 @@ impl eframe::App for Dashboard {
         // Ages ("2 h ago") move without any state change.
         ui.ctx().request_repaint_after(Duration::from_secs(30));
     }
+}
+
+/// Why the list is empty, and under it what to do, centred in the list area.
+fn empty_state<R>(ui: &mut egui::Ui, why: &str, what_to_do: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.vertical_centered(|ui| {
+        ui.add_space(GAP);
+        ui.label(egui::RichText::new(why).strong());
+        ui.add_space(GAP);
+        what_to_do(ui)
+    })
+    .inner
 }
 
 fn sort_cards(cards: &mut [DeviceCard]) {
@@ -847,23 +878,44 @@ mod tests {
     }
 
     #[test]
-    fn without_a_tray_or_devices_it_says_so_in_every_language() {
-        for lang in Lang::ALL {
+    fn without_a_tray_or_devices_it_says_why_and_what_to_do_in_every_language() {
+        for (lang, scale) in Lang::ALL
+            .into_iter()
+            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
+        {
             let l = loader(lang);
             let mut none = Dashboard::new(None, lang, Palette::default(), mpsc::channel().1, None);
             let mut empty = dashboard(Vec::new(), lang);
-            for (d, text) in [
-                (&mut none, fl!(l, "dashboard-tray-not-running")),
-                (&mut empty, fl!(l, "tray-no-devices")),
+            for (d, expected) in [
+                (
+                    &mut none,
+                    ["dashboard-tray-not-running", "dashboard-start-tray"],
+                ),
+                (&mut empty, ["tray-no-devices", "dashboard-no-devices-hint"]),
             ] {
-                let painted = painted(d);
-                assert!(
-                    painted.iter().any(|p| p.text == text),
-                    "{lang:?}: {text:?} missing; painted: {painted:?}"
-                );
-                assert_no_overlap(&painted);
+                let painted = painted_at(d, scale);
+                let mut expected = expected.map(|id| l.get(id)).to_vec();
+                expected.push(l.get("tray-settings"));
+                assert_whole(&painted, &expected, &format!("{lang:?} at {scale}"));
             }
         }
+    }
+
+    #[test]
+    fn start_tray_starts_the_tray() {
+        let started = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut d = Dashboard::new(None, Lang::En, Palette::default(), mpsc::channel().1, None);
+        let count = started.clone();
+        d.start_tray = Box::new(move || count.set(count.get() + 1));
+        let ctx = egui::Context::default();
+        let size = d.wanted_size();
+        let output = run_frame(&ctx, size, Vec::new(), |ui| d.show(ui));
+        let button = crate::egui_test::painted(&output)
+            .into_iter()
+            .find(|p| p.text == "Start tray")
+            .expect("the button was painted");
+        crate::egui_test::click_at(&ctx, size, button.rect.center(), |ui| d.show(ui));
+        assert_eq!(started.get(), 1);
     }
 
     #[test]
@@ -962,7 +1014,7 @@ mod tests {
     #[test]
     fn window_fits_the_rows_exactly_and_scrolls_past_the_cap() {
         let footer_and_margins = 2.0 * MARGIN + FOOTER_HEIGHT;
-        assert_eq!(window_size(0), window_size(1));
+        assert_eq!(window_size(0), window_size(EMPTY_ROWS));
         assert_eq!(window_size(3)[1], 3.0 * ROW_HEIGHT + footer_and_margins);
         assert_eq!(window_size(40), window_size(MAX_VISIBLE_ROWS));
     }

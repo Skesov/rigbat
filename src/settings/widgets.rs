@@ -40,6 +40,7 @@ const TILE_HEIGHT: f32 = 76.0;
 pub const TILE_GAP: f32 = 10.0;
 const TILE_CAPTION_GAP: f32 = 8.0;
 const SELECTED_TILE_STROKE: f32 = 2.0;
+const BANNER_STROKE: f32 = 1.5;
 
 const TAB_PADDING: egui::Vec2 = egui::vec2(12.0, 6.0);
 const TAB_UNDERLINE: f32 = 3.0;
@@ -102,6 +103,31 @@ pub fn group(
         });
     }
     ui.add_space(GROUP_GAP);
+}
+
+/// A boxed notice above a page's content: a strong `title` in `accent`, an
+/// outline in `accent`, and `content` under the title.
+pub fn banner(
+    ui: &mut egui::Ui,
+    title: &str,
+    accent: egui::Color32,
+    content: impl FnOnce(&mut egui::Ui),
+) {
+    let visuals = ui.visuals();
+    egui::Frame::new()
+        .fill(visuals.faint_bg_color)
+        .stroke(egui::Stroke::new(BANNER_STROKE, accent))
+        .corner_radius(GROUP_RADIUS)
+        .inner_margin(egui::Margin::symmetric(
+            ROW_PADDING_X as i8,
+            ROW_PADDING_Y as i8,
+        ))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new(title).strong().color(accent));
+            content(ui);
+        });
+    ui.add_space(TOOLBAR_GAP);
 }
 
 /// Text outside a group's box, inset to line up with its rounded corner.
@@ -364,10 +390,10 @@ pub fn subtitle(text: &str) -> impl FnOnce(&mut egui::Ui) + '_ {
 /// No subtitle.
 pub fn none(_: &mut egui::Ui) {}
 
-/// A shell command in monospace and a button that copies it, reading `copied`
-/// for `COPIED_FOR`; wraps under the command when the line is full.
+/// A shell command in monospace and, under it, a button that copies it,
+/// reading `copied` for `COPIED_FOR`.
 pub fn command(ui: &mut egui::Ui, command: &str, copy: &str, copied: &str) -> egui::Response {
-    ui.horizontal_wrapped(|ui| {
+    ui.vertical(|ui| {
         let font = egui::FontId::monospace(secondary_font(ui).size);
         ui.label(
             egui::RichText::new(command)

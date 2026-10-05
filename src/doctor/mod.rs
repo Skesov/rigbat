@@ -13,6 +13,7 @@ use zbus::names::BusName;
 
 use crate::autostart;
 use crate::discovery::registry;
+use crate::domain::INSTALL_UDEV_RULE;
 use crate::ipc;
 use crate::sources::hidraw;
 use crate::state;
@@ -23,7 +24,6 @@ const UDEV_RULE: &str = "70-rigbat.rules";
 const UDEV_RULE_DIRS: [&str; 2] = ["/etc/udev/rules.d", "/usr/lib/udev/rules.d"];
 /// The shipped rule, printed by `rigbat udev-rule` so no source tree is needed.
 pub const UDEV_RULE_TEXT: &str = include_str!("../../packaging/70-rigbat.rules");
-const INSTALL_UDEV_RULE: &str = "rigbat udev-rule | sudo tee /etc/udev/rules.d/70-rigbat.rules >/dev/null && sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=hidraw --action=change";
 const BUS_TIMEOUT: Duration = Duration::from_secs(3);
 /// The portal may be D-Bus activated on first use, which takes longer than a
 /// plain name lookup.

@@ -75,6 +75,10 @@ button-refreshing = Обновление…
 button-copy = Копировать
 button-copied = Скопировано
 settings-title = rigbat — Настройки
+config-not-saved = Изменения не сохраняются
+config-unreadable = Файл { $path } не читается, и rigbat не станет его перезаписывать. Исправьте или удалите его.
+config-unwritable = Проверьте, что каталог { $dir } существует и доступен для записи.
+config-no-dir = Не найден домашний каталог для хранения настроек.
 
 ## Settings window: General tab
 
@@ -140,6 +144,13 @@ device-search-hint = Поиск устройств
 devices-empty = Устройств пока нет. Подключите устройство и нажмите «Обновить».
 devices-no-match = Ничего не найдено.
 devices-tray-unanswered = Запущенный трей не ответил; показаны устройства из его последнего ответа.
+devices-no-access-title = { $count ->
+        [one] rigbat не может прочитать { $count } устройство
+        [few] rigbat не может прочитать { $count } устройства
+       *[many] rigbat не может прочитать { $count } устройств
+    }
+devices-no-access-body = Чтобы rigbat мог читать USB-устройство, нужно правило udev. Установите его командой:
+devices-no-access-help = Как исправить
 devices-connected = Подключены сейчас
 devices-seen-before = Замечены раньше
 device-seen-ago = замечено { $age }
@@ -168,4 +179,6 @@ button-cancel = Отмена
 
 dashboard-title = rigbat — Обзор устройств
 dashboard-tray-not-running = Трей rigbat не запущен.
+dashboard-start-tray = Запустить трей
+dashboard-no-devices-hint = Подключите устройство, и оно появится здесь.
 dashboard-in-tray = в трее
