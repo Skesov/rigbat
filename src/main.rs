@@ -38,6 +38,7 @@ Usage:
                            Open the settings window, on that tab
   rigbat dashboard         Open the device overview (the tray icon's left click)
   rigbat doctor            Check the setup and print how to fix each problem
+  rigbat udev-rule         Print the udev rule for USB HID access (see `rigbat doctor`)
 
 Options:
   --wide        Add transport and locator columns to the table
@@ -56,6 +57,7 @@ enum Invocation {
     Settings(settings::Tab),
     Dashboard,
     Doctor,
+    UdevRule,
     Help,
     Version,
     /// Unrecognised argument; carries the offending token for the error message.
@@ -120,6 +122,7 @@ fn parse_args(args: &[String]) -> Invocation {
         },
         "dashboard" => Invocation::Dashboard,
         "doctor" => Invocation::Doctor,
+        "udev-rule" => Invocation::UdevRule,
         other => Invocation::Unknown(other.to_string()),
     }
 }
@@ -143,6 +146,10 @@ fn main() {
         }
         Invocation::Version => {
             println!("rigbat {}", domain::version::Build::current());
+            std::process::exit(0);
+        }
+        Invocation::UdevRule => {
+            print!("{}", doctor::UDEV_RULE_TEXT);
             std::process::exit(0);
         }
         Invocation::Unknown(tok) => {
@@ -243,6 +250,7 @@ impl From<&Invocation> for LogProfile {
             Invocation::List { .. }
             | Invocation::Json
             | Invocation::Doctor
+            | Invocation::UdevRule
             | Invocation::Help
             | Invocation::Version
             | Invocation::Unknown(_)
@@ -596,6 +604,7 @@ mod tests {
         );
         assert_eq!(parse_args(&s(&["dashboard"])), Invocation::Dashboard);
         assert_eq!(parse_args(&s(&["doctor"])), Invocation::Doctor);
+        assert_eq!(parse_args(&s(&["udev-rule"])), Invocation::UdevRule);
     }
 
     #[test]

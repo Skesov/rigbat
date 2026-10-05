@@ -54,6 +54,8 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
   systemd unit + autostart both enabled, BlueZ, portal, read-write access to each supported
   hidraw node (via `discovery::registry::hidraw_families`), config and state DB. Prints
   `ok`/`warn`/`fail` with a fix per problem; exits 1 on any `fail`, warnings do not fail.
+- `rigbat udev-rule` — prints the embedded `packaging/70-rigbat.rules`; `doctor`'s fix pipes it
+  into `/etc/udev/rules.d/`, so a crates.io or bare-binary user needs no source tree.
 - `rigbat settings` — GTK-free eframe/egui settings window in a SEPARATE process (the tray spawns
   it). Holds `org.rigbat.Settings`; a second launch raises the open window and exits. It edits
   `config.json`; the tray applies changes via the file watch. Its device list is the running

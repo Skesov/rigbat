@@ -21,6 +21,9 @@ const SNI_WATCHER: &str = "org.kde.StatusNotifierWatcher";
 const BLUEZ: &str = "org.bluez";
 const UDEV_RULE: &str = "70-rigbat.rules";
 const UDEV_RULE_DIRS: [&str; 2] = ["/etc/udev/rules.d", "/usr/lib/udev/rules.d"];
+/// The shipped rule, printed by `rigbat udev-rule` so no source tree is needed.
+pub const UDEV_RULE_TEXT: &str = include_str!("../../packaging/70-rigbat.rules");
+const INSTALL_UDEV_RULE: &str = "rigbat udev-rule | sudo tee /etc/udev/rules.d/70-rigbat.rules >/dev/null && sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=hidraw --action=change";
 const BUS_TIMEOUT: Duration = Duration::from_secs(3);
 /// The portal may be D-Bus activated on first use, which takes longer than a
 /// plain name lookup.
@@ -225,7 +228,7 @@ fn udev_fix(installed_rule: Option<&InstalledRule>, usb_id: (u16, u16)) -> Strin
             path,
             ids: Some(ids),
         }) if !ids.contains(&usb_id) => format!(
-            "{} is outdated, it has no line for {:04x}:{:04x}: reinstall it with sudo make udev-install (from the source tree) or update the rigbat package, then replug the device",
+            "{} is outdated, it has no line for {:04x}:{:04x}: update the rigbat package, or install the current rule with {INSTALL_UDEV_RULE}",
             path.display(),
             usb_id.0,
             usb_id.1
@@ -235,7 +238,7 @@ fn udev_fix(installed_rule: Option<&InstalledRule>, usb_id: (u16, u16)) -> Strin
             rule.path.display()
         ),
         None => format!(
-            "{UDEV_RULE} is not installed in {}: sudo make udev-install (from the source tree), then replug the device",
+            "{UDEV_RULE} is not installed in {}: {INSTALL_UDEV_RULE} (from a source tree: sudo make udev-install); replug the device if it still has no access",
             UDEV_RULE_DIRS.join(" or ")
         ),
     }
@@ -596,8 +599,22 @@ mod tests {
         assert_eq!(statuses(&checks), [Status::Fail]);
         assert!(checks[0].summary.contains("/dev/hidraw5"));
         let fix = checks[0].fix.as_deref().unwrap();
+        assert!(fix.contains(INSTALL_UDEV_RULE), "{fix}");
         assert!(fix.contains("sudo make udev-install"), "{fix}");
         assert!(fix.contains("/etc/udev/rules.d"), "{fix}");
+    }
+
+    /// The fix works without a source tree: the binary prints the rule it checks against.
+    #[test]
+    fn the_install_command_writes_the_rule_this_binary_prints() {
+        assert!(
+            INSTALL_UDEV_RULE.starts_with(&format!(
+                "rigbat udev-rule | sudo tee /etc/udev/rules.d/{UDEV_RULE} "
+            )),
+            "{INSTALL_UDEV_RULE}"
+        );
+        assert!(INSTALL_UDEV_RULE.contains("udevadm trigger --subsystem-match=hidraw"));
+        assert!(!udev_rule_ids(UDEV_RULE_TEXT).is_empty());
     }
 
     fn installed_rule(ids: Option<&[(u16, u16)]>) -> InstalledRule {
@@ -631,8 +648,7 @@ mod tests {
             "{fix}"
         );
         assert!(fix.contains("1038:1852"), "{fix}");
-        assert!(fix.contains("sudo make udev-install"), "{fix}");
-        assert!(!fix.contains("udevadm trigger"), "{fix}");
+        assert!(fix.contains(INSTALL_UDEV_RULE), "{fix}");
     }
 
     #[test]
@@ -651,7 +667,7 @@ mod tests {
 
     #[test]
     fn shipped_udev_rule_grants_exactly_the_supported_hidraw_devices() {
-        let shipped = udev_rule_ids(include_str!("../../packaging/70-rigbat.rules"));
+        let shipped = udev_rule_ids(UDEV_RULE_TEXT);
         let supported: BTreeSet<(u16, u16)> = registry::hidraw_families()
             .iter()
             .flat_map(|family| family.usb_ids())

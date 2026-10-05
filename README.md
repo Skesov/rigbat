@@ -100,7 +100,7 @@ The [releases page](https://github.com/Skesov/rigbat/releases) has builds for `x
   `systemctl --user enable --now rigbat.service`.
 - **Tarball** — `rigbat-v<version>-<target>.tar.gz`: the binary plus the `packaging/` files.
 - **Binary** — `rigbat-v<version>-<target>`, the executable alone. A USB HID device also needs
-  the udev rule from the tarball (see [Permissions](#permissions)).
+  the udev rule, which `rigbat udev-rule` prints (see [Permissions](#permissions)).
 - **crates.io** — `cargo install rigbat --locked` builds the binary only (needs the build
   requirements above). A USB HID device also needs the udev rule (see [Permissions](#permissions));
   start the tray with the settings window's `Start with session` switch.
@@ -187,19 +187,25 @@ and says the service manages startup when it sees the service enabled.
 ## Permissions
 
 `/dev/hidraw*` nodes are root-only by default on most distros, so a USB HID device
-(e.g. a SteelSeries mouse) shows as `no access` until you install the udev rule:
+(e.g. a SteelSeries mouse) shows as `no access` until you install the udev rule. The `.deb`,
+`.rpm` and AUR packages ship it. Otherwise the binary prints the rule itself, so no source tree
+is needed:
 
 ```sh
-sudo make udev-install
+rigbat udev-rule | sudo tee /etc/udev/rules.d/70-rigbat.rules >/dev/null
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=hidraw --action=change
 ```
 
-This installs `packaging/70-rigbat.rules` to `/etc/udev/rules.d/` and reloads udev. The
+From a source tree, `sudo make udev-install` does the same.
+
+Either way the rule lands in `/etc/udev/rules.d/` and udev reloads it. The
 rule grants the logged-in user access, scoped to the specific vendor/product ids rigbat
 supports (`TAG+="uaccess"` via logind) — not a blanket grant to every HID device. `make
 install`/`make service` never need root; only this step does, since it writes to `/etc`.
 
 Bluetooth and sysfs (kernel power_supply) devices need no rule — only USB HID access is
-gated by permissions. A device already plugged in when you run `udev-install` is
+gated by permissions. A device already plugged in when the rule is installed is
 re-triggered automatically; if it still shows `no access`, replug it.
 
 ### 8BitDo Ultimate 2 Wireless
