@@ -364,6 +364,40 @@ pub fn subtitle(text: &str) -> impl FnOnce(&mut egui::Ui) + '_ {
 /// No subtitle.
 pub fn none(_: &mut egui::Ui) {}
 
+/// A shell command in monospace and a button that copies it, reading `copied`
+/// for `COPIED_FOR`; wraps under the command when the line is full.
+pub fn command(ui: &mut egui::Ui, command: &str, copy: &str, copied: &str) -> egui::Response {
+    ui.horizontal_wrapped(|ui| {
+        let font = egui::FontId::monospace(secondary_font(ui).size);
+        ui.label(
+            egui::RichText::new(command)
+                .font(font)
+                .color(gui::secondary_text(ui.visuals())),
+        );
+        let id = ui.id().with(("copy-command", command));
+        let now = ui.input(|input| input.time);
+        let copied_at = ui.data(|data| data.get_temp::<f64>(id));
+        let left = copied_at.map_or(0.0, |at| at + COPIED_FOR - now);
+        let label = if left > 0.0 {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(left));
+            copied
+        } else {
+            copy
+        };
+        let button_font = egui::TextStyle::Button.resolve(ui.style());
+        let width = text_width(ui, copy, &button_font).max(text_width(ui, copied, &button_font))
+            + 2.0 * ui.spacing().button_padding.x;
+        let response = ui.add(egui::Button::new(label).min_size(egui::vec2(width, 0.0)));
+        if response.clicked() {
+            ui.ctx().copy_text(command.to_owned());
+            ui.data_mut(|data| data.insert_temp(id, now));
+        }
+        response
+    })
+    .inner
+}
+
 /// An on/off switch. `id` is global so that a test can find it; `label` is
 /// what a screen reader announces.
 pub fn switch(ui: &mut egui::Ui, id: egui::Id, on: &mut bool, label: &str) -> egui::Response {

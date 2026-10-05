@@ -126,14 +126,7 @@ impl SettingsApp {
         let name = row.device.name.as_str();
         let connected = row.presence != Presence::Disconnected;
         let (value, note) = self.device_value(row, visuals, now);
-        let mut hover = format!(
-            "{} · {}",
-            row.kind.label(lang),
-            row.device.transport.as_str()
-        );
-        if let (false, Some(at)) = (connected, row.last_seen) {
-            hover.push_str(&format!(" · {}", devices::absolute_date_label(at)));
-        }
+        let hover = device_about(row, lang);
         let header = widgets::Expander {
             id: egui::Id::new(("device-row", &row.device)),
             kind: row.kind,
@@ -232,6 +225,9 @@ impl SettingsApp {
         let lang = self.config.lang();
         let l = loader(lang);
         let name = row.device.name.as_str();
+
+        let about = device_about(row, lang);
+        rows.row(&fl!(l, "device-about"), widgets::subtitle(&about), |_| ());
 
         let title = fl!(l, "device-pin");
         let hint =
@@ -448,6 +444,21 @@ impl SettingsApp {
             EscapeAction::CloseWindow => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
         }
     }
+}
+
+/// Kind and transport, and the date a device not connected now was last seen.
+fn device_about(row: &DeviceRow, lang: Lang) -> String {
+    let mut about = format!(
+        "{} · {}",
+        row.kind.label(lang),
+        row.device.transport.as_str()
+    );
+    if let (Presence::Disconnected, Some(at)) = (row.presence, row.last_seen) {
+        let date = devices::absolute_date_label(at);
+        let seen = fl!(loader(lang), "device-last-seen", date = date.as_str());
+        about.push_str(&format!(" · {seen}"));
+    }
+    about
 }
 
 /// "The default for all devices", or the default's value and a reset button
@@ -779,6 +790,37 @@ mod tests {
         }
     }
 
+    /// Kind, transport and the last-seen date are painted in the open row, not
+    /// only in the hover text a pointer has to find.
+    #[test]
+    fn an_open_row_paints_its_kind_transport_and_last_seen_date() {
+        for lang in Lang::ALL {
+            let l = loader(lang);
+            for row in [keyboard(), earbuds()] {
+                let mut app = app_in(lang, Config::default());
+                app.expanded_device = Some(row.device.clone());
+
+                let painted = fully_painted_text_at(TEST_SIZE, |ui| app.render_devices_tab(ui));
+
+                let mut about = format!("{} · hidraw", row.kind.label(lang));
+                if row.presence == Presence::Disconnected {
+                    let date = devices::absolute_date_label(row.last_seen.expect("seen before"));
+                    about = format!(
+                        "{about} · {}",
+                        fl!(l, "device-last-seen", date = date.as_str())
+                    );
+                }
+                for text in [l.get("device-about"), about] {
+                    assert!(
+                        painted.iter().any(|p| p.text == text),
+                        "{lang:?}: {text:?} is cut off or missing: {painted:?}"
+                    );
+                }
+                assert_no_overlap(&painted);
+            }
+        }
+    }
+
     fn header(ctx: &egui::Context, row: &DeviceRow) -> egui::Response {
         ctx.read_response(egui::Id::new(("device-row", &row.device)))
             .expect("the row was laid out")
@@ -896,7 +938,9 @@ mod tests {
         app.expanded_device = Some(keyboard().device);
         let ctx = egui::Context::default();
         let size = TEST_SIZE;
-        run_frame(&ctx, size, Vec::new(), |ui| app.render_devices_tab(ui));
+        for _ in 0..2 {
+            run_frame(&ctx, size, Vec::new(), |ui| app.render_devices_tab(ui));
+        }
 
         let pin = ctx
             .read_response(device_switch_id("pin", &keyboard().device))

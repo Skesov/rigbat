@@ -217,6 +217,7 @@ The settings building blocks live in `src/settings/widgets.rs`.
 | `Rows::block(title, content)`         | Title above content that spans the row                                                                                                                                                                                                                                                 | A control too wide for the right edge (the tile picker)                                  |
 | `subtitle(text)` / `none`             | One secondary line that wraps if it must / nothing                                                                                                                                                                                                                                     | The `subtitle` argument of `Rows::row`                                                   |
 | `secondary(ui, text)`                 | Text at `SECONDARY_SCALE` in `gui::secondary_text`                                                                                                                                                                                                                                     | Hints and footers, including custom subtitles                                            |
+| `command(ui, command, copy, copied)`  | A shell command in monospace secondary text and a "Copy" button that reads "Copied" for `COPIED_FOR`; wraps under the command when the line is full                                                                                                                                    | A command the user needs to run (the systemd hand-off, the udev fix)                     |
 | `switch(ui, id, on, label)`           | Animated pill switch; `id` is global so a test can find it, `label` is what a screen reader announces                                                                                                                                                                                  | A boolean that applies at once                                                           |
 | `tile(…)` + `tile_width`              | Image above caption, accent outline when selected                                                                                                                                                                                                                                      | A choice whose options are best shown as pictures (icon style, palette)                  |
 | `tab_bar(ui, labels, selected)`       | Centred tabs, accent underline on the selected one, full-width rule below                                                                                                                                                                                                              | A view switcher (GNOME's term): a window's fixed top-level views, not a set of documents |
@@ -238,8 +239,12 @@ Patterns from `src/settings/general_tab.rs`:
   `SettingsApp::persist`, which re-reads `config.json`, changes one field and writes it back; if
   the write fails, the controls keep showing what is on disk.
 - **A setting rigbat does not own is shown, disabled, with the owner named.** With
-  `rigbat.service` enabled, the autostart switch is disabled, its subtitle names the service and
-  its hover text gives the command to turn it off (`render_autostart_row`).
+  `rigbat.service` enabled, the autostart switch is disabled, and its subtitle names the service
+  and shows the command that turns it off, with a button that copies it (`widgets::command`,
+  `render_autostart_row`).
+- **Hover text repeats, never holds the only copy.** A fact the user needs — a command, a
+  device's kind, transport or last-seen date — is painted in the window; COSMIC shows no
+  tooltips and a tooltip needs a pointer.
 - **A setting owned by another tab is named where it takes effect** (project choice). The "One icon per device"
   subtitle names the pinned device and points at the Devices tab (`aggregate_icon_hint`).
 - **Defaults with per-device overrides** (project choice) say so in the group footer (`defaults-hint`). On the
@@ -276,9 +281,10 @@ Settings" (`settings-title`, retitled when the language changes), a `tab_bar` ov
   `devices-empty`.
   - A connected row: the value and note from `charge_value` / `status_note`, and a "Show in tray"
     `switch` (the inverse of `hidden_devices`). A seen-before row: "seen 2 d ago" and no switch.
-    Kind and transport, and a seen-before row's last date, are the row's hover text.
-  - A click on the row (not on the switch) expands it in place; one row at a time. Expanded:
-    "Pin to the tray icon" (the pin, with a subtitle saying it applies only to the single icon
+    Kind and transport, and a seen-before row's last date, are the first row of the expanded
+    device ("Type and connection", `device_about`); the collapsed row's hover text repeats them.
+  - A click on the row (not on the switch) expands it in place; one row at a time. Expanded: kind and
+    transport, "Pin to the tray icon" (the pin, with a subtitle saying it applies only to the single icon
     while per-device icons are on), the threshold and interval overrides, and "Remove from the
     list" with "Remove…", which arms an inline confirmation: "Cancel", then "Remove" in the low
     colour (cancel first, as GNOME orders dialog buttons); the first click never deletes. A device

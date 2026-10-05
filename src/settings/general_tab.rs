@@ -13,6 +13,9 @@ const POLL_INTERVAL_PRESETS: [u64; 7] = [30, 60, 120, 300, 900, 1800, 3600];
 /// `OFFLINE_SHELF_LIFE_MIN..=OFFLINE_SHELF_LIFE_MAX`.
 const HIDE_OFFLINE_PRESETS: [u64; 6] = [1800, 3600, 7200, 21_600, 43_200, 86_400];
 
+/// What the autostart row shows to hand starting over from `rigbat.service`.
+const SYSTEMD_DISABLE: &str = "systemctl --user disable --now rigbat.service";
+
 /// The low-battery threshold's slider and value box, points.
 const THRESHOLD_CONTROL_WIDTH: f32 = 240.0;
 const THRESHOLD_SLIDER_WIDTH: f32 = 180.0;
@@ -176,13 +179,16 @@ impl SettingsApp {
         let title = fl!(l, "autostart-enabled");
         let id = switch_id("autostart-enabled");
         if self.systemd_service_enabled {
-            let how_to_disable = fl!(l, "autostart-systemd-disable");
+            let turn_off = fl!(l, "autostart-systemd-disable");
+            let how_to_disable = format!("{turn_off} {SYSTEMD_DISABLE}");
             let managed = fl!(l, "autostart-managed-by-systemd");
+            let (copy, copied) = (fl!(l, "button-copy"), fl!(l, "button-copied"));
             rows.row(
                 &title,
                 |ui| {
-                    ui.label(widgets::secondary(ui, &managed))
-                        .on_hover_text(&how_to_disable);
+                    ui.label(widgets::secondary(ui, &managed));
+                    ui.label(widgets::secondary(ui, &turn_off));
+                    widgets::command(ui, SYSTEMD_DISABLE, &copy, &copied);
                 },
                 |ui| {
                     ui.add_enabled_ui(false, |ui| {
@@ -436,6 +442,62 @@ mod tests {
                 assert_no_overlap(&painted);
             }
         }
+    }
+
+    /// The command that hands autostart back is painted and copies itself;
+    /// hover text is never its only copy.
+    #[test]
+    fn a_service_managed_autostart_paints_the_command_that_turns_it_off() {
+        for lang in Lang::ALL {
+            let mut app = settings_app_with(Config {
+                language: Some(lang.tag().to_owned()),
+                ..Config::default()
+            });
+            app.systemd_service_enabled = true;
+            let l = loader(lang);
+
+            let painted = fully_painted_text_at(GENERAL_TAB_TEST_SIZE, |ui| {
+                app.render_general_tab(ui);
+            });
+            for text in [
+                l.get("autostart-systemd-disable"),
+                SYSTEMD_DISABLE.to_owned(),
+                l.get("button-copy"),
+            ] {
+                assert!(
+                    painted.iter().any(|p| p.text == text),
+                    "{lang:?}: {text:?} is cut off or missing: {painted:?}"
+                );
+            }
+            assert_no_overlap(&painted);
+        }
+
+        let mut app = settings_app_with(Config::default());
+        app.systemd_service_enabled = true;
+        let ctx = egui::Context::default();
+        let size = GENERAL_TAB_TEST_SIZE;
+        let output = run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
+        let copy = crate::egui_test::painted(&output)
+            .into_iter()
+            .find(|p| p.text == "Copy")
+            .expect("the copy button was painted");
+        let output = click_at(&ctx, size, copy.rect.center(), |ui| {
+            app.render_general_tab(ui)
+        });
+        assert!(
+            output
+                .platform_output
+                .commands
+                .contains(&egui::OutputCommand::CopyText(SYSTEMD_DISABLE.to_owned())),
+            "{:?}",
+            output.platform_output.commands
+        );
+        let output = run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
+        assert!(
+            crate::egui_test::painted(&output)
+                .iter()
+                .any(|p| p.text == "Copied")
+        );
     }
 
     #[test]

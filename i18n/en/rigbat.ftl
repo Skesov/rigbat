@@ -49,6 +49,8 @@ tab-appearance = Appearance
 tab-devices = Devices
 button-refresh = Refresh
 button-refreshing = Refreshing…
+button-copy = Copy
+button-copied = Copied
 settings-title = rigbat — Settings
 
 ## Settings window: General tab
@@ -76,7 +78,7 @@ notifications-enabled = Low battery notifications
 group-system = System
 autostart-enabled = Start with session
 autostart-managed-by-systemd = Managed by rigbat.service
-autostart-systemd-disable = Disable it with: systemctl --user disable --now rigbat.service
+autostart-systemd-disable = Turn it off with:
 
 # Bilingual on purpose: findable whichever language is active.
 section-language = Language / Язык
@@ -119,6 +121,8 @@ devices-connected = Connected now
 devices-seen-before = Seen before
 device-seen-ago = seen { $age }
 device-show-in-tray = Show in tray
+device-about = Type and connection
+device-last-seen = last seen { $date }
 
 # Lowercase, as after "name: "; `charge_value` capitalises a word that starts its own slot.
 presence-online = online
