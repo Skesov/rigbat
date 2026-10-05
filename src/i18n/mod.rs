@@ -176,6 +176,16 @@ mod tests {
     }
 
     #[test]
+    fn removal_uses_one_verb_in_every_language() {
+        for lang in Lang::ALL {
+            let l = loader(lang);
+            let verb = fl!(l, "device-remove-confirm");
+            assert_eq!(fl!(l, "device-remove"), format!("{verb}…"), "{lang:?}");
+            assert!(fl!(l, "device-remove-title").starts_with(&verb), "{lang:?}");
+        }
+    }
+
+    #[test]
     fn catalogues_define_the_same_messages() {
         let reference = message_ids(Lang::En);
         assert!(!reference.is_empty());

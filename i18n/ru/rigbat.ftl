@@ -58,13 +58,13 @@ tray-per-device-hint = Какие именно — на вкладке «Уст�
 tray-primary-hint-pinned = Общий значок показывает { $name }. Сменить — на вкладке «Устройства».
 tray-primary-hint-auto = Общий значок показывает подключённое устройство с самым низким зарядом. Закрепить — на вкладке «Устройства».
 hide-offline-after = Скрывать отключённое устройство через
-hide-offline-after-hint = Оно вернётся при следующем показании.
+hide-offline-after-hint = Оно вернётся, когда снова выйдет на связь.
 button-clear = Сбросить
 
 group-battery = Батарея
 default-low-threshold = Порог низкого заряда
 default-poll-interval = Опрашивать каждые
-poll-interval-hint = Более частый опрос сажает батарею устройства.
+poll-interval-hint = Более частый опрос быстрее расходует заряд устройства.
 interval-seconds = { $count } с
 interval-minutes = { $count } мин
 interval-hours = { $count } ч
@@ -131,8 +131,8 @@ device-default-value = По умолчанию: { $value }
 device-reset = Вернуть по умолчанию
 device-remove-title = Убрать из списка
 device-remove-hint = Вместе с историей. Вернётся, если появится снова.
-device-remove = Удалить…
-device-remove-confirm = Удалить
+device-remove = Убрать…
+device-remove-confirm = Убрать
 button-cancel = Отмена
 
 ## Dashboard (left click on the tray icon)

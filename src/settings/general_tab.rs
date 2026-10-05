@@ -414,6 +414,12 @@ mod tests {
                         "{lang:?}: {text:?} is cut off, missing or wrapped: {painted:?}"
                     );
                 }
+                for hint in ["hide-offline-after-hint", "poll-interval-hint"].map(|id| l.get(id)) {
+                    assert!(
+                        painted.iter().any(|p| p.text == hint),
+                        "{lang:?}: {hint:?} is cut off or missing: {painted:?}"
+                    );
+                }
                 assert_no_overlap(&painted);
             }
         }
