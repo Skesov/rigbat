@@ -36,7 +36,7 @@ layers, never the reverse.
         config            config.json: user intent, serialized; imports domain + i18n
           │
    icon / ipc / gui / appearance /      shared ports: domain, refresh and each other, never config
-   clock / palette
+   clock / palette / launch
           │
         sources           BatterySource / BatteryBackend traits + Context + supervise +
           ▲               sysfs/bluez/steelseries/eightbitdo/headsets impls
@@ -247,6 +247,12 @@ polls a device. It opens instantly, wakes nothing, and cannot classify a device 
 its tray icon — the snapshot carries each device already classified by `domain::device_status`.
 It also lists devices the tray has dropped after a day of silence, dimmed and last; hidden ones
 never appear. If the tray goes away the window says so, and it reloads when the tray comes back.
+
+Every window process and the autostart entry run the binary `launch::executable` names. An
+upgrade replaces the binary by rename, so a tray started before it sees `/proc/self/exe` as
+`<path> (deleted)`; the helper strips that suffix and runs whatever now sits at the path (the
+`Snapshot` contract tolerates version skew through `#[serde(default)]`), or `rigbat` from `PATH`
+when nothing does.
 
 The settings window reads the same snapshot, which also lists hidden devices apart
 (`Snapshot::hidden`) and carries each device's locator, so its rows match inventory records. It

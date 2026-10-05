@@ -106,10 +106,11 @@ src/
 ├── discovery/     # discover_all + registry::backends()
 ├── cli/           # output adapter: table / --json / --wide; waybar.rs: --waybar line + loop
 ├── tray/          # manager.rs (icon set + run loop), item.rs (SNI item + menu),
-│                 # resolve.rs (device per icon), launch.rs, state service for the dashboard
+│                 # resolve.rs (device per icon), state service for the dashboard
 ├── icon/          # IconRenderer (tiny-skia), status marks, kind silhouettes, digits (skrifa)
 ├── gui/           # shared egui theme for dashboard and settings
 ├── palette.rs     # colour tables per Palette + WCAG readable(): shared by icon/gui/settings
+├── launch.rs      # own binary for window processes and autostart (survives an upgrade)
 ├── dashboard/     # eframe device overview (separate process, left click)
 ├── ipc/           # session-bus names, Snapshot contract, proxies, single-instance claim
 ├── appearance/    # theme from xdg-portal (light/dark)
@@ -131,7 +132,7 @@ Dependencies point inward: `domain` imports only `i18n` and no infrastructure cr
 (`zbus`/`tiny-skia`/`nix`/…), and no adapter imports another adapter — text or policy that
 `cli`, `tray` and `settings` all render lives in `domain`, not in whichever surface happened to
 need it first. Adapters may use `domain`, `refresh`, `config` and the shared ports (`i18n`,
-`icon`, `ipc`, `gui`, `appearance`, `clock`, `palette`), which themselves never import `config`; `main.rs`, `app`
+`icon`, `ipc`, `gui`, `appearance`, `clock`, `palette`, `launch`), which themselves never import `config`; `main.rs`, `app`
 and `doctor` are the composition roots. The few allowed sideways edges (`discovery → sources`,
 `session → sources`, `settings` wiring its own process) are listed in `tests/architecture.rs`,
 which fails on any other edge and on any cycle.

@@ -468,7 +468,7 @@ impl Dashboard {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button(fl!(l, "tray-settings")).clicked() {
-                open_settings();
+                crate::launch::spawn("settings");
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
         });
@@ -602,17 +602,6 @@ fn details(card: &DeviceCard, lang: Lang) -> String {
         parts.push(fl!(loader(lang), "dashboard-in-tray"));
     }
     parts.join(" · ")
-}
-
-fn open_settings() {
-    match std::env::current_exe() {
-        Ok(exe) => {
-            if let Err(e) = std::process::Command::new(exe).arg("settings").spawn() {
-                tracing::error!("failed to launch rigbat settings: {e}");
-            }
-        }
-        Err(e) => tracing::error!("cannot find own executable: {e}"),
-    }
 }
 
 #[cfg(test)]

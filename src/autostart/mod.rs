@@ -53,7 +53,8 @@ fn desktop_entry(exec: &str) -> String {
     )
 }
 
-/// Writes the autostart entry pointing at the current executable.
+/// Writes the autostart entry pointing at the current executable
+/// (`launch::executable`: never a ` (deleted)` path left by an upgrade).
 ///
 /// Known limitation: if the binary is later moved the stale `Exec` path breaks
 /// autostart. Toggling Startup off then on rewrites it with the new path.
@@ -70,7 +71,7 @@ pub fn disable() -> anyhow::Result<()> {
 
 /// Writes the autostart entry at `path`, creating the parent directory if needed.
 fn enable_at(path: &std::path::Path) -> anyhow::Result<()> {
-    let exec = std::env::current_exe().context("could not resolve current executable path")?;
+    let exec = crate::launch::executable();
     let exec_str = exec
         .to_str()
         .context("executable path is not valid UTF-8")?;

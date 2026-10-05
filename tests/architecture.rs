@@ -26,6 +26,7 @@ const SHARED_PORTS: &[&str] = &[
     "appearance",
     "clock",
     "palette",
+    "launch",
 ];
 
 /// Vocabulary and primitives with no infrastructure behind them.

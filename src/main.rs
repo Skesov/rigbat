@@ -16,6 +16,7 @@ mod gui;
 mod i18n;
 mod icon;
 mod ipc;
+mod launch;
 mod notifications;
 mod palette;
 mod refresh;

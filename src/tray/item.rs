@@ -2,7 +2,6 @@ use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{MenuItem, ToolTip, Tray};
 use tokio::sync::watch;
 
-use super::launch::launch;
 use super::resolve::{featured_id, resolve_for, visible};
 use crate::appearance::ColorScheme;
 use crate::config::Config;
@@ -12,6 +11,7 @@ use crate::domain::{
 };
 use crate::i18n::{Lang, fl, loader};
 use crate::icon::{IconKey, Theme};
+use crate::launch::spawn as launch;
 use crate::refresh::RefreshSignal;
 
 // ---------------------------------------------------------------------------
