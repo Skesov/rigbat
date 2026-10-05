@@ -363,7 +363,8 @@ windows. Rules follow the
 - **Withdraw when stale.** `CloseNotification` when the device charges, reads `REARM_MARGIN`
   above its threshold, is hidden, or leaves the roster. A toast the server reports closed is
   forgotten, never replaced.
-- **Default action.** A click on the body opens the device overview, the same window as the
+- **Default action.** A click on the body opens the device overview (never closes an open one:
+  launching it toggles, so `org.rigbat.Dashboard` having an owner means do nothing), the same window as the
   tray's left click. No other buttons: actions must not duplicate the default one.
 - **Identity.** Hints `desktop-entry = rigbat` (the shipped desktop file id) and
   `category = device`, so hosts group rigbat's notifications and can mute them per app.

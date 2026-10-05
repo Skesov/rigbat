@@ -427,6 +427,24 @@ pub fn spawn(
     });
 }
 
+/// Launching the dashboard toggles it, so a click must not launch it while it is open.
+async fn dashboard_open(dbus: &zbus::fdo::DBusProxy<'_>) -> bool {
+    let name = match zbus::names::BusName::try_from(crate::ipc::DASHBOARD_NAME) {
+        Ok(name) => name,
+        Err(e) => {
+            tracing::warn!("invalid dashboard bus name: {e}");
+            return false;
+        }
+    };
+    match dbus.name_has_owner(name).await {
+        Ok(owned) => owned,
+        Err(e) => {
+            tracing::warn!("cannot tell whether the dashboard is open: {e}");
+            false
+        }
+    }
+}
+
 /// The notifier loop on `conn`, until the state channel closes.
 ///
 /// `config_rx` is watched for the `notifications_enabled` flag. While disabled,
@@ -443,6 +461,7 @@ async fn run(
     // Subscribed before the first `Notify`, so no click or close is missed.
     let mut invoked = proxy.receive_action_invoked().await?;
     let mut closed = proxy.receive_notification_closed().await?;
+    let dbus = zbus::fdo::DBusProxy::new(conn).await?;
     let mut toasts = Toasts {
         proxy,
         ids: HashMap::new(),
@@ -488,6 +507,7 @@ async fn run(
                     if let Ok(args) = signal.args()
                         && args.action_key == DEFAULT_ACTION
                         && toasts.is_ours(args.id)
+                        && !dashboard_open(&dbus).await
                     {
                         open_dashboard();
                     }
@@ -1287,6 +1307,33 @@ mod tests {
                 ..threshold_20()
             });
             assert_eq!(h.next_call().await, Call::Close(toast.id));
+        }
+
+        #[tokio::test]
+        async fn a_click_leaves_an_open_overview_alone() {
+            if !isolated(module_path!(), "a_click_leaves_an_open_overview_alone") {
+                return;
+            }
+            let mut h = Harness::start().await;
+            let _dashboard = zbus::connection::Builder::session()
+                .expect("private bus")
+                .name(crate::ipc::DASHBOARD_NAME)
+                .expect("name")
+                .build()
+                .await
+                .expect("claiming the dashboard name");
+            h.reading(19, ChargeState::Discharging).await;
+            h.reading(19, ChargeState::Discharging).await;
+            let toast = h.next_toast().await;
+
+            FakeServer::action_invoked(&h.emitter(), toast.id, "default")
+                .await
+                .expect("emit");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(
+                h.opened.try_recv().is_err(),
+                "the open overview was toggled"
+            );
         }
     }
 }
