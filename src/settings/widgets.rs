@@ -732,8 +732,7 @@ fn focus_ring(ui: &egui::Ui, rect: egui::Rect, radius: f32) {
 mod tests {
     use super::*;
     use crate::egui_test::{
-        assert_single_lines_without_overlap, click_at, fully_painted_text_at, run_frame,
-        run_frame_at,
+        assert_whole, click_at, fully_painted_text_at, run_frame, run_frame_at,
     };
     use crate::gui;
 
@@ -835,10 +834,10 @@ mod tests {
     }
 
     #[test]
-    fn every_widget_paints_its_text_whole_on_one_line() {
+    fn every_widget_paints_its_text_whole() {
         let painted = fully_painted_text_at(SIZE, every_widget);
 
-        for text in [
+        let expected = [
             "General",
             "Devices",
             "Tray",
@@ -853,15 +852,9 @@ mod tests {
             "rigbat 1.0",
             "e3cd47f",
             "GitHub",
-        ] {
-            let lines = painted.iter().find(|p| p.text == text).map(|p| p.lines);
-            assert_eq!(
-                lines,
-                Some(1),
-                "{text:?} is cut off, missing or wrapped: {painted:?}"
-            );
-        }
-        assert_single_lines_without_overlap(&painted);
+        ]
+        .map(str::to_owned);
+        assert_whole(&painted, &expected, "widgets");
     }
 
     fn show_footer(ui: &mut egui::Ui) {
@@ -936,11 +929,14 @@ mod tests {
         assert_eq!(link_before.rect, link_after.rect);
     }
 
-    /// Both texts of the hash slot, in every language, fit the line whole.
+    /// Both texts of the hash slot, in every language and text scale, fit whole.
     #[test]
-    fn the_footer_is_whole_on_one_line_in_every_language() {
+    fn the_footer_is_whole_in_every_language_and_text_scale() {
         use crate::i18n::{Lang, fl, loader};
-        for lang in Lang::ALL {
+        for (lang, scale) in Lang::ALL
+            .into_iter()
+            .flat_map(|lang| crate::egui_test::TEXT_SCALES.map(|scale| (lang, scale)))
+        {
             let l = loader(lang);
             let (copied, label) = (fl!(l, "about-commit-copied"), fl!(l, "about-commit-copy"));
             let github = fl!(l, "about-github");
@@ -950,14 +946,13 @@ mod tests {
                     copied: &copied,
                     label: &label,
                 };
-                let painted = fully_painted_text_at(SIZE, |ui| {
+                let width = gui::zoomed_width(crate::settings::WINDOW_MIN_SIZE, scale);
+                let size = [width - 2.0 * PANEL_MARGIN, SIZE[1]];
+                let painted = fully_painted_text_at(size, |ui| {
                     footer(ui, "rigbat 0.4.0+12", Some(&commit), &github);
                 });
-                for expected in ["rigbat 0.4.0+12", text, github.as_str()] {
-                    let lines = painted.iter().find(|p| p.text == expected).map(|p| p.lines);
-                    assert_eq!(lines, Some(1), "{lang:?} {expected:?}: {painted:?}");
-                }
-                assert_single_lines_without_overlap(&painted);
+                let expected = ["rigbat 0.4.0+12", text, github.as_str()].map(str::to_owned);
+                assert_whole(&painted, &expected, &format!("{lang:?} at {scale}"));
             }
         }
     }

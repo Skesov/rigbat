@@ -555,10 +555,11 @@ mod tests {
         format_coarse, state_label,
     };
     use crate::egui_test::{
-        assert_no_overlap, click_at, fully_painted_text_at, painted_text_at, run_frame,
+        TEXT_SCALES, assert_no_overlap, assert_whole, click_at, fully_painted_text_at,
+        painted_text_at, run_frame,
     };
     use crate::settings::WINDOW_MIN_SIZE;
-    use crate::settings::tests::{app_saving_to, settings_app_with};
+    use crate::settings::tests::{app_saving_to, settings_app_with, tab_size};
 
     /// The narrowest the window gets, tall enough that nothing scrolls.
     const TEST_SIZE: [f32; 2] = [WINDOW_MIN_SIZE[0], 1400.0];
@@ -670,33 +671,21 @@ mod tests {
         app
     }
 
-    fn assert_whole_on_one_line(
-        painted: &[crate::egui_test::Painted],
-        expected: &[String],
-        lang: Lang,
-    ) {
-        for text in expected {
-            let lines = painted.iter().find(|p| &p.text == text).map(|p| p.lines);
-            assert_eq!(
-                lines,
-                Some(1),
-                "{lang:?}: {text:?} is cut off, missing or wrapped: {painted:?}"
-            );
-        }
-        assert_no_overlap(painted);
-    }
-
     fn seen_ago(lang: Lang) -> String {
         let age = devices::relative_label(state::now_unix(), state::now_unix() - 2 * DAY, lang);
         fl!(loader(lang), "device-seen-ago", age = age.as_str())
     }
 
     #[test]
-    fn device_rows_are_whole_on_one_line_in_every_language() {
-        for lang in Lang::ALL {
+    fn device_rows_are_whole_in_every_language_and_text_scale() {
+        for (lang, scale) in Lang::ALL
+            .into_iter()
+            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
+        {
             let mut app = app_in(lang, Config::default());
 
-            let painted = fully_painted_text_at(TEST_SIZE, |ui| app.render_devices_tab(ui));
+            let size = tab_size(scale, TEST_SIZE[1]);
+            let painted = fully_painted_text_at(size, |ui| app.render_devices_tab(ui));
 
             let l = loader(lang);
             let estimate = format_coarse(Duration::from_secs(7 * 3600), lang);
@@ -724,69 +713,67 @@ mod tests {
                 fl!(l, "note-remaining", estimate = estimate.as_str()),
                 fl!(l, "note-last-reading", age = age.as_str()),
             ]);
-            assert_whole_on_one_line(&painted, &expected, lang);
+            assert_whole(&painted, &expected, &format!("{lang:?} at {scale}"));
         }
     }
 
     #[test]
-    fn an_expanded_row_paints_its_settings_in_every_language() {
-        for lang in Lang::ALL {
-            for armed in [false, true] {
-                let mut overrides = HashMap::new();
-                overrides.insert(
-                    keyboard().device.name,
-                    DeviceSettings {
-                        poll_interval_secs: Some(300),
-                        low_threshold: Some(10),
-                    },
-                );
-                let mut app = app_in(
-                    lang,
-                    Config {
-                        tray_mode: TrayMode::PerDevice,
-                        device_overrides: overrides,
-                        ..Config::default()
-                    },
-                );
-                app.expanded_device = Some(keyboard().device);
-                if armed {
-                    app.delete_state = DeleteState::Confirming(1);
-                }
-
-                let painted = fully_painted_text_at(TEST_SIZE, |ui| app.render_devices_tab(ui));
-
-                let l = loader(lang);
-                let mut expected: Vec<String> = [
-                    "device-pin",
-                    "default-low-threshold",
-                    "default-poll-interval",
-                    "device-remove-title",
-                ]
-                .map(|id| l.get(id))
-                .into();
-                if armed {
-                    expected.extend(["device-remove-confirm", "button-cancel"].map(|id| l.get(id)));
-                } else {
-                    expected.push(l.get("device-remove"));
-                }
-                let default_interval = interval_label(60, lang);
-                expected.extend([
-                    fl!(l, "device-default-value", value = "20%"),
-                    fl!(l, "device-default-value", value = default_interval.as_str()),
-                    interval_label(300, lang),
-                    RESET.to_owned(),
-                    "10".to_owned(),
-                    "%".to_owned(),
-                ]);
-                assert_whole_on_one_line(&painted, &expected, lang);
-                for hint in ["device-pin-hint", "device-remove-hint"] {
-                    let hint = l.get(hint);
-                    assert!(
-                        painted.iter().any(|p| p.text == hint),
-                        "{lang:?}: {hint:?} missing"
-                    );
-                }
+    fn an_expanded_row_paints_its_settings_in_every_language_and_text_scale() {
+        for (lang, scale, armed) in Lang::ALL
+            .into_iter()
+            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
+            .flat_map(|(lang, scale)| [false, true].map(|armed| (lang, scale, armed)))
+        {
+            let mut overrides = HashMap::new();
+            overrides.insert(
+                keyboard().device.name,
+                DeviceSettings {
+                    poll_interval_secs: Some(300),
+                    low_threshold: Some(10),
+                },
+            );
+            let mut app = app_in(
+                lang,
+                Config {
+                    tray_mode: TrayMode::PerDevice,
+                    device_overrides: overrides,
+                    ..Config::default()
+                },
+            );
+            app.expanded_device = Some(keyboard().device);
+            if armed {
+                app.delete_state = DeleteState::Confirming(1);
             }
+
+            let size = tab_size(scale, 1800.0);
+            let painted = fully_painted_text_at(size, |ui| app.render_devices_tab(ui));
+
+            let l = loader(lang);
+            let mut expected: Vec<String> = [
+                "device-pin",
+                "device-pin-hint",
+                "default-low-threshold",
+                "default-poll-interval",
+                "device-remove-title",
+                "device-remove-hint",
+            ]
+            .map(|id| l.get(id))
+            .into();
+            if armed {
+                expected.extend(["device-remove-confirm", "button-cancel"].map(|id| l.get(id)));
+            } else {
+                expected.push(l.get("device-remove"));
+            }
+            let default_interval = interval_label(60, lang);
+            expected.extend([
+                fl!(l, "device-default-value", value = "20%"),
+                fl!(l, "device-default-value", value = default_interval.as_str()),
+                interval_label(300, lang),
+                RESET.to_owned(),
+                "10".to_owned(),
+                "%".to_owned(),
+            ]);
+            assert_whole(&painted, &expected, &format!("{lang:?} at {scale}"));
         }
     }
 

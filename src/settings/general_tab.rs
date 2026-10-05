@@ -73,12 +73,10 @@ impl SettingsApp {
             let toggled = rows.row(
                 &title,
                 |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(widgets::secondary(ui, &hint));
-                        if pinned {
-                            clear_pin = ui.small_button(fl!(l, "button-clear")).clicked();
-                        }
-                    });
+                    ui.label(widgets::secondary(ui, &hint));
+                    if pinned {
+                        clear_pin = ui.small_button(fl!(l, "button-clear")).clicked();
+                    }
                 },
                 |ui| {
                     widgets::switch(ui, switch_id("tray-per-device"), &mut per_device, &title)
@@ -340,10 +338,11 @@ mod tests {
     use super::*;
     use crate::config::{self, Config};
     use crate::egui_test::{
-        assert_no_overlap, click_at, fully_painted_text_at, painted_text_at, run_frame,
+        TEXT_SCALES, assert_no_overlap, assert_whole, click_at, fully_painted_text_at,
+        painted_text_at, run_frame,
     };
     use crate::settings::WINDOW_MIN_SIZE;
-    use crate::settings::tests::{app_saving_to, settings_app_with};
+    use crate::settings::tests::{app_saving_to, settings_app_with, tab_size};
     use std::sync::{Arc, mpsc};
 
     /// The narrowest the window gets, tall enough that the General tab's
@@ -367,80 +366,70 @@ mod tests {
     }
 
     /// Every title and value on the tab, in both tray modes and with the
-    /// autostart switch both free and managed by systemd, painted whole on one
-    /// line and clear of every other string.
+    /// autostart switch both free and managed by systemd, painted whole and
+    /// clear of every other string at the narrowest window, at every text scale.
     #[test]
-    fn general_tab_text_is_whole_on_one_line_in_every_language() {
-        for lang in Lang::ALL {
-            for per_device in [false, true] {
-                let mut app = settings_app_with(Config {
-                    language: Some(lang.tag().to_owned()),
-                    tray_mode: if per_device {
-                        TrayMode::PerDevice
-                    } else {
-                        TrayMode::PrimaryOnly
-                    },
-                    primary_device: Some("SteelSeries Aerox 5 Wireless".to_owned()),
-                    ..Config::default()
-                });
-                app.systemd_service_enabled = per_device;
-
-                let painted = fully_painted_text_at(GENERAL_TAB_TEST_SIZE, |ui| {
-                    app.render_tab_bar(ui);
-                    app.render_general_tab(ui);
-                });
-
-                let l = loader(lang);
-                let mut expected: Vec<String> = [
-                    "tab-general",
-                    "tab-devices",
-                    "tab-appearance",
-                    "group-tray",
-                    "tray-per-device",
-                    "hide-offline-after",
-                    "group-battery",
-                    "default-low-threshold",
-                    "default-poll-interval",
-                    "notifications-enabled",
-                    "group-system",
-                    "autostart-enabled",
-                    "section-language",
-                    "about-github",
-                ]
-                .into_iter()
-                .map(|id| l.get(id))
-                .collect();
-                expected.extend(["20", "%"].map(str::to_owned));
-                expected.push(interval_label(Config::default().poll_interval_secs, lang));
-                expected.push(interval_label(
-                    Config::default().hide_offline_after().as_secs(),
-                    lang,
-                ));
-                expected.push(lang.native_name().to_owned());
-                let build = Build::current();
-                expected.push(format!("rigbat {}", build.version()));
-                expected.extend(build.commit.map(str::to_owned));
-                expected.push(if per_device {
-                    l.get("autostart-managed-by-systemd")
+    fn general_tab_text_is_whole_in_every_language_and_text_scale() {
+        for (lang, scale, per_device) in Lang::ALL
+            .into_iter()
+            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
+            .flat_map(|(lang, scale)| [false, true].map(|per_device| (lang, scale, per_device)))
+        {
+            let mut app = settings_app_with(Config {
+                language: Some(lang.tag().to_owned()),
+                tray_mode: if per_device {
+                    TrayMode::PerDevice
                 } else {
-                    l.get("button-clear")
-                });
-                for text in &expected {
-                    let lines = painted.iter().find(|p| &p.text == text).map(|p| p.lines);
-                    assert_eq!(
-                        lines,
-                        Some(1),
-                        "{lang:?}: {text:?} is cut off, missing or wrapped: {painted:?}"
-                    );
-                }
-                for hint in ["hide-offline-after-hint", "poll-interval-hint"].map(|id| l.get(id)) {
-                    assert!(
-                        painted.iter().any(|p| p.text == hint),
-                        "{lang:?}: {hint:?} is cut off or missing: {painted:?}"
-                    );
-                }
-                assert_no_overlap(&painted);
-            }
+                    TrayMode::PrimaryOnly
+                },
+                primary_device: Some("SteelSeries Aerox 5 Wireless".to_owned()),
+                ..Config::default()
+            });
+            app.systemd_service_enabled = per_device;
+
+            let painted = fully_painted_text_at(tab_size(scale, 1600.0), |ui| {
+                app.render_tab_bar(ui);
+                app.render_general_tab(ui);
+            });
+
+            let l = loader(lang);
+            let mut expected: Vec<String> = [
+                "tab-general",
+                "tab-devices",
+                "tab-appearance",
+                "group-tray",
+                "tray-per-device",
+                "hide-offline-after",
+                "hide-offline-after-hint",
+                "group-battery",
+                "default-low-threshold",
+                "default-poll-interval",
+                "poll-interval-hint",
+                "notifications-enabled",
+                "group-system",
+                "autostart-enabled",
+                "section-language",
+                "about-github",
+            ]
+            .into_iter()
+            .map(|id| l.get(id))
+            .collect();
+            expected.extend(["20", "%"].map(str::to_owned));
+            expected.push(interval_label(Config::default().poll_interval_secs, lang));
+            expected.push(interval_label(
+                Config::default().hide_offline_after().as_secs(),
+                lang,
+            ));
+            expected.push(lang.native_name().to_owned());
+            let build = Build::current();
+            expected.push(format!("rigbat {}", build.version()));
+            expected.extend(build.commit.map(str::to_owned));
+            expected.push(if per_device {
+                l.get("autostart-managed-by-systemd")
+            } else {
+                l.get("button-clear")
+            });
+            assert_whole(&painted, &expected, &format!("{lang:?} at {scale}"));
         }
     }
 

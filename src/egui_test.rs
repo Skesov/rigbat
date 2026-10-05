@@ -156,10 +156,17 @@ fn collect_text(
     }
 }
 
-/// Fails when a non-empty string wraps onto a second line or overlaps another.
-pub fn assert_single_lines_without_overlap(painted: &[Painted]) {
-    for p in painted.iter().filter(|p| !p.text.is_empty()) {
-        assert_eq!(p.lines, 1, "{:?} wraps onto a second line", p.text);
+/// The text scales every window is tested at: the default and WCAG 1.4.4's 200 %.
+pub const TEXT_SCALES: [f32; 2] = [1.0, 2.0];
+
+/// Fails when an `expected` string is not painted whole, or two strings
+/// overlap. A string may wrap: translations are never shortened to fit.
+pub fn assert_whole(painted: &[Painted], expected: &[String], context: &str) {
+    for text in expected {
+        assert!(
+            painted.iter().any(|p| &p.text == text),
+            "{context}: {text:?} is cut off or missing: {painted:?}"
+        );
     }
     assert_no_overlap(painted);
 }

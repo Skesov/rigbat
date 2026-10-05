@@ -469,11 +469,11 @@ ago`) when it reads a running tray; its own poll, without one, has no estimate a
   out: `~5 часов`, `2 часа назад`, `3 дня назад`, `>4 дней`; «д» is no standard abbreviation.
   Interval values stay ГОСТ abbreviations (`30 с`, `5 мин`, `1 ч`): after «каждые» and «через» a
   spelled-out «1 минута» would not agree.
-- **Width.** Text is painted whole, on one line, at the narrowest window, in every language; when a
-  string does not fit, shorten the translation rather than widen the layout
-  ([CONTRIBUTING](../CONTRIBUTING.md#adding-a-translation)). Device names are data, not
-  translations: the dashboard truncates them instead of wrapping, the case elementary allows for
-  user text.
+- **Width.** Text is painted whole and never overlaps, at the narrowest window, in every language,
+  at text scale 1.0 and 2.0 ([Wrapping and text scale](#wrapping-and-text-scale)). A label may
+  wrap; a translation is never abbreviated to fit. Device names are data, not translations: the
+  dashboard and the Devices rows truncate them instead of wrapping, the case elementary allows
+  for user text.
 
 ## Testing UI
 
@@ -482,19 +482,18 @@ Window tests run headless on `src/egui_test.rs` and assert what was painted, not
 - `fully_painted_text_at` returns every string drawn whole with its rect and line count;
   `painted_text_at` returns every string at least `MIN_READABLE_WIDTH` visible. Both run two
   frames, because some widgets size themselves from the previous one.
-- `assert_single_lines_without_overlap` fails on a wrapped string or two overlapping ones;
-  `assert_no_overlap` checks only overlap.
-- A surface test lists every string it expects, then loops over `Lang::ALL`: each must appear with
-  `lines == 1`. Examples: `general_tab_text_is_whole_on_one_line_in_every_language`,
-  `appearance_tab_text_is_whole_on_one_line_in_every_language`,
-  `device_rows_are_whole_on_one_line_in_every_language`,
-  `an_expanded_row_paints_its_settings_in_every_language`,
-  `every_row_state_renders_whole_on_one_line_in_every_language`,
-  `every_widget_paints_its_text_whole_on_one_line`. Subtitles may wrap, so they are checked for
-  being painted whole, not for one line.
-- Test sizes are the real constraints: every settings tab at the `WINDOW_MIN_SIZE` width
-  (`GENERAL_TAB_TEST_SIZE`, `TEST_SIZE` in `appearance_tab` and `devices_tab`), the widgets at `CONTENT_MAX_WIDTH`, the
-  dashboard at its own `wanted_size()`.
+- `assert_whole` fails on an expected string that is missing or cut, or on two overlapping
+  strings; wrapping is allowed. `assert_no_overlap` checks only overlap.
+- A surface test lists every string it expects, then loops over `Lang::ALL` and
+  `egui_test::TEXT_SCALES` (1.0 and 2.0). Examples:
+  `general_tab_text_is_whole_in_every_language_and_text_scale`,
+  `appearance_tab_text_is_whole_in_every_language_and_text_scale`,
+  `device_rows_are_whole_in_every_language_and_text_scale`,
+  `an_expanded_row_paints_its_settings_in_every_language_and_text_scale`,
+  `every_row_state_renders_whole_in_every_language_and_text_scale`, `every_widget_paints_its_text_whole`.
+- Test sizes are the real constraints: every settings tab at the minimum window width in the
+  window's own zoomed points (`tab_size(scale, height)`: 672 at 1.0, 512 at 2.0), the widgets at
+  `CONTENT_MAX_WIDTH`, the dashboard at its own `wanted_size()`.
 - Interaction: `run_frame` lays the page out, `ctx.read_response` finds a widget by its global id
   (`switch_id`, `device_switch_id`, an expander's row id), `click_at` or a key event drives it, and
   the test asserts the saved config and the announced `WidgetInfo`

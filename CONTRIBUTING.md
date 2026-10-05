@@ -210,9 +210,10 @@ Fluent catalogues in `i18n/<lang>/rigbat.ftl`; the CLI stays English.
 2. Add the language to `Lang` in `src/i18n/mod.rs` (`ALL`, `tag`, `native_name`, `from_tag`,
    `id`, `loader`).
 3. Run `cargo test`. `i18n::tests` fails on a missing or extra message, and
-   `settings::devices_tab::tests::device_rows_are_whole_on_one_line_in_every_language` (with the
-   other `*_in_every_language` window tests) fails on a string cut off or wrapped at the narrowest
-   window — shorten the text rather than widening the layout.
+   `settings::devices_tab::tests::device_rows_are_whole_in_every_language_and_text_scale` (with
+   the other `*_in_every_language*` window tests) fails on a string cut off or overlapping another
+   at the narrowest window, at text scale 1.0 and 2.0. A label may wrap; do not abbreviate a
+   translation to keep it on one line.
 
 UI wording, width rules and components for any UI change: [docs/ui-design.md](docs/ui-design.md).
 

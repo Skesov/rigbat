@@ -532,6 +532,20 @@ mod tests {
         }
     }
 
+    /// The narrowest the window gets at `text_scale`, in the window's own
+    /// points, and `height` tall.
+    pub(super) fn tab_size(text_scale: f32, height: f32) -> [f32; 2] {
+        [gui::zoomed_width(WINDOW_MIN_SIZE, text_scale), height]
+    }
+
+    #[test]
+    fn the_minimum_width_fits_the_smallest_screen_at_every_text_scale() {
+        for scale in crate::egui_test::TEXT_SCALES {
+            let width = gui::scaled(WINDOW_MIN_SIZE, scale)[0];
+            assert!(width <= gui::SMALLEST_SCREEN_WIDTH, "{scale}: {width}");
+        }
+    }
+
     pub(super) fn device(name: &str) -> DeviceInfo {
         DeviceInfo {
             name: name.to_string(),

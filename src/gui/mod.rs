@@ -69,9 +69,22 @@ fn look(
     appearance.borrow_and_update().with_theme(theme)
 }
 
-/// A window size in points, grown with the text so the layout still fits.
+/// GNOME's smallest supported screen width; no window needs more at any text scale.
+pub const SMALLEST_SCREEN_WIDTH: f32 = 1024.0;
+
+/// A window size in points, grown with the text but never wider than
+/// `SMALLEST_SCREEN_WIDTH`: past it the layout adapts instead.
 pub fn scaled([width, height]: [f32; 2], text_scale: f32) -> [f32; 2] {
-    [width * text_scale, height * text_scale]
+    [
+        (width * text_scale).min(SMALLEST_SCREEN_WIDTH),
+        height * text_scale,
+    ]
+}
+
+#[cfg(test)]
+/// How wide `scaled(size, text_scale)` is in the window's own, zoomed points.
+pub fn zoomed_width(size: [f32; 2], text_scale: f32) -> f32 {
+    scaled(size, text_scale)[0] / text_scale
 }
 
 /// Black or white, whichever reads better on `fill`.
@@ -367,6 +380,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn no_window_grows_past_the_smallest_screen() {
+        assert_eq!(scaled([672.0, 360.0], 1.0), [672.0, 360.0]);
+        assert_eq!(scaled([672.0, 360.0], 2.0), [SMALLEST_SCREEN_WIDTH, 720.0]);
+        assert_eq!(zoomed_width([672.0, 360.0], 2.0), 512.0);
+        assert_eq!(scaled([380.0, 104.0], 2.0)[0], 760.0);
     }
 
     #[test]

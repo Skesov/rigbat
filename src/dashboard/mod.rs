@@ -617,7 +617,9 @@ mod tests {
         CHARGING_SIGN, ChargeState, DeviceKind, DisplayMode, LOW_SIGN, Transport, format_age,
         format_coarse, state_label,
     };
-    use crate::egui_test::{assert_single_lines_without_overlap, fully_painted_text_at, run_frame};
+    use crate::egui_test::{
+        TEXT_SCALES, assert_no_overlap, assert_whole, fully_painted_text_at, run_frame,
+    };
 
     fn card(name: &str, presence: Presence, percent: Option<u8>) -> DeviceCard {
         let status = match percent {
@@ -693,8 +695,22 @@ mod tests {
     }
 
     fn painted(d: &mut Dashboard) -> Vec<crate::egui_test::Painted> {
+        painted_at(d, 1.0)
+    }
+
+    /// The window at `text_scale`, measured in its own zoomed points.
+    fn painted_at(d: &mut Dashboard, text_scale: f32) -> Vec<crate::egui_test::Painted> {
         let size = d.wanted_size();
+        let size = [gui::zoomed_width(size, text_scale), size[1]];
         fully_painted_text_at(size, |ui| d.show(ui))
+    }
+
+    #[test]
+    fn the_minimum_width_fits_the_smallest_screen_at_every_text_scale() {
+        for scale in TEXT_SCALES {
+            let width = gui::scaled(window_size(MAX_VISIBLE_ROWS), scale)[0];
+            assert!(width <= gui::SMALLEST_SCREEN_WIDTH, "{scale}: {width}");
+        }
     }
 
     #[test]
@@ -717,10 +733,13 @@ mod tests {
     }
 
     #[test]
-    fn every_row_state_renders_whole_on_one_line_in_every_language() {
-        for lang in Lang::ALL {
+    fn every_row_state_renders_whole_in_every_language_and_text_scale() {
+        for (lang, scale) in Lang::ALL
+            .into_iter()
+            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
+        {
             let mut d = dashboard(every_state(), lang);
-            let painted = painted(&mut d);
+            let painted = painted_at(&mut d, scale);
             let l = loader(lang);
             let age = format_age(Duration::from_secs(2 * 3600), lang);
             let estimate = format_coarse(Duration::from_secs(7 * 3600), lang);
@@ -739,13 +758,7 @@ mod tests {
                 fl!(l, "note-no-access"),
                 fl!(l, "tray-settings"),
             ];
-            for text in expected {
-                assert!(
-                    painted.iter().any(|p| p.text == text),
-                    "{lang:?}: {text:?} is cut off or missing; painted: {painted:?}"
-                );
-            }
-            assert_single_lines_without_overlap(&painted);
+            assert_whole(&painted, &expected, &format!("{lang:?} at {scale}"));
         }
     }
 
@@ -822,7 +835,12 @@ mod tests {
         );
         let painted = painted(&mut d);
         assert!(painted.iter().any(|p| p.text == "50%"), "{painted:?}");
-        assert_single_lines_without_overlap(&painted);
+        let name = painted
+            .iter()
+            .find(|p| p.text.starts_with("Logitech"))
+            .expect("the name was painted");
+        assert_eq!(name.lines, 1, "{name:?}");
+        assert_no_overlap(&painted);
     }
 
     #[test]
@@ -840,7 +858,7 @@ mod tests {
                     painted.iter().any(|p| p.text == text),
                     "{lang:?}: {text:?} missing; painted: {painted:?}"
                 );
-                assert_single_lines_without_overlap(&painted);
+                assert_no_overlap(&painted);
             }
         }
     }

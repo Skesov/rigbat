@@ -277,65 +277,55 @@ mod tests {
     use crate::appearance::Appearance;
     use crate::config::{self, Config};
     use crate::egui_test::{
-        assert_no_overlap, click_at, fully_painted_text_at, painted, run_frame,
+        TEXT_SCALES, assert_whole, click_at, fully_painted_text_at, painted, run_frame,
     };
     use crate::gui;
     use crate::i18n::Lang;
     use crate::settings::WINDOW_MIN_SIZE;
-    use crate::settings::tests::{app_saving_to, settings_app_with};
+    use crate::settings::tests::{app_saving_to, settings_app_with, tab_size};
 
     /// The narrowest the window gets, tall enough that the column does not scroll.
     const TEST_SIZE: [f32; 2] = [WINDOW_MIN_SIZE[0], 1000.0];
 
     #[test]
-    fn appearance_tab_text_is_whole_on_one_line_in_every_language() {
-        for lang in Lang::ALL {
-            for theme in WindowTheme::ALL {
-                let mut app = settings_app_with(Config {
-                    language: Some(lang.tag().to_owned()),
-                    theme,
-                    ..Config::default()
-                });
+    fn appearance_tab_text_is_whole_in_every_language_and_text_scale() {
+        for (lang, scale, theme) in Lang::ALL
+            .into_iter()
+            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
+            .flat_map(|(lang, scale)| WindowTheme::ALL.map(|theme| (lang, scale, theme)))
+        {
+            let mut app = settings_app_with(Config {
+                language: Some(lang.tag().to_owned()),
+                theme,
+                ..Config::default()
+            });
 
-                let painted = fully_painted_text_at(TEST_SIZE, |ui| {
-                    app.render_tab_bar(ui);
-                    app.render_appearance_tab(ui);
-                });
+            let painted = fully_painted_text_at(tab_size(scale, 1400.0), |ui| {
+                app.render_tab_bar(ui);
+                app.render_appearance_tab(ui);
+            });
 
-                let l = loader(lang);
-                let mut expected: Vec<String> = [
-                    "tab-general",
-                    "tab-appearance",
-                    "tab-devices",
-                    "group-windows",
-                    "window-theme",
-                    "group-colours",
-                    "appearance-palette",
-                    "group-tray-icon",
-                    "tray-icon-style",
-                ]
-                .into_iter()
-                .map(|id| l.get(id))
-                .collect();
-                expected.push(theme.label(lang));
-                expected.extend(Palette::ALL.map(|palette| palette.label(lang)));
-                expected.extend(DisplayMode::ALL.map(|mode| mode.label(lang)));
-                for text in &expected {
-                    let lines = painted.iter().find(|p| &p.text == text).map(|p| p.lines);
-                    assert_eq!(
-                        lines,
-                        Some(1),
-                        "{lang:?}: {text:?} is cut off, missing or wrapped: {painted:?}"
-                    );
-                }
-                for hint in ["window-theme-hint", "appearance-palette-hint"].map(|id| l.get(id)) {
-                    assert!(
-                        painted.iter().any(|p| p.text == hint),
-                        "{lang:?}: {hint:?} is cut off or missing: {painted:?}"
-                    );
-                }
-                assert_no_overlap(&painted);
-            }
+            let l = loader(lang);
+            let mut expected: Vec<String> = [
+                "tab-general",
+                "tab-appearance",
+                "tab-devices",
+                "group-windows",
+                "window-theme",
+                "window-theme-hint",
+                "group-colours",
+                "appearance-palette",
+                "appearance-palette-hint",
+                "group-tray-icon",
+                "tray-icon-style",
+            ]
+            .into_iter()
+            .map(|id| l.get(id))
+            .collect();
+            expected.push(theme.label(lang));
+            expected.extend(Palette::ALL.map(|palette| palette.label(lang)));
+            expected.extend(DisplayMode::ALL.map(|mode| mode.label(lang)));
+            assert_whole(&painted, &expected, &format!("{lang:?} at {scale}"));
         }
     }
 
