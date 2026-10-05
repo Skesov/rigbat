@@ -76,7 +76,7 @@ button-copy = Копировать
 button-copied = Скопировано
 settings-title = rigbat — Настройки
 config-not-saved = Изменения не сохраняются
-config-unreadable = Файл { $path } не читается, и rigbat не станет его перезаписывать. Исправьте или удалите его.
+config-unreadable = Не удалось разобрать файл { $path }. Пока он не исправлен, rigbat не будет его перезаписывать. Исправьте или удалите его.
 config-unwritable = Проверьте, что каталог { $dir } существует и доступен для записи.
 config-no-dir = Не найден домашний каталог для хранения настроек.
 problem-autostart-on = Запуск при входе в систему не включён
@@ -161,7 +161,7 @@ devices-seen-before = Замечены раньше
 device-seen-ago = замечено { $age }
 device-show-in-tray = Показывать в трее
 device-about = Тип и подключение
-device-last-seen = последний раз замечено { $date }
+device-last-seen = был на связи { $date }
 
 # Lowercase, as after "name: "; `charge_value` capitalises a word that starts its own slot.
 presence-online = на связи
