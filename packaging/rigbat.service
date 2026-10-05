@@ -9,9 +9,10 @@
 # systemd user manager at login — modern systemd desktops (GNOME, KDE,
 # COSMIC) do this automatically.
 #
-# Do not run this service together with the settings "Startup" toggle
-# (~/.config/autostart/rigbat.desktop): both launch `rigbat tray` and you
-# would get two instances. Pick one.
+# Use this service or the settings "Start with session" switch
+# (~/.config/autostart/rigbat.desktop), not both: a second `rigbat tray`
+# sees the first one running and exits, and `rigbat doctor` warns about the
+# overlap.
 
 [Unit]
 Description=rigbat — battery tray for gaming peripherals
