@@ -138,6 +138,43 @@ mod tests {
         assert_eq!(seen, Lang::ALL.len(), "one catalogue per language");
     }
 
+    /// The keys whose value ends with "…": one that needs a confirmation and one that says an
+    /// action is running. A label that only opens a window has none.
+    const ELLIPSIS_KEYS: [&str; 2] = ["device-remove", "button-refreshing"];
+
+    #[test]
+    fn only_a_confirmation_or_a_running_action_ends_with_an_ellipsis() {
+        use fluent_syntax::ast::{Entry, Message, PatternElement};
+        for path in Catalogues::iter() {
+            let file = Catalogues::get(&path).expect("listed file is embedded");
+            let source = std::str::from_utf8(&file.data).expect("catalogue is UTF-8");
+            let resource = fluent_syntax::parser::parse(source)
+                .map_err(|(_, errors)| errors)
+                .expect("catalogue parses");
+            for entry in resource.body {
+                let Entry::Message(Message {
+                    id,
+                    value: Some(pattern),
+                    ..
+                }) = entry
+                else {
+                    continue;
+                };
+                let ends_with_ellipsis = matches!(
+                    pattern.elements.last(),
+                    Some(PatternElement::TextElement { value })
+                        if value.trim_end().ends_with('…') || value.trim_end().ends_with("...")
+                );
+                assert_eq!(
+                    ends_with_ellipsis,
+                    ELLIPSIS_KEYS.contains(&id.name),
+                    "{path}: {}",
+                    id.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn catalogues_define_the_same_messages() {
         let reference = message_ids(Lang::En);

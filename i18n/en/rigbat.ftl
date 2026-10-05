@@ -5,8 +5,8 @@
 tray-no-devices = No devices
 tray-automatic = Automatic
 tray-refresh = Refresh
-tray-dashboard = Device overview…
-tray-settings = Settings…
+tray-dashboard = Device overview
+tray-settings = Settings
 tray-quit = Quit
 
 ## A device's state, as the tray menu, tooltip and settings window read it
@@ -116,7 +116,7 @@ display-percent-only = Percentage as text
 
 ## Settings window: Devices tab
 
-device-search-hint = Search devices…
+device-search-hint = Search devices
 devices-empty = No devices recorded yet. Connect a device, then press Refresh.
 devices-no-match = No devices match your search.
 devices-tray-unanswered = The running tray did not answer; showing the devices it listed last.

@@ -232,7 +232,7 @@ Tray:      main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶
            config file watch ──watch<Config>──▶ manager + notifications (live)
            notifications task ◀── TrayState + Config (edge-triggered low-battery)
 
-Settings:  tray menu "Settings…" → spawn `rigbat settings` (separate process)
+Settings:  tray menu "Settings" → spawn `rigbat settings` (separate process)
            egui window edits config.json (atomic temp+rename)
            org.rigbat.Tray1.State() ──JSON Snapshot (shown + hidden)──▶ device list
              (no tray on the bus: discover_all + poll_once in the settings process)

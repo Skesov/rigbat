@@ -507,9 +507,9 @@ mod tests {
 
     const TAIL: [&str; 6] = [
         "---",
-        "Device overview…",
+        "Device overview",
         "Refresh",
-        "Settings…",
+        "Settings",
         "---",
         "Quit",
     ];
@@ -650,7 +650,7 @@ mod tests {
         let menu = describe(&tray);
         assert_eq!(menu[0], "[x] Автоматически");
         assert!(menu.contains(&"[ ] Pad: 100% · заряжено #input-gaming".to_owned()));
-        assert!(menu.contains(&"Обзор устройств…".to_owned()));
+        assert!(menu.contains(&"Обзор устройств".to_owned()));
     }
 
     #[test]

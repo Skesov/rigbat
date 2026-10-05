@@ -5,8 +5,8 @@
 tray-no-devices = Нет устройств
 tray-automatic = Автоматически
 tray-refresh = Обновить
-tray-dashboard = Обзор устройств…
-tray-settings = Настройки…
+tray-dashboard = Обзор устройств
+tray-settings = Настройки
 tray-quit = Выход
 
 ## A device's state, as the tray menu, tooltip and settings window read it
@@ -115,7 +115,7 @@ display-percent-only = Проценты текстом
 
 ## Settings window: Devices tab
 
-device-search-hint = Поиск устройств…
+device-search-hint = Поиск устройств
 devices-empty = Устройств пока нет. Подключите устройство и нажмите «Обновить».
 devices-no-match = Ничего не найдено.
 devices-tray-unanswered = Запущенный трей не ответил; показаны устройства из его последнего ответа.
