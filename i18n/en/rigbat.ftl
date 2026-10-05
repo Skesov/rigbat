@@ -157,4 +157,5 @@ dashboard-title = rigbat — Device overview
 dashboard-tray-not-running = The rigbat tray is not running.
 dashboard-start-tray = Start tray
 dashboard-no-devices-hint = Connect a device and it appears here.
+dashboard-refreshed = Device list updated
 dashboard-in-tray = in tray

@@ -340,6 +340,8 @@ struct Dashboard {
     refreshing: Option<Refreshing>,
     /// Starts `rigbat tray`; a parameter so tests start nothing.
     start_tray: Box<dyn Fn()>,
+    /// What the screen reader last heard about a refresh.
+    announcement: Option<String>,
 }
 
 /// A Refresh click still waiting for its snapshot.
@@ -367,6 +369,7 @@ impl Dashboard {
             was_focused: false,
             refreshing: None,
             start_tray: Box::new(|| crate::launch::spawn("tray")),
+            announcement: None,
         };
         dashboard.accept(snapshot);
         dashboard.size = dashboard.wanted_size();
@@ -379,7 +382,9 @@ impl Dashboard {
             s
         });
         self.received_at = crate::clock::now();
-        self.refreshing = None;
+        if self.refreshing.take().is_some() {
+            self.announcement = Some(fl!(loader(self.lang), "dashboard-refreshed"));
+        }
     }
 
     fn drain_updates(&mut self) {
@@ -497,6 +502,7 @@ impl Dashboard {
         if let Some((tray, rt)) = &self.tray {
             let clicked = refresh_button(&mut ui, !in_flight, self.lang).clicked();
             if clicked {
+                self.announcement = Some(fl!(l, "button-refreshing"));
                 let (failed_tx, failed) = tokio::sync::oneshot::channel();
                 self.refreshing = Some(Refreshing {
                     since: Instant::now(),
@@ -516,6 +522,9 @@ impl Dashboard {
                     wait => ui.ctx().request_repaint_after(wait),
                 }
             }
+        }
+        if let Some(announcement) = &self.announcement {
+            gui::live_region(ui.ctx(), ui.id().with("refresh-status"), announcement);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button(fl!(l, "tray-settings")).clicked() {
@@ -561,6 +570,9 @@ fn render_row(
 ) {
     let size = egui::vec2(ui.available_width(), ROW_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let value = value_text(card, lang);
+    // A device going offline or low is spoken while the window is open.
+    gui::live_region(ui.ctx(), response.id, &format!("{}: {value}", card.name));
     response.on_hover_text(details(card, lang));
     let visuals = ui.visuals().clone();
     let low = matches!(card.status, PrimaryStatus::Low { .. });
@@ -580,7 +592,7 @@ fn render_row(
     );
     let (top, bottom) = body.split_top_bottom_at_fraction(0.5);
 
-    let value = gui::charge_value_text(&visuals, status, value_text(card, lang), low, online);
+    let value = gui::charge_value_text(&visuals, status, value, low, online);
     let value_rect = place(ui, top, egui::Align::Max, egui::Label::new(value));
     let name = egui::Label::new(egui::RichText::new(&card.name).strong()).truncate();
     place(
@@ -1160,6 +1172,42 @@ mod tests {
 
         let _pending = start_refresh(&mut d, Instant::now() - REFRESH_SPINNER_LIMIT);
         assert!(!d.refresh_in_flight(), "the limit ends it");
+    }
+
+    fn live_regions_of(d: &mut Dashboard) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let size = d.wanted_size();
+        crate::egui_test::live_regions(&run_frame(&ctx, size, Vec::new(), |ui| d.show(ui)))
+    }
+
+    /// A row is a live region naming its device and value, so a device going
+    /// offline or low is spoken without the user moving focus to it.
+    #[test]
+    fn each_row_is_a_live_region_with_its_name_and_value() {
+        let mut d = dashboard(roster(), Lang::En);
+        let live = live_regions_of(&mut d);
+        for line in [
+            "MX Anywhere 3: 62%".to_owned(),
+            format!("SteelSeries Aerox 5 Wireless: {LOW_SIGN} 15%"),
+            "NuPhy Air75 V2: Disconnected".to_owned(),
+        ] {
+            assert!(live.contains(&line), "{line:?}: {live:?}");
+        }
+    }
+
+    #[test]
+    fn a_finished_refresh_is_announced() {
+        let mut d = dashboard(roster(), Lang::En);
+        assert!(!live_regions_of(&mut d).contains(&"Device list updated".to_owned()));
+        let _pending = start_refresh(&mut d, Instant::now());
+        d.accept(Some(Snapshot {
+            display_mode: DisplayMode::IconOnly,
+            devices: roster(),
+            hidden: Vec::new(),
+        }));
+        let live = live_regions_of(&mut d);
+        assert!(live.contains(&"Device list updated".to_owned()), "{live:?}");
     }
 
     #[test]

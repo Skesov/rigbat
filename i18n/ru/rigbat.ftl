@@ -181,4 +181,5 @@ dashboard-title = rigbat — Обзор устройств
 dashboard-tray-not-running = Трей rigbat не запущен.
 dashboard-start-tray = Запустить трей
 dashboard-no-devices-hint = Подключите устройство, и оно появится здесь.
+dashboard-refreshed = Список устройств обновлён
 dashboard-in-tray = в трее

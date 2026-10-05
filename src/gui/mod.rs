@@ -40,6 +40,20 @@ pub fn reduced_motion(ctx: &egui::Context) -> bool {
     preferences(ctx).reduced_motion
 }
 
+/// Makes `id`'s AccessKit node a polite live region reading `text`: a screen
+/// reader speaks it when it appears and whenever it changes, without moving
+/// focus (WCAG 4.1.3). AccessKit's AT-SPI adapter sends the announcement.
+pub fn live_region(ctx: &egui::Context, id: egui::Id, text: &str) {
+    use egui::accesskit::{Live, Role};
+    ctx.accesskit_node_builder(id, |node| {
+        if node.role() == Role::Unknown {
+            node.set_role(Role::Label);
+        }
+        node.set_value(text);
+        node.set_live(Live::Polite);
+    });
+}
+
 /// Accent goes into both styles so a scheme switch keeps it.
 pub fn apply(ctx: &egui::Context, appearance: &Appearance) {
     ctx.set_theme(match appearance.scheme {

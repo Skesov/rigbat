@@ -201,6 +201,7 @@ pub struct Node {
     pub role: egui::accesskit::Role,
     pub name: Option<String>,
     pub rect: egui::Rect,
+    pub live: egui::accesskit::Live,
 }
 
 /// Every node `output` sent to AccessKit.
@@ -220,7 +221,17 @@ pub fn nodes(output: &egui::FullOutput) -> Vec<Node> {
                     egui::pos2(b.x1 as f32, b.y1 as f32),
                 )
             }),
+            live: node.live().unwrap_or(egui::accesskit::Live::Off),
         })
+        .collect()
+}
+
+/// The polite live regions `output` sent, by name.
+pub fn live_regions(output: &egui::FullOutput) -> Vec<String> {
+    nodes(output)
+        .into_iter()
+        .filter(|node| node.live == egui::accesskit::Live::Polite)
+        .filter_map(|node| node.name)
         .collect()
 }
 

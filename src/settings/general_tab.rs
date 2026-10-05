@@ -588,6 +588,19 @@ mod tests {
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
+    #[test]
+    fn a_save_problem_is_announced_to_a_screen_reader() {
+        let mut app = settings_app_with(Config::default());
+        app.save_problem = Some(crate::settings::SaveProblem::NoConfigDir);
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let output = run_frame(&ctx, GENERAL_TAB_TEST_SIZE, Vec::new(), |ui| {
+            frame(&mut app, ui);
+        });
+        let live = crate::egui_test::live_regions(&output);
+        assert_eq!(live, ["Changes are not saved"]);
+    }
+
     /// Every save problem's text, in every language and text scale.
     #[test]
     fn every_save_problem_is_whole_in_every_language_and_text_scale() {

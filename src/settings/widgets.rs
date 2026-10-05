@@ -124,7 +124,8 @@ pub fn banner(
         ))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(egui::RichText::new(title).strong().color(accent));
+            let title_label = ui.label(egui::RichText::new(title).strong().color(accent));
+            gui::live_region(ui.ctx(), title_label.id, title);
             content(ui);
         });
     ui.add_space(TOOLBAR_GAP);

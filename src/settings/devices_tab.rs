@@ -77,7 +77,9 @@ impl SettingsApp {
         if self.tray_unanswered {
             let warn =
                 gui::status_colors(ui.visuals(), self.config.palette, gui::targets(ui.ctx())).warn;
-            ui.label(egui::RichText::new(fl!(l, "devices-tray-unanswered")).color(warn));
+            let text = fl!(l, "devices-tray-unanswered");
+            let label = ui.label(egui::RichText::new(&text).color(warn));
+            gui::live_region(ui.ctx(), label.id, &text);
         }
         ui.add_space(widgets::TOOLBAR_GAP);
         self.render_no_access(ui);
