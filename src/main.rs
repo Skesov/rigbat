@@ -441,16 +441,22 @@ async fn run_waybar() {
     let (config_tx, _config_rx) = tokio::sync::watch::channel(config);
     crate::config::watch_file(config_tx.clone());
 
-    let ctx = std::sync::Arc::new(sources::Context::new());
-    // No state store here: only `rigbat tray` writes to it (see
-    // `src/state/mod.rs`'s module doc and `run_tray`).
-    let (rx, refresh) = app::supervisor::Supervisor::spawn(
-        config_tx.clone(),
-        ctx.clone(),
-        None,
-        app::supervisor::ConfigRole::Reader,
-    );
-    spawn_bus_dependent_tasks(ctx.clone(), refresh.clone());
+    let conn = zbus::Connection::session()
+        .await
+        .map_err(|e| tracing::warn!("no session bus, polling the devices here: {e}"))
+        .ok();
+    let (tray_running, mut tray_changes) = match &conn {
+        Some(conn) => match cli::waybar::watch_tray(conn).await {
+            Ok((running, changes)) => (running, Some(changes)),
+            Err(e) => {
+                tracing::warn!("cannot tell whether the tray runs: {e:#}");
+                (false, None)
+            }
+        },
+        None => (false, None),
+    };
+    let (state_tx, state_rx) = tokio::sync::watch::channel(domain::TrayState { devices: vec![] });
+    let mut source = waybar_source(conn.as_ref(), tray_running, &state_tx, &config_tx).await;
 
     // A receiver of our own, so a primary_device/hidden_devices edit is
     // picked up even between two TrayState publications. config_tx must
@@ -458,7 +464,125 @@ async fn run_waybar() {
     // alive: it is the sole sender, and dropping it makes every source task's
     // config_rx.changed() resolve with an error, spinning that task's select
     // loop.
-    cli::waybar::run(rx, config_tx.subscribe()).await;
+    let module = cli::waybar::run(state_rx, config_tx.subscribe());
+    tokio::pin!(module);
+    loop {
+        tokio::select! {
+            () = &mut module => return,
+            Some(change) = next_change(&mut tray_changes) => {
+                let running = change.args().is_ok_and(|args| args.new_owner().is_some());
+                if source.as_ref().is_some_and(|s| s.is_tray() == running) {
+                    continue;
+                }
+                tracing::info!(tray_running = running, "switching the waybar module's source");
+                // The old source stops before the new one starts: never two pollers at once.
+                drop(source.take());
+                source = waybar_source(conn.as_ref(), running, &state_tx, &config_tx).await;
+            }
+        }
+    }
+}
+
+/// Where `--waybar` reads device state from; dropping it stops all of it.
+enum WaybarSource {
+    Tray(tokio::task::JoinHandle<()>),
+    Own { _runtime: OwnRuntime },
+}
+
+impl WaybarSource {
+    fn is_tray(&self) -> bool {
+        matches!(self, Self::Tray(_))
+    }
+}
+
+impl Drop for WaybarSource {
+    fn drop(&mut self) {
+        if let Self::Tray(task) = self {
+            task.abort();
+        }
+    }
+}
+
+/// The running tray's state when one runs, else a `Supervisor` of our own.
+async fn waybar_source(
+    conn: Option<&zbus::Connection>,
+    tray_running: bool,
+    tx: &tokio::sync::watch::Sender<domain::TrayState>,
+    config_tx: &tokio::sync::watch::Sender<config::Config>,
+) -> Option<WaybarSource> {
+    if tray_running && let Some(conn) = conn {
+        match cli::waybar::follow_tray(conn, tx.clone()).await {
+            Ok(task) => {
+                tracing::info!("following the running tray's state");
+                return Some(WaybarSource::Tray(task));
+            }
+            Err(e) => tracing::warn!("cannot follow the running tray: {e:#}"),
+        }
+    }
+    let (tx, config_tx) = (tx.clone(), config_tx.clone());
+    let started = OwnRuntime::start(move || {
+        let ctx = std::sync::Arc::new(sources::Context::new());
+        // No state store here: only `rigbat tray` writes to it (see
+        // `src/state/mod.rs`'s module doc and `run_tray`).
+        let (rx, refresh) = app::supervisor::Supervisor::spawn(
+            config_tx,
+            ctx.clone(),
+            None,
+            app::supervisor::ConfigRole::Reader,
+        );
+        spawn_bus_dependent_tasks(ctx, refresh);
+        tokio::spawn(cli::waybar::forward(rx, tx));
+    });
+    match started {
+        Ok(rt) => {
+            tracing::info!("no tray runs, polling the devices here");
+            Some(WaybarSource::Own { _runtime: rt })
+        }
+        Err(e) => {
+            tracing::error!("cannot start polling the devices: {e:#}");
+            None
+        }
+    }
+}
+
+/// A runtime of its own for everything `start` spawns, transitively: the
+/// `Supervisor`, its source tasks and their hidraw handles, the BlueZ and
+/// resume watchers, the system-bus connection's tasks. A `Supervisor` has no
+/// stop of its own; shutting this runtime down drops all of it at once.
+struct OwnRuntime(Option<tokio::runtime::Runtime>);
+
+impl OwnRuntime {
+    fn start(start: impl FnOnce()) -> anyhow::Result<Self> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("rigbat-poll")
+            .enable_all()
+            .build()?;
+        {
+            let _entered = rt.enter();
+            start();
+        }
+        Ok(Self(Some(rt)))
+    }
+}
+
+impl Drop for OwnRuntime {
+    fn drop(&mut self) {
+        // Not a plain drop: that blocks, which panics inside the async caller.
+        if let Some(rt) = self.0.take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
+async fn next_change(
+    changes: &mut Option<zbus::fdo::NameOwnerChangedStream>,
+) -> Option<zbus::fdo::NameOwnerChanged> {
+    use futures_util::StreamExt as _;
+    match changes {
+        Some(changes) => changes.next().await,
+        None => std::future::pending().await,
+    }
 }
 
 #[cfg(test)]
@@ -811,5 +935,56 @@ mod featured_tests {
             let json = crate::cli::waybar::to_waybar(&state.devices, &cfg, now);
             assert_eq!(json["percentage"], percent, "pin {primary:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod own_runtime_tests {
+    use std::time::Duration;
+
+    use super::OwnRuntime;
+
+    fn open_fds_to(path: &std::path::Path) -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .expect("/proc/self/fd")
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .filter(|target| target == path)
+            .count()
+    }
+
+    /// Stopping the module's own polling leaves no task and no open device
+    /// node behind, however deep the task that holds it was spawned.
+    #[tokio::test]
+    async fn dropping_the_own_runtime_stops_every_task_and_closes_its_handles() {
+        let node = std::env::temp_dir().join(format!("rigbat-own-runtime-{}", std::process::id()));
+        std::fs::write(&node, b"").unwrap();
+        let (alive_tx, mut alive_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+
+        let rt = OwnRuntime::start({
+            let node = node.clone();
+            move || {
+                tokio::spawn(async move {
+                    let _alive = alive_tx.clone();
+                    tokio::spawn(async move {
+                        let _alive = alive_tx;
+                        let _handle = std::fs::File::open(&node).unwrap();
+                        opened_tx.send(()).unwrap();
+                        std::future::pending::<()>().await;
+                    });
+                    std::future::pending::<()>().await;
+                });
+            }
+        })
+        .unwrap();
+        opened_rx.await.unwrap();
+        assert_eq!(open_fds_to(&node), 1);
+
+        drop(rt);
+
+        let closed = tokio::time::timeout(Duration::from_secs(5), alive_rx.recv()).await;
+        assert_eq!(closed, Ok(None), "a task outlived the runtime");
+        assert_eq!(open_fds_to(&node), 0, "the device handle stayed open");
+        std::fs::remove_file(&node).unwrap();
     }
 }

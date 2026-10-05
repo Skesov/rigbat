@@ -40,9 +40,11 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
 - `rigbat` / `rigbat list` — one-shot table of charge levels (`app::poll_once`); `--wide` adds
   transport/locator columns.
 - `rigbat --json` — machine-readable output.
-- `rigbat --waybar` — long-lived waybar custom-module: holds its own `Supervisor` and prints one
-  JSON line for the featured device on startup and on every state change (run with `interval`
-  omitted, not `tray`'s icon/notifications).
+- `rigbat --waybar` — long-lived waybar custom-module: prints one JSON line for the featured
+  device on startup and on every state change (run with `interval` omitted, not `tray`'s
+  icon/notifications). Follows the running tray's `org.rigbat.Tray1` state; only with no tray
+  does it hold its own `Supervisor`, on a runtime of its own that it shuts down (every source
+  task and hidraw handle with it) when a tray appears; it switches back when the tray stops.
 - `rigbat tray` — SNI daemon (`Supervisor` + `ksni`), the long-running mode. Claims
   `org.rigbat.Tray` on the session bus before publishing anything (`ipc::single_instance`); a
   second instance sees the name taken and exits 0 instead of doubling every tray icon. On the

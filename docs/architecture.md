@@ -10,9 +10,14 @@ rigbat reads battery levels from peripherals and presents them. One binary, thre
 a shared headless core:
 
 - **CLI** — `rigbat list` / `--json` / `--wide`: a one-shot poll printed and exit. `--waybar` is
-  the exception: it holds its own `Supervisor` and runs continuously, printing one line per
-  state change, so a retained reading survives a device going unreachable the same way it does
-  in the tray.
+  the exception: it runs continuously, printing one line per state change, so a retained reading
+  survives a device going unreachable the same way it does in the tray. With a tray running it
+  follows the tray's `org.rigbat.Tray1` state instead of polling the hardware a second time;
+  only without one does it hold its own `Supervisor`. A `Supervisor` has no stop of its own, so
+  that one runs on a separate tokio runtime (`OwnRuntime` in `main.rs`): when a tray appears the
+  runtime is shut down, which drops every task spawned on it — source tasks with their hidraw
+  handles, the BlueZ and resume watchers, the system-bus connection — and the module follows the
+  tray; when the tray stops it starts a fresh one.
 - **Tray** — `rigbat tray`: a long-running StatusNotifierItem daemon.
 - **Settings** — `rigbat settings`: a small GUI window, launched as a separate process.
 - **Dashboard** — `rigbat dashboard`: the tray icon's left click, a row per shown device.
@@ -210,10 +215,15 @@ minute, and a worker per core only adds idle wakeups. `TOKIO_WORKER_THREADS` sti
 ```text
 CLI:       main → discover_all() → poll_once() (poll all in parallel) → cli::print_*  → exit
 
-Waybar:    main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶ cli::waybar::run
+Waybar:    tray running: org.rigbat.Tray1 State/StateChanged ──cli::waybar::follow_tray──┐
+           no tray:      OwnRuntime: Supervisor::spawn ──cli::waybar::forward────────────┤
+                                                                                         ▼
+                                                                    cli::waybar::run
                                                                     │ render_waybar_line,
                                                                     │ printed only when the line
                                                                     │ changes, no exit
+           NameOwnerChanged(org.rigbat.Tray) ──▶ old source stopped, the other one started
+           (no tray only, below:)
            session (logind PrepareForSleep) ──RefreshSignal──────────▶ Supervisor (re-poll + re-discover)
            bluez Connected / interfaces (debounced) ──rediscover──────▶ Supervisor (re-discover)
            bluez Battery1.Percentage ──BluezSource::pushed──▶ that device's task (one reading)

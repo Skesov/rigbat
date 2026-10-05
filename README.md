@@ -280,7 +280,9 @@ itself, or on Polybar, which has no SNI tray, use the modes below.
 
 `rigbat --waybar` is a long-lived process: it prints one `custom` module JSON line on startup
 and again on every state change, describing the featured device — the same device the aggregate
-tray icon shows. Add to `~/.config/waybar/config`, **omitting** `interval` — a script with no
+tray icon shows. While `rigbat tray` runs, the module reads the tray's state instead of polling
+the devices a second time; it polls them itself only when no tray runs, and switches when the
+tray starts or stops. Add to `~/.config/waybar/config`, **omitting** `interval` — a script with no
 `interval` and no `signal` is expected to loop and push updates itself:
 
 ```jsonc
