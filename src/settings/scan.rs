@@ -87,6 +87,18 @@ async fn tray_roster(scan: Scan) -> TrayRoster {
     }
 }
 
+/// Calls `start` unless a tray already runs; true when it did.
+pub async fn start_tray_if_absent(
+    conn: &zbus::Connection,
+    start: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<bool> {
+    if tray_running(conn).await? {
+        return Ok(false);
+    }
+    start()?;
+    Ok(true)
+}
+
 async fn tray_running(conn: &zbus::Connection) -> anyhow::Result<bool> {
     let dbus = DBusProxy::new(conn).await?;
     Ok(dbus.name_has_owner(BusName::try_from(TRAY_NAME)?).await?)
@@ -394,6 +406,36 @@ mod bus_tests {
 
         assert!(!polled.get(), "polled the devices next to a running tray");
         assert!(scanned.is_err(), "an unanswered scan read as {scanned:?}");
+    }
+
+    #[tokio::test]
+    async fn the_tray_is_started_only_when_none_runs() {
+        if !isolated(module_path!(), "the_tray_is_started_only_when_none_runs") {
+            return;
+        }
+        let conn = zbus::Connection::session().await.expect("private bus");
+        let started = Cell::new(0);
+        let start = || {
+            started.set(started.get() + 1);
+            Ok(())
+        };
+
+        assert!(start_tray_if_absent(&conn, start).await.expect("bus"));
+        assert_eq!(started.get(), 1);
+
+        let _tray = zbus::connection::Builder::session()
+            .expect("private bus")
+            .name(TRAY_NAME)
+            .expect("name")
+            .build()
+            .await
+            .expect("claiming the tray name");
+        assert!(!start_tray_if_absent(&conn, start).await.expect("bus"));
+        assert_eq!(
+            started.get(),
+            1,
+            "started a second tray beside a running one"
+        );
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use super::{LOW_THRESHOLD_RANGE, SettingsApp, open_uri, widgets};
+use super::{LOW_THRESHOLD_RANGE, SettingsApp, open_uri, scan, widgets};
 use crate::autostart;
 use crate::domain::TrayMode;
 use crate::domain::version::Build;
@@ -196,10 +196,23 @@ impl SettingsApp {
         let toggled = rows.row(&title, widgets::none, |ui| {
             widgets::switch(ui, id, &mut self.autostart_enabled, &title).changed()
         });
-        if toggled && let Err(e) = autostart::set_enabled(self.autostart_enabled) {
+        if !toggled {
+            return;
+        }
+        if let Err(e) = autostart::set_enabled(self.autostart_enabled) {
             tracing::warn!("failed to update autostart: {e}");
             // Revert the switch so it reflects the real filesystem state.
             self.autostart_enabled = !self.autostart_enabled;
+        } else if self.autostart_enabled {
+            self.rt.spawn(async {
+                let started = match zbus::Connection::session().await {
+                    Ok(conn) => scan::start_tray_if_absent(&conn, autostart::start_tray).await,
+                    Err(e) => Err(e.into()),
+                };
+                if let Err(e) = started {
+                    tracing::warn!("could not start the tray now: {e:#}");
+                }
+            });
         }
     }
 

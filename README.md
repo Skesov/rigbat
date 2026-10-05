@@ -103,7 +103,8 @@ The [releases page](https://github.com/Skesov/rigbat/releases) has builds for `x
   the udev rule, which `rigbat udev-rule` prints (see [Permissions](#permissions)).
 - **crates.io** — `cargo install rigbat --locked` builds the binary only (needs the build
   requirements above). A USB HID device also needs the udev rule (see [Permissions](#permissions));
-  start the tray with the settings window's `Start with session` switch.
+  run `rigbat settings` and turn on `Start with session`: it starts the tray now, if none runs,
+  and at every login.
 - **Arch Linux** — see [below](#arch-linux-aur).
 - **From source** — see the next section.
 
@@ -179,10 +180,10 @@ which modern desktops (GNOME, KDE, COSMIC) import into the systemd user manager
 at login automatically.
 
 Use the service **or** the in-app "Start with session" switch (which writes an
-XDG autostart entry), not both — each launches `rigbat tray`. A second instance
-detects the first through a session-bus name and exits immediately instead of
-doubling every device in the tray; the settings window also locks the switch
-and says the service manages startup when it sees the service enabled.
+XDG autostart entry and starts the tray at once if none runs), not both — each launches
+`rigbat tray`. A second instance detects the first through a session-bus name and exits
+immediately instead of doubling every device in the tray; the settings window also locks the
+switch and says the service manages startup when it sees the service enabled.
 
 ## Permissions
 

@@ -59,7 +59,8 @@ dispatches on the first argument and builds the tokio runtime only for the non-G
 - `rigbat settings` — GTK-free eframe/egui settings window in a SEPARATE process (the tray spawns
   it). Holds `org.rigbat.Settings`; a second launch raises the open window and exits. It edits
   `config.json`; the tray applies changes via the file watch. Its device list is the running
-  tray's `org.rigbat.Tray1` snapshot; only with no tray does it discover and poll itself. It
+  tray's `org.rigbat.Tray1` snapshot; only with no tray does it discover and poll itself.
+  Turning "Start with session" on also starts `rigbat tray` (own process group) if none runs. It
   holds a tokio runtime only for that work and its bus name, off the UI thread — the winit event
   loop is never entered from inside it. Both windows export an AT-SPI tree via eframe's `accesskit` feature.
 

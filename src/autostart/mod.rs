@@ -97,6 +97,27 @@ fn disable_at(path: &std::path::Path) -> anyhow::Result<()> {
     }
 }
 
+/// Starts `rigbat tray` now, outliving this process, for a switch turned on
+/// mid-session that would otherwise show no icon until the next login.
+pub fn start_tray() -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt as _;
+
+    // Its own process group: a Ctrl-C on a terminal-launched settings window must not reach it.
+    let mut child = std::process::Command::new(crate::launch::executable())
+        .arg("tray")
+        .stdin(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .context("failed to start rigbat tray")?;
+    // A dead child stays a zombie until reaped, and the wait blocks for the tray's lifetime.
+    std::thread::spawn(move || {
+        if let Err(e) = child.wait() {
+            tracing::warn!("tray process could not be reaped: {e}");
+        }
+    });
+    Ok(())
+}
+
 /// Enables or disables autostart depending on `on`.
 pub fn set_enabled(on: bool) -> anyhow::Result<()> {
     if on { enable() } else { disable() }
