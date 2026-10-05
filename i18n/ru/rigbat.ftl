@@ -83,7 +83,7 @@ problem-autostart-on = Запуск при входе в систему не в�
 problem-autostart-off = Запуск при входе в систему не выключен
 problem-autostart-fix = Проверьте, что каталог { $dir } существует и доступен для записи, и попробуйте ещё раз.
 problem-remove = Устройство { $name } не убрано
-problem-remove-fix = Не удалось удалить его историю. Попробуйте ещё раз; rigbat doctor проверяет базу состояния.
+problem-remove-fix = Не удалось удалить историю устройства. Попробуйте ещё раз или проверьте базу командой rigbat doctor.
 
 ## Settings window: General tab
 
