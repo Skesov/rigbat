@@ -275,7 +275,10 @@ mod tests {
     #[test]
     fn a_forced_theme_wins_over_the_portal_until_it_is_system_again() {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let (portal, appearance) = watch::channel(Appearance::default());
+        let (portal, appearance) = watch::channel(Appearance {
+            scheme: ColorScheme::Dark,
+            ..Appearance::default()
+        });
         let (theme, theme_rx) = watch::channel(WindowTheme::Light);
         let ctx = egui::Context::default();
 
@@ -303,7 +306,10 @@ mod tests {
     #[test]
     fn a_theme_fixed_at_launch_still_follows_the_portal() {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let (portal, appearance) = watch::channel(Appearance::default());
+        let (portal, appearance) = watch::channel(Appearance {
+            scheme: ColorScheme::Dark,
+            ..Appearance::default()
+        });
         let ctx = egui::Context::default();
 
         follow(

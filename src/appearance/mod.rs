@@ -67,10 +67,11 @@ impl Appearance {
     }
 }
 
+/// Light, as libadwaita and the GNOME HIG default to when nothing says otherwise.
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            scheme: ColorScheme::Dark,
+            scheme: ColorScheme::Light,
             accent: None,
             text_scale: 1.0,
         }
@@ -184,10 +185,11 @@ fn clamp_text_scale(scale: f64) -> f32 {
     }
 }
 
+/// "No preference" is light: the portal spec leaves it to the app, and libadwaita prefers light.
 fn map_scheme(cs: ashpd::desktop::settings::ColorScheme) -> ColorScheme {
     match cs {
-        ashpd::desktop::settings::ColorScheme::PreferLight => ColorScheme::Light,
-        _ => ColorScheme::Dark,
+        ashpd::desktop::settings::ColorScheme::PreferDark => ColorScheme::Dark,
+        _ => ColorScheme::Light,
     }
 }
 
@@ -210,11 +212,16 @@ mod tests {
     }
 
     #[test]
-    fn map_no_preference_to_dark() {
+    fn map_no_preference_to_light() {
         assert_eq!(
             map_scheme(AshpdColorScheme::NoPreference),
-            ColorScheme::Dark
+            ColorScheme::Light
         );
+    }
+
+    #[test]
+    fn without_a_portal_windows_are_light() {
+        assert_eq!(Appearance::default().scheme, ColorScheme::Light);
     }
 
     #[test]
@@ -265,11 +272,11 @@ mod tests {
         let mut appearance = Appearance::default();
         assert!(apply_change(
             &mut appearance,
-            Change::Scheme(ColorScheme::Light)
+            Change::Scheme(ColorScheme::Dark)
         ));
         assert!(!apply_change(
             &mut appearance,
-            Change::Scheme(ColorScheme::Light)
+            Change::Scheme(ColorScheme::Dark)
         ));
         assert!(apply_change(&mut appearance, Change::TextScale(1.5)));
         assert_eq!(appearance.text_scale, 1.5);
