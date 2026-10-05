@@ -11,6 +11,17 @@ use crate::palette::{self, DIM, Rgb, Targets};
 pub const ROW_HEIGHT: f32 = 48.0;
 pub const GLYPH_COLUMN: f32 = 30.0;
 pub const GLYPH_SIZE: f32 = 20.0;
+/// A running action shows progress only once it has run this long: a
+/// spinner or "Refreshing…" that flashes for a moment distracts more than it
+/// informs (GNOME HIG, spinners).
+pub const PROGRESS_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// How long an action running since `since` waits before showing progress;
+/// zero once it shows.
+pub fn progress_wait(since: std::time::Instant, now: std::time::Instant) -> std::time::Duration {
+    PROGRESS_DELAY.saturating_sub(now.saturating_duration_since(since))
+}
+
 /// WCAG 2.2 SC 2.5.8: the least width and height of anything a pointer operates.
 pub const MIN_TARGET: f32 = 24.0;
 
@@ -532,6 +543,22 @@ mod tests {
         run_pass(&ctx);
         assert!(!reduced_motion(&ctx));
         assert!(ctx.global_style().animation_time > 0.0);
+    }
+
+    #[test]
+    fn progress_shows_only_after_the_delay() {
+        let since = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        assert_eq!(progress_wait(since, since), PROGRESS_DELAY);
+        assert_eq!(progress_wait(since, since + ms(100)), ms(200));
+        assert_eq!(
+            progress_wait(since, since + PROGRESS_DELAY),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            progress_wait(since, since + ms(900)),
+            std::time::Duration::ZERO
+        );
     }
 
     #[test]

@@ -278,7 +278,7 @@ Settings" (`settings-title`, retitled when the language changes), a `tab_bar` ov
   the dashboard reads the theme when it opens. "One icon per device" stays on General: it is
   behaviour, not look.
 - **Devices** (`src/settings/devices_tab.rs`): a toolbar (a search field past
-  `SEARCH_MIN_DEVICES`, Refresh on the right), the unanswered-tray line in the warning colour,
+  `SEARCH_MIN_DEVICES`, Refresh on the right: disabled while a scan runs, and reading "Refreshing…" once it has run `gui::PROGRESS_DELAY`), the unanswered-tray line in the warning colour,
   then two groups of `Rows::expander` rows in `roster_order`: "Connected now" (in the current
   scan) and "Seen before" (inventory only). An empty group is not drawn; no devices at all shows
   `devices-empty`.
@@ -318,7 +318,7 @@ running tray's state over the session bus and never polls a device.
 - Kind, transport and tray membership are in the row's hover text (`details`), not in the row.
 - Footer: a "↻" button (`refresh_button`: the `REFRESH` font glyph, not a symbolic icon) that a
   screen reader announces, and hover shows, as "Refresh"; a spinner once the refresh has run
-  `PROGRESS_DELAY` (300 ms) and until it ends, at most `REFRESH_SPINNER_LIMIT` (GNOME: a spinner
+  `gui::PROGRESS_DELAY` (300 ms, `gui::progress_wait`, shared with the Devices tab's Refresh) and until it ends, at most `REFRESH_SPINNER_LIMIT` (GNOME: a spinner
   shown for a moment distracts); with reduced motion, the still text "Refreshing…" instead
   (`progress`); "Settings" on the right.
 - Empty states say why and what to do ([Errors and empty states](#errors-and-empty-states)): the

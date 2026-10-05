@@ -40,9 +40,6 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
 const RESTART_RETRIES: u32 = 10;
 const RESTART_RETRY_DELAY: Duration = Duration::from_millis(500);
 const REFRESH_SPINNER_LIMIT: Duration = Duration::from_secs(5);
-/// A refresh shows progress only once it has run this long: a spinner that
-/// flashes for a moment distracts more than it informs (GNOME HIG, spinners).
-const PROGRESS_DELAY: Duration = Duration::from_millis(300);
 
 /// Rows of height an empty state gets: a line saying why and one saying what to do.
 const EMPTY_ROWS: usize = 2;
@@ -489,9 +486,9 @@ impl Dashboard {
 
     /// How long the refresh in flight waits before showing progress; zero once it shows.
     fn progress_wait(&self, now: Instant) -> Duration {
-        self.refreshing.as_ref().map_or(Duration::ZERO, |r| {
-            PROGRESS_DELAY.saturating_sub(now.saturating_duration_since(r.since))
-        })
+        self.refreshing
+            .as_ref()
+            .map_or(Duration::ZERO, |r| gui::progress_wait(r.since, now))
     }
 
     fn render_footer(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
@@ -1211,16 +1208,12 @@ mod tests {
     }
 
     #[test]
-    fn progress_shows_only_after_the_delay() {
+    fn the_spinner_waits_for_the_progress_delay() {
         let mut d = dashboard(roster(), Lang::En);
         let since = Instant::now();
         let _pending = start_refresh(&mut d, since);
-        assert_eq!(d.progress_wait(since), PROGRESS_DELAY);
-        assert_eq!(
-            d.progress_wait(since + Duration::from_millis(100)),
-            Duration::from_millis(200)
-        );
-        assert_eq!(d.progress_wait(since + PROGRESS_DELAY), Duration::ZERO);
+        assert_eq!(d.progress_wait(since), gui::PROGRESS_DELAY);
+        assert_eq!(d.progress_wait(since + gui::PROGRESS_DELAY), Duration::ZERO);
         assert!(d.refresh_in_flight());
     }
 

@@ -206,8 +206,8 @@ struct SettingsApp {
     /// `Some` while a scan's result is outstanding; taken (and cleared) once
     /// `try_recv` yields something.
     scan_rx: Option<mpsc::Receiver<ScanResult>>,
-    /// True from the moment a scan is spawned until its result is applied.
-    scanning: bool,
+    /// When the scan in flight was spawned; `None` once its result is applied.
+    scanning: Option<std::time::Instant>,
     tab: Tab,
     /// `None` if the state store failed to open (see `state::open`) — the
     /// Devices tab then shows only what the current scan finds, same as
@@ -271,10 +271,10 @@ impl SettingsApp {
     /// timer, so the extra device wake-up this costs is the same one-off the
     /// user just asked for, not the continuous drain of a short poll interval.
     fn spawn_scan(&mut self, egui_ctx: egui::Context, kind: scan::Scan) {
-        if self.scanning {
+        if self.scanning.is_some() {
             return;
         }
-        self.scanning = true;
+        self.scanning = Some(std::time::Instant::now());
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
         let ctx = Arc::clone(&self.discovery_ctx);
@@ -311,7 +311,7 @@ impl SettingsApp {
             Ok(result) => self.apply_scan_result(result),
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
-                self.scanning = false;
+                self.scanning = None;
                 self.scan_rx = None;
             }
         }
@@ -332,7 +332,7 @@ impl SettingsApp {
             Err(_) => self.tray_unanswered = true,
         }
         self.device_rows = devices::merge_devices(result.records, self.discovered.clone());
-        self.scanning = false;
+        self.scanning = None;
         self.scan_rx = None;
     }
 }
@@ -595,7 +595,7 @@ pub fn run(tab: Tab) -> anyhow::Result<()> {
                 rt,
                 discovery_ctx,
                 scan_rx: None,
-                scanning: false,
+                scanning: None,
                 tab,
                 store,
                 device_rows: Vec::new(),
@@ -657,7 +657,7 @@ mod tests {
             ),
             discovery_ctx: Arc::new(crate::sources::Context::new()),
             scan_rx: None,
-            scanning: false,
+            scanning: None,
             tab: Tab::General,
             store: None,
             device_rows: Vec::new(),
@@ -840,7 +840,7 @@ mod tests {
         app.apply_scan_result(scan_result(vec![device("mouse"), device("keyboard")]));
         assert_eq!(app.config.hidden_devices, vec!["mouse".to_string()]);
         assert_eq!(app.config.device_overrides, overrides);
-        assert!(!app.scanning);
+        assert!(app.scanning.is_none());
         assert!(app.scan_rx.is_none());
     }
 

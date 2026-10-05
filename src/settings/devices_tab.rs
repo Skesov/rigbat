@@ -40,11 +40,17 @@ impl SettingsApp {
     fn render_refresh_button(&mut self, ui: &mut egui::Ui) {
         let egui_ctx = ui.ctx().clone();
         let l = loader(self.config.lang());
-        ui.add_enabled_ui(!self.scanning, |ui| {
-            let label = if self.scanning {
-                fl!(l, "button-refreshing")
-            } else {
-                fl!(l, "button-refresh")
+        let wait = self
+            .scanning
+            .map(|since| gui::progress_wait(since, std::time::Instant::now()));
+        ui.add_enabled_ui(wait.is_none(), |ui| {
+            let label = match wait {
+                Some(std::time::Duration::ZERO) => fl!(l, "button-refreshing"),
+                Some(wait) => {
+                    ui.ctx().request_repaint_after(wait);
+                    fl!(l, "button-refresh")
+                }
+                None => fl!(l, "button-refresh"),
             };
             if ui.button(label).clicked() {
                 self.spawn_scan(egui_ctx.clone(), scan::Scan::Refresh);
@@ -911,6 +917,28 @@ mod tests {
         });
         assert_eq!(opened.try_recv().ok().as_deref(), Some(PERMISSIONS_DOCS));
         assert!(PERMISSIONS_DOCS.ends_with("#permissions"));
+    }
+
+    /// "Refreshing…" replaces "Refresh" only once a scan has run `PROGRESS_DELAY`;
+    /// the button is disabled from the start.
+    #[test]
+    fn the_refresh_label_changes_only_after_the_progress_delay() {
+        let mut app = app_in(Lang::En, Config::default());
+        let label = |app: &mut SettingsApp| {
+            let painted = painted_text_at(TEST_SIZE, |ui| app.render_devices_tab(ui));
+            ["Refresh", "Refreshing…"]
+                .into_iter()
+                .find(|t| painted.iter().any(|p| p == t))
+        };
+
+        app.scanning = Some(std::time::Instant::now());
+        assert_eq!(label(&mut app), Some("Refresh"));
+
+        app.scanning = Some(std::time::Instant::now() - gui::PROGRESS_DELAY);
+        assert_eq!(label(&mut app), Some("Refreshing…"));
+
+        app.scanning = None;
+        assert_eq!(label(&mut app), Some("Refresh"));
     }
 
     /// A removal the inventory refused keeps the row and says so in the window.
