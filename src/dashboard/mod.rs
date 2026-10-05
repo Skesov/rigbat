@@ -296,6 +296,16 @@ impl Closer {
 
 const REFRESH: &str = "\u{21BB}";
 
+/// Shows the glyph, announces the word: AccessKit takes the name from the label, not the hover.
+fn refresh_button(ui: &mut egui::Ui, enabled: bool, lang: Lang) -> egui::Response {
+    let label = fl!(loader(lang), "button-refresh");
+    let response = ui
+        .add_enabled(enabled, egui::Button::new(REFRESH))
+        .on_hover_text(&label);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &label));
+    response
+}
+
 struct Dashboard {
     snapshot: Option<Snapshot>,
     received_at: BootTime,
@@ -443,11 +453,7 @@ impl Dashboard {
         let layout = egui::Layout::left_to_right(egui::Align::Center);
         let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
         if let Some((tray, rt)) = &self.tray {
-            let button = egui::Button::new(REFRESH);
-            let clicked = ui
-                .add_enabled(!in_flight, button)
-                .on_hover_text(fl!(l, "button-refresh"))
-                .clicked();
+            let clicked = refresh_button(&mut ui, !in_flight, self.lang).clicked();
             if clicked {
                 let (failed_tx, failed) = tokio::sync::oneshot::channel();
                 self.refreshing = Some(Refreshing {
@@ -864,6 +870,29 @@ mod tests {
                 rect.left() >= MARGIN && rect.right() <= MARGIN + GLYPH_COLUMN,
                 "{kind:?} leaves its column: {rect:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_refresh_button_announces_the_word_not_the_glyph() {
+        const SIZE: [f32; 2] = [200.0, 100.0];
+        for lang in Lang::ALL {
+            let ctx = egui::Context::default();
+            let mut show = |ui: &mut egui::Ui| {
+                refresh_button(ui, true, lang);
+            };
+            let output = run_frame(&ctx, SIZE, Vec::new(), &mut show);
+            let glyph = crate::egui_test::painted(&output)
+                .into_iter()
+                .find(|p| p.text == REFRESH)
+                .expect("the glyph was painted");
+            let output = crate::egui_test::click_at(&ctx, SIZE, glyph.rect.center(), &mut show);
+            let word = fl!(loader(lang), "button-refresh");
+            let announced = output.platform_output.events.iter().any(|event| {
+                let info = event.widget_info();
+                info.typ == egui::WidgetType::Button && info.label.as_deref() == Some(word.as_str())
+            });
+            assert!(announced, "{lang:?}: {:?}", output.platform_output.events);
         }
     }
 
