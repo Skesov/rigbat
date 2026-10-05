@@ -157,7 +157,7 @@ pub async fn run(mut rx: watch::Receiver<TrayState>, mut cfg_rx: watch::Receiver
     .await;
 
     let mut last_line: Option<String> = None;
-    // The tooltip's "last reading 2h ago" ages with nothing published.
+    // The tooltip's "last reading 2 h ago" ages with nothing published.
     let mut age_tick = interval_at(Instant::now() + AGE_STEP, AGE_STEP);
     age_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(value["class"], "ok");
         assert_eq!(value["percentage"], 88);
         let tooltip = value["tooltip"].as_str().expect("tooltip is a string");
-        assert_eq!(tooltip, "mouse: unreachable · last reading 5m ago");
+        assert_eq!(tooltip, "mouse: unreachable · last reading 5\u{a0}min ago");
     }
 
     #[test]
@@ -320,7 +320,7 @@ mod tests {
             lines,
             [
                 "mouse: ⚡ 80%",
-                "keyboard: unreachable · last reading 5m ago"
+                "keyboard: unreachable · last reading 5\u{a0}min ago"
             ]
         );
     }

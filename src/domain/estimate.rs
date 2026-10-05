@@ -91,8 +91,8 @@ fn round_coarse(d: Duration) -> Duration {
     }
 }
 
-/// Formats a coarsely-rounded duration as `~2h` or `~45m` (`~2 ч`, `~45 мин`),
-/// or as `>4d` (`>4 д`) past `MAX_SHOWN_DAYS`.
+/// Formats a coarsely-rounded duration as `~2 h` or `~45 min` (`~2 часа`, `~45 минут`),
+/// or as `>4 d` (`>4 дней`) past `MAX_SHOWN_DAYS`.
 pub fn format_coarse(d: Duration, lang: Lang) -> String {
     let l = loader(lang);
     let secs = round_coarse(d).as_secs();
@@ -220,32 +220,53 @@ mod tests {
 
     #[test]
     fn round_coarse_boundaries() {
-        assert_eq!(format_coarse(Duration::from_secs(59 * 60), Lang::En), "~1h");
-        assert_eq!(format_coarse(Duration::from_secs(61 * 60), Lang::En), "~1h");
-        assert_eq!(format_coarse(25 * HOUR, Lang::En), "~25h");
+        assert_eq!(
+            format_coarse(Duration::from_secs(59 * 60), Lang::En),
+            "~1\u{a0}h"
+        );
+        assert_eq!(
+            format_coarse(Duration::from_secs(61 * 60), Lang::En),
+            "~1\u{a0}h"
+        );
+        assert_eq!(format_coarse(25 * HOUR, Lang::En), "~25\u{a0}h");
     }
 
     #[test]
     fn round_coarse_under_an_hour_rounds_to_nearest_quarter() {
-        assert_eq!(format_coarse(Duration::from_secs(5 * 60), Lang::En), "~15m");
+        assert_eq!(
+            format_coarse(Duration::from_secs(5 * 60), Lang::En),
+            "~15\u{a0}min"
+        );
         assert_eq!(
             format_coarse(Duration::from_secs(44 * 60), Lang::En),
-            "~45m"
+            "~45\u{a0}min"
         );
     }
 
     #[test]
     fn format_coarse_in_russian() {
         let ru = |d| format_coarse(d, Lang::Ru);
-        assert_eq!(ru(Duration::from_secs(44 * 60)), "~45 мин");
-        assert_eq!(ru(25 * HOUR), "~25 ч");
+        assert_eq!(ru(Duration::from_secs(44 * 60)), "~45\u{a0}минут");
+        assert_eq!(ru(25 * HOUR), "~25\u{a0}часов");
+        for (hours, expected) in [
+            (1, "~1\u{a0}час"),
+            (2, "~2\u{a0}часа"),
+            (5, "~5\u{a0}часов"),
+            (21, "~21\u{a0}час"),
+        ] {
+            assert_eq!(ru(hours * HOUR), expected);
+        }
+        let l = loader(Lang::Ru);
+        assert_eq!(fl!(l, "estimate-hours", count = 0), "~0\u{a0}часов");
+        assert_eq!(fl!(l, "estimate-over-days", count = 1), ">1\u{a0}дня");
+        assert_eq!(fl!(l, "estimate-over-days", count = 21), ">21\u{a0}дня");
     }
 
     #[test]
     fn format_coarse_caps_at_four_days_in_both_languages() {
-        assert_eq!(format_coarse(96 * HOUR, Lang::En), "~96h");
-        assert_eq!(format_coarse(97 * HOUR, Lang::En), ">4d");
-        assert_eq!(format_coarse(300 * HOUR, Lang::En), ">4d");
-        assert_eq!(format_coarse(300 * HOUR, Lang::Ru), ">4 д");
+        assert_eq!(format_coarse(96 * HOUR, Lang::En), "~96\u{a0}h");
+        assert_eq!(format_coarse(97 * HOUR, Lang::En), ">4\u{a0}d");
+        assert_eq!(format_coarse(300 * HOUR, Lang::En), ">4\u{a0}d");
+        assert_eq!(format_coarse(300 * HOUR, Lang::Ru), ">4\u{a0}дней");
     }
 }

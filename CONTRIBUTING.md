@@ -204,7 +204,9 @@ The tray menu, the settings window and the low-battery notification read their t
 Fluent catalogues in `i18n/<lang>/rigbat.ftl`; the CLI stays English.
 
 1. Copy `i18n/en/rigbat.ftl` to `i18n/<lang>/rigbat.ftl` and translate the values. Keep message
-   ids and `{ $placeholders }` unchanged.
+   ids and `{ $placeholders }` unchanged. A count next to a word takes a Fluent selector over
+   the language's CLDR plural categories (see `age-minutes` in `i18n/ru`), never a plural built
+   in code; a number and its unit are joined by `{" "}` (no-break space).
 2. Add the language to `Lang` in `src/i18n/mod.rs` (`ALL`, `tag`, `native_name`, `from_tag`,
    `id`, `loader`).
 3. Run `cargo test`. `i18n::tests` fails on a missing or extra message, and

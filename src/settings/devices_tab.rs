@@ -910,7 +910,7 @@ mod tests {
         let combo = text_rects(&output, &interval_label(60, Lang::En))[0];
         click_at(&ctx, size, combo.center(), |ui| app.render_devices_tab(ui));
         let output = run_frame(&ctx, size, Vec::new(), |ui| app.render_devices_tab(ui));
-        let choice = *text_rects(&output, "5 min")
+        let choice = *text_rects(&output, "5\u{a0}min")
             .last()
             .expect("the list opened");
         click_at(&ctx, size, choice.center(), |ui| app.render_devices_tab(ui));

@@ -184,6 +184,31 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
     }
 
+    /// The windows draw catalogue text in egui's bundled fonts, which have no U+202F, so a
+    /// unit is joined by U+00A0 instead; a character outside them would paint as "◻".
+    #[test]
+    fn every_catalogue_character_is_in_the_bundled_fonts() {
+        let ctx = egui::Context::default();
+        run_pass(&ctx);
+        let font = egui::TextStyle::Body.resolve(&ctx.global_style());
+        let catalogues = [
+            include_str!("../../i18n/en/rigbat.ftl"),
+            include_str!("../../i18n/ru/rigbat.ftl"),
+        ];
+        let text: String = catalogues
+            .iter()
+            .flat_map(|source| source.lines())
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .chain(["\u{a0}"])
+            .collect();
+        ctx.fonts_mut(|fonts| {
+            for c in text.chars() {
+                assert!(fonts.has_glyph(&font, c), "{c:?} (U+{:04X})", u32::from(c));
+            }
+            assert!(!fonts.has_glyph(&font, '\u{202f}'));
+        });
+    }
+
     #[test]
     fn apply_sets_theme_zoom_and_accent_in_both_styles() {
         let ctx = egui::Context::default();

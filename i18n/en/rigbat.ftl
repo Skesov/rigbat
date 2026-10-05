@@ -15,14 +15,15 @@ state-charging = charging
 state-discharging = discharging
 state-full = full
 
+# A number and its unit are joined by a no-break space (U+00A0), so they never part.
 age-just-now = just now
-age-minutes = { $count }m ago
-age-hours = { $count }h ago
-age-days = { $count }d ago
+age-minutes = { $count }{" "}min ago
+age-hours = { $count }{" "}h ago
+age-days = { $count }{" "}d ago
 
-estimate-minutes = ~{ $count }m
-estimate-hours = ~{ $count }h
-estimate-over-days = >{ $count }d
+estimate-minutes = ~{ $count }{" "}min
+estimate-hours = ~{ $count }{" "}h
+estimate-over-days = >{ $count }{" "}d
 
 note-last-reading = last reading { $age }
 note-no-access = run rigbat doctor
@@ -64,10 +65,10 @@ button-clear = Clear
 group-battery = Battery
 default-low-threshold = Low battery threshold
 default-poll-interval = Check every
-poll-interval-hint = Checking more often drains the device's battery.
-interval-seconds = { $count } s
-interval-minutes = { $count } min
-interval-hours = { $count } h
+poll-interval-hint = Checking more often drains the device’s battery.
+interval-seconds = { $count }{" "}s
+interval-minutes = { $count }{" "}min
+interval-hours = { $count }{" "}h
 defaults-hint = Applies to every device that has no setting of its own. To change one device, open it on the Devices tab.
 
 notifications-enabled = Low battery notifications

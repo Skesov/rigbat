@@ -1,4 +1,5 @@
-# Russian. Units are abbreviated, so no plural forms are needed.
+# Russian. A count next to a word takes the CLDR plural forms one/few/many; a number and its
+# unit are joined by a no-break space (U+00A0).
 
 ## Tray menu and tooltip
 
@@ -16,13 +17,36 @@ state-discharging = разряжается
 state-full = заряжено
 
 age-just-now = только что
-age-minutes = { $count } мин назад
-age-hours = { $count } ч назад
-age-days = { $count } д назад
+age-minutes = { $count }{" "}{ $count ->
+        [one] минуту
+        [few] минуты
+       *[many] минут
+    } назад
+age-hours = { $count }{" "}{ $count ->
+        [one] час
+        [few] часа
+       *[many] часов
+    } назад
+age-days = { $count }{" "}{ $count ->
+        [one] день
+        [few] дня
+       *[many] дней
+    } назад
 
-estimate-minutes = ~{ $count } мин
-estimate-hours = ~{ $count } ч
-estimate-over-days = >{ $count } д
+estimate-minutes = ~{ $count }{" "}{ $count ->
+        [one] минута
+        [few] минуты
+       *[many] минут
+    }
+estimate-hours = ~{ $count }{" "}{ $count ->
+        [one] час
+        [few] часа
+       *[many] часов
+    }
+estimate-over-days = >{ $count }{" "}{ $count ->
+        [one] дня
+       *[other] дней
+    }
 
 note-last-reading = последние данные { $age }
 note-no-access = запустите rigbat doctor
@@ -65,9 +89,10 @@ group-battery = Батарея
 default-low-threshold = Порог низкого заряда
 default-poll-interval = Опрашивать каждые
 poll-interval-hint = Более частый опрос быстрее расходует заряд устройства.
-interval-seconds = { $count } с
-interval-minutes = { $count } мин
-interval-hours = { $count } ч
+# Abbreviated: the value follows «каждые» and «через», where a spelled-out «1 минута» would not agree.
+interval-seconds = { $count }{" "}с
+interval-minutes = { $count }{" "}мин
+interval-hours = { $count }{" "}ч
 defaults-hint = Действует для всех устройств без собственных настроек. Чтобы настроить одно устройство, откройте его на вкладке «Устройства».
 
 notifications-enabled = Уведомлять о низком заряде

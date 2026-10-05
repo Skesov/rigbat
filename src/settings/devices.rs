@@ -180,7 +180,7 @@ pub fn remove_row(rows: &mut Vec<DeviceRow>, store_id: i64) {
     rows.retain(|r| r.store_id != Some(store_id));
 }
 
-/// Formats a unix-seconds timestamp as a relative age ("3d ago"), relative
+/// Formats a unix-seconds timestamp as a relative age ("3 d ago"), relative
 /// to `now` (also unix seconds). Reuses
 /// `domain::format_age`, which already renders this exact vocabulary for
 /// retained readings, instead of a second implementation.
@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn relative_label_matches_format_age() {
         assert_eq!(relative_label(1000, 1000, Lang::En), "just now");
-        assert_eq!(relative_label(1000 + 3600, 1000, Lang::En), "1h ago");
+        assert_eq!(relative_label(1000 + 3600, 1000, Lang::En), "1\u{a0}h ago");
     }
 
     #[test]

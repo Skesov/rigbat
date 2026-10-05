@@ -162,7 +162,7 @@ minute, and a worker per core only adds idle wakeups. `TOKIO_WORKER_THREADS` sti
 - **Presence and retention**: each device carries a `Presence`
   (`Online`/`Unreachable`/`Disconnected`/`NoAccess`) alongside its last reading. A source that starts
   erroring flips to `Unreachable` without discarding that reading, so consumers can render
-  "unreachable · last reading 2h ago" instead of losing the value; `Disconnected` is reserved for a device
+  "unreachable · last reading 2 h ago" instead of losing the value; `Disconnected` is reserved for a device
   reconcile no longer sees at all; such an entry is pruned from the roster once it has been gone
   for `DISCONNECTED_RETENTION` (24 h), or immediately if it never produced a reading. A source
   whose open fails with a permission error returns the typed `sources::AccessDenied`; the device
@@ -198,7 +198,7 @@ minute, and a worker per core only adds idle wakeups. `TOKIO_WORKER_THREADS` sti
   the last, never from the first observation, which only says when a level was first seen. A rise
   or a drop above 5 % restarts the window at that edge instead of disabling the estimate. Fewer
   than two edges or under 30 min between them is no estimate. The tray menu and the dashboard
-  render it via `format_coarse` ("~3h"), capped at ">4d" (">4 д") — beyond that the evidence is a
+  render it via `format_coarse` ("~3 h"), capped at ">4 d" (">4 дней") — beyond that the evidence is a
   handful of edges days apart.
 - **Clock**: reading times, ages and the estimate use `domain::BootTime`, read from
   `CLOCK_BOOTTIME` by `clock::now`. Unlike `Instant` (`CLOCK_MONOTONIC`) it counts suspend, so a
@@ -218,7 +218,7 @@ Waybar:    main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶
            bluez Connected / interfaces (debounced) ──rediscover──────▶ Supervisor (re-discover)
            bluez Battery1.Percentage ──BluezSource::pushed──▶ that device's task (one reading)
            config file watch ──watch<Config>──▶ loop (live primary_device/hidden_devices)
-           AGE_STEP tick (60 s) ──▶ loop re-renders; "(2h ago)" ages with nothing published
+           AGE_STEP tick (60 s) ──▶ loop re-renders; "2 h ago" ages with nothing published
 
 Tray:      main → Supervisor::spawn(config_rx) ──watch<TrayState>──▶ tray::manager::run
                                                                     │ reconciles ksni items, updates

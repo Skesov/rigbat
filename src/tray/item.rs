@@ -71,7 +71,7 @@ pub struct RigbatTray {
     pub refresh: RefreshSignal,
 }
 
-/// Everything one icon shows. Text that ages ("2h ago") is part of it, so a
+/// Everything one icon shows. Text that ages ("2 h ago") is part of it, so a
 /// view computed later can differ from an earlier one for the same state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct View {
@@ -527,10 +527,10 @@ mod tests {
                 "[x] Automatic",
                 "[ ] Aerox: ⚠ 15% #input-mouse",
                 "[ ] Ear: ⚡ 40% #audio-headset",
-                "[ ] MX__Master: 62% · ~3h left #input-mouse",
+                "[ ] MX__Master: 62% · ~3\u{a0}h left #input-mouse",
                 "[ ] Pad: 100% · full #input-gaming",
                 "[ ] mouse: no access · run rigbat doctor #input-mouse",
-                "[ ] NuPhy: unreachable · last reading 1h ago #input-keyboard",
+                "[ ] NuPhy: unreachable · last reading 1\u{a0}h ago #input-keyboard",
             ])
         );
     }
@@ -582,10 +582,10 @@ mod tests {
             with_tail(&[
                 "Aerox: ⚠ 15% #input-mouse",
                 "Ear: ⚡ 40% #audio-headset",
-                "MX__Master: 62% · ~3h left #input-mouse",
+                "MX__Master: 62% · ~3\u{a0}h left #input-mouse",
                 "Pad: 100% · full #input-gaming",
                 "mouse: no access · run rigbat doctor #input-mouse",
-                "NuPhy: unreachable · last reading 1h ago #input-keyboard",
+                "NuPhy: unreachable · last reading 1\u{a0}h ago #input-keyboard",
             ])
         );
     }
@@ -663,7 +663,7 @@ mod tests {
         rerender(&mut tray, &state);
         assert_eq!(tray.title(), "Ear");
 
-        click(&mut tray, "MX__Master: 62% · ~3h left");
+        click(&mut tray, "MX__Master: 62% · ~3\u{a0}h left");
         assert_eq!(
             tray.config.borrow().primary_device.as_deref(),
             Some("MX_Master")

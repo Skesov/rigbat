@@ -234,47 +234,70 @@ mod tests {
 
     #[test]
     fn format_age_minutes() {
-        assert_eq!(format_age(Duration::from_secs(60), Lang::En), "1m ago");
+        assert_eq!(
+            format_age(Duration::from_secs(60), Lang::En),
+            "1\u{a0}min ago"
+        );
         assert_eq!(
             format_age(Duration::from_secs(59 * 60), Lang::En),
-            "59m ago"
+            "59\u{a0}min ago"
         );
     }
 
     #[test]
     fn format_age_hours() {
-        assert_eq!(format_age(Duration::from_secs(3600), Lang::En), "1h ago");
+        assert_eq!(
+            format_age(Duration::from_secs(3600), Lang::En),
+            "1\u{a0}h ago"
+        );
         assert_eq!(
             format_age(Duration::from_secs(23 * 3600), Lang::En),
-            "23h ago"
+            "23\u{a0}h ago"
         );
     }
 
     #[test]
     fn format_age_days() {
-        assert_eq!(format_age(Duration::from_secs(86400), Lang::En), "1d ago");
+        assert_eq!(
+            format_age(Duration::from_secs(86400), Lang::En),
+            "1\u{a0}d ago"
+        );
         assert_eq!(
             format_age(Duration::from_secs(3 * 86400), Lang::En),
-            "3d ago"
+            "3\u{a0}d ago"
         );
     }
 
     // --- Russian ------------------------------------------------------------
+
     #[test]
-    fn russian_ages_use_abbreviated_units() {
-        assert_eq!(format_age(Duration::from_secs(5), Lang::Ru), "только что");
-        assert_eq!(
-            format_age(Duration::from_secs(5 * 60), Lang::Ru),
-            "5 мин назад"
-        );
-        assert_eq!(
-            format_age(Duration::from_secs(21 * 3600), Lang::Ru),
-            "21 ч назад"
-        );
-        assert_eq!(
-            format_age(Duration::from_secs(3 * 86400), Lang::Ru),
-            "3 д назад"
-        );
+    fn russian_ages_take_the_plural_form_of_their_count() {
+        let age = |secs| format_age(Duration::from_secs(secs), Lang::Ru);
+        assert_eq!(age(5), "только что");
+        for (count, minutes, hours, days) in [
+            (1, "1\u{a0}минуту", "1\u{a0}час", "1\u{a0}день"),
+            (2, "2\u{a0}минуты", "2\u{a0}часа", "2\u{a0}дня"),
+            (5, "5\u{a0}минут", "5\u{a0}часов", "5\u{a0}дней"),
+            (21, "21\u{a0}минуту", "21\u{a0}час", "21\u{a0}день"),
+        ] {
+            assert_eq!(age(count * 60), format!("{minutes} назад"));
+            assert_eq!(age(count * 3600), format!("{hours} назад"));
+            assert_eq!(age(count * 86400), format!("{days} назад"));
+        }
+        let l = loader(Lang::Ru);
+        assert_eq!(fl!(l, "age-minutes", count = 0), "0\u{a0}минут назад");
+        assert_eq!(fl!(l, "age-days", count = 0), "0\u{a0}дней назад");
+    }
+
+    #[test]
+    fn a_number_never_parts_from_its_unit() {
+        for lang in Lang::ALL {
+            for secs in [90, 2 * 3600, 3 * 86400] {
+                let age = format_age(Duration::from_secs(secs), lang);
+                let (number, _) = age.split_once('\u{a0}').expect("number, NBSP, unit");
+                assert!(number.chars().all(|c| c.is_ascii_digit()), "{age:?}");
+            }
+        }
     }
 
     // --- device_line ---------------------------------------------------------
@@ -338,13 +361,13 @@ mod tests {
             ),
             (
                 state("NuPhy", Presence::Unreachable, discharging, Some(seen)),
-                "NuPhy: unreachable · last reading 2h ago",
-                "NuPhy: недоступно · последние данные 2 ч назад",
+                "NuPhy: unreachable · last reading 2\u{a0}h ago",
+                "NuPhy: недоступно · последние данные 2\u{a0}часа назад",
             ),
             (
                 state("NuPhy", Presence::Disconnected, discharging, Some(seen)),
-                "NuPhy: disconnected · last reading 2h ago",
-                "NuPhy: отключено · последние данные 2 ч назад",
+                "NuPhy: disconnected · last reading 2\u{a0}h ago",
+                "NuPhy: отключено · последние данные 2\u{a0}часа назад",
             ),
             (
                 state("pad", Presence::Disconnected, None, None),
@@ -362,7 +385,7 @@ mod tests {
             assert_eq!(line(&device, now, Lang::Ru), ru);
         }
         let estimate = line(&estimate, BootTime::TEST_NOW, Lang::En);
-        assert_eq!(estimate, "MX Anywhere 3: 62% · ~7h left");
+        assert_eq!(estimate, "MX Anywhere 3: 62% · ~7\u{a0}h left");
     }
 
     #[test]
@@ -417,7 +440,7 @@ mod tests {
             (
                 Lang::En,
                 device_line(&unreachable, offline, now, Lang::En),
-                "NuPhy: unreachable · last reading 2h ago",
+                "NuPhy: unreachable · last reading 2\u{a0}h ago",
             ),
             (
                 Lang::Ru,
@@ -427,7 +450,7 @@ mod tests {
             (
                 Lang::Ru,
                 device_line(&unreachable, low, now, Lang::Ru),
-                "NuPhy: \u{26A0} недоступно · последние данные 2 ч назад",
+                "NuPhy: \u{26A0} недоступно · последние данные 2\u{a0}часа назад",
             ),
         ] {
             assert_eq!(text, expected, "{lang:?}");

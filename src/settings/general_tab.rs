@@ -571,11 +571,18 @@ mod tests {
         assert_eq!(
             en,
             [
-                "30 s", "45 s", "1 min", "90 s", "2 min", "15 min", "1 h", "2 h"
+                "30\u{a0}s",
+                "45\u{a0}s",
+                "1\u{a0}min",
+                "90\u{a0}s",
+                "2\u{a0}min",
+                "15\u{a0}min",
+                "1\u{a0}h",
+                "2\u{a0}h"
             ]
         );
-        assert_eq!(interval_label(300, Lang::Ru), "5 мин");
-        assert_eq!(interval_label(3600, Lang::Ru), "1 ч");
+        assert_eq!(interval_label(300, Lang::Ru), "5\u{a0}мин");
+        assert_eq!(interval_label(3600, Lang::Ru), "1\u{a0}ч");
     }
 
     #[test]
@@ -601,7 +608,7 @@ mod tests {
         });
         let painted = fully_painted_text_at(GENERAL_TAB_TEST_SIZE, |ui| app.render_general_tab(ui));
 
-        assert!(painted.iter().any(|p| p.text == "45 s"), "{painted:?}");
+        assert!(painted.iter().any(|p| p.text == "45\u{a0}s"), "{painted:?}");
         assert_eq!(app.config.poll_interval_secs, 45);
     }
 
@@ -613,7 +620,17 @@ mod tests {
         assert_eq!(presets.first(), Some(&OFFLINE_SHELF_LIFE_MIN));
         assert_eq!(presets.last(), Some(&OFFLINE_SHELF_LIFE_MAX));
         let en = HIDE_OFFLINE_PRESETS.map(|secs| interval_label(secs, Lang::En));
-        assert_eq!(en, ["30 min", "1 h", "2 h", "6 h", "12 h", "24 h"]);
+        assert_eq!(
+            en,
+            [
+                "30\u{a0}min",
+                "1\u{a0}h",
+                "2\u{a0}h",
+                "6\u{a0}h",
+                "12\u{a0}h",
+                "24\u{a0}h"
+            ]
+        );
     }
 
     #[test]
@@ -630,10 +647,10 @@ mod tests {
         };
 
         let output = run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
-        let combo = rect_of(&output, "2 h");
+        let combo = rect_of(&output, "2\u{a0}h");
         click_at(&ctx, size, combo.center(), |ui| app.render_general_tab(ui));
         let output = run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
-        let choice = rect_of(&output, "6 h");
+        let choice = rect_of(&output, "6\u{a0}h");
         click_at(&ctx, size, choice.center(), |ui| app.render_general_tab(ui));
 
         assert_eq!(config::load_from(&path).hide_offline_after_mins, 360);
