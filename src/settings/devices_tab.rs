@@ -931,7 +931,8 @@ mod tests {
                 .find(|t| painted.iter().any(|p| p == t))
         };
 
-        app.scanning = Some(std::time::Instant::now());
+        // Started in the future: a slow runner cannot use up the delay mid-render.
+        app.scanning = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
         assert_eq!(label(&mut app), Some("Refresh"));
 
         app.scanning = Some(std::time::Instant::now() - gui::PROGRESS_DELAY);
