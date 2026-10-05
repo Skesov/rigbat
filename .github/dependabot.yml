@@ -29,11 +29,16 @@ updates:
     # — two egui versions in one graph. `egui_extras` is pinned to eframe's
     # exact egui build by hand, so the two only move together, and which
     # version matches is something a human reads off eframe's release notes.
+    # skrifa likewise follows epaint's pin: a newer one builds, but ships a second
+    # copy of skrifa, read-fonts and font-types beside egui's.
     ignore:
       - dependency-name: "eframe"
         update-types:
           ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "egui_extras"
+        update-types:
+          ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "skrifa"
         update-types:
           ["version-update:semver-major", "version-update:semver-minor"]
 
