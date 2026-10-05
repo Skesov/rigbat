@@ -176,6 +176,23 @@ mod tests {
     }
 
     #[test]
+    fn a_window_title_is_the_menu_item_that_opens_it() {
+        for lang in Lang::ALL {
+            let l = loader(lang);
+            for (title, item) in [
+                ("settings-title", "tray-settings"),
+                ("dashboard-title", "tray-dashboard"),
+            ] {
+                assert_eq!(
+                    l.get(title),
+                    format!("rigbat — {}", l.get(item)),
+                    "{lang:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn removal_uses_one_verb_in_every_language() {
         for lang in Lang::ALL {
             let l = loader(lang);

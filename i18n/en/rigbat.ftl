@@ -49,7 +49,7 @@ tab-appearance = Appearance
 tab-devices = Devices
 button-refresh = Refresh
 button-refreshing = Refreshing…
-settings-title = rigbat — settings
+settings-title = rigbat — Settings
 
 ## Settings window: General tab
 
@@ -139,6 +139,6 @@ button-cancel = Cancel
 
 ## Dashboard (left click on the tray icon)
 
-dashboard-title = rigbat — device overview
+dashboard-title = rigbat — Device overview
 dashboard-tray-not-running = The rigbat tray is not running.
 dashboard-in-tray = in tray

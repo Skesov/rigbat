@@ -72,7 +72,7 @@ tab-appearance = Оформление
 tab-devices = Устройства
 button-refresh = Обновить
 button-refreshing = Обновление…
-settings-title = rigbat — настройки
+settings-title = rigbat — Настройки
 
 ## Settings window: General tab
 
@@ -162,6 +162,6 @@ button-cancel = Отмена
 
 ## Dashboard (left click on the tray icon)
 
-dashboard-title = rigbat — обзор устройств
+dashboard-title = rigbat — Обзор устройств
 dashboard-tray-not-running = Трей rigbat не запущен.
 dashboard-in-tray = в трее
