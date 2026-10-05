@@ -5,7 +5,7 @@ use eframe::egui;
 
 use super::devices::{self, DeleteCell, DeleteState, DeviceRow, Dismissible, EscapeAction};
 use super::general_tab::{interval_combo, interval_label, threshold_slider};
-use super::{SettingsApp, Tab, open_uri, scan, widgets};
+use super::{ActionProblem, SettingsApp, Tab, open_uri, scan, widgets};
 use crate::config::DeviceSettings;
 use crate::domain::{
     DeviceId, INSTALL_UDEV_RULE, Presence, PrimaryStatus, TrayMode, charge_value, classify,
@@ -437,11 +437,25 @@ impl SettingsApp {
     /// user-confirmed click, not the per-frame inventory read `spawn_scan`
     /// keeps off the UI thread.
     fn delete_device(&mut self, store_id: i64, device: &DeviceId) {
+        let deleted = match &self.store {
+            Some(store) => store.delete_device_blocking(store_id),
+            None => Ok(()),
+        };
+        self.finish_delete(store_id, device, deleted);
+    }
+
+    /// Forgets the device once the inventory dropped it; says so in the window when it did not.
+    fn finish_delete(&mut self, store_id: i64, device: &DeviceId, deleted: anyhow::Result<()>) {
         let name = device.name.as_str();
-        if let Some(store) = &self.store
-            && let Err(e) = store.delete_device_blocking(store_id)
-        {
-            tracing::error!("failed to delete device {name:?} from inventory: {e}");
+        if matches!(self.action_problem, Some(ActionProblem::Remove { .. })) {
+            self.action_problem = None;
+        }
+        if let Err(e) = deleted {
+            tracing::error!("failed to delete device {name:?} from inventory: {e:#}");
+            self.action_problem = Some(ActionProblem::Remove {
+                name: name.to_owned(),
+                detail: format!("{e:#}"),
+            });
             self.delete_state = DeleteState::Idle;
             return;
         }
@@ -897,6 +911,35 @@ mod tests {
         });
         assert_eq!(opened.try_recv().ok().as_deref(), Some(PERMISSIONS_DOCS));
         assert!(PERMISSIONS_DOCS.ends_with("#permissions"));
+    }
+
+    /// A removal the inventory refused keeps the row and says so in the window.
+    #[test]
+    fn a_failed_removal_is_shown_in_every_language() {
+        for lang in Lang::ALL {
+            let mut app = app_in(lang, Config::default());
+            let row = keyboard();
+            app.expanded_device = Some(row.device.clone());
+            app.delete_state = DeleteState::Confirming(1);
+            app.finish_delete(1, &row.device, Err(anyhow::anyhow!("database is locked")));
+
+            assert_eq!(app.delete_state, DeleteState::Idle);
+            assert!(app.device_rows.iter().any(|r| r.device == row.device));
+            let painted = fully_painted_text_at(TEST_SIZE, |ui| {
+                app.render_problems(ui);
+                app.render_devices_tab(ui);
+            });
+            let l = loader(lang);
+            let expected = [
+                fl!(l, "problem-remove", name = row.device.name.as_str()),
+                l.get("problem-remove-fix"),
+                "database is locked".to_owned(),
+            ];
+            assert_whole(&painted, &expected, &format!("{lang:?}"));
+
+            app.finish_delete(1, &row.device, Ok(()));
+            assert_eq!(app.action_problem, None);
+        }
     }
 
     /// Kind, transport and the last-seen date are painted in the open row, not

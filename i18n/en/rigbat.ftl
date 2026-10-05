@@ -56,6 +56,11 @@ config-not-saved = Changes are not saved
 config-unreadable = { $path } does not read, so rigbat will not write over it. Fix the file or remove it.
 config-unwritable = Check that { $dir } exists and is writable.
 config-no-dir = No home directory was found to keep the settings in.
+problem-autostart-on = Start with session was not turned on
+problem-autostart-off = Start with session was not turned off
+problem-autostart-fix = Check that { $dir } exists and is writable, then try again.
+problem-remove = { $name } was not removed
+problem-remove-fix = Its history could not be deleted. Try again; rigbat doctor checks the state database.
 
 ## Settings window: General tab
 

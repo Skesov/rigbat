@@ -144,8 +144,45 @@ impl SaveProblem {
     }
 }
 
+/// An action the user asked for that did not happen; a banner until the same
+/// action succeeds.
+#[derive(Debug, Clone, PartialEq)]
+enum ActionProblem {
+    Autostart { on: bool, detail: String },
+    Remove { name: String, detail: String },
+}
+
+impl ActionProblem {
+    /// What did not happen, what to do, and the technical detail.
+    fn text(&self, lang: Lang) -> (String, String, &str) {
+        let l = loader(lang);
+        match self {
+            Self::Autostart { on, detail } => {
+                let title = if *on {
+                    fl!(l, "problem-autostart-on")
+                } else {
+                    fl!(l, "problem-autostart-off")
+                };
+                let dir = autostart::desktop_path()
+                    .and_then(|p| p.parent().map(|d| d.display().to_string()))
+                    .unwrap_or_else(|| "~/.config/autostart".to_owned());
+                (title, fl!(l, "problem-autostart-fix", dir = dir), detail)
+            }
+            Self::Remove { name, detail } => (
+                fl!(l, "problem-remove", name = name.as_str()),
+                fl!(l, "problem-remove-fix"),
+                detail,
+            ),
+        }
+    }
+}
+
 struct SettingsApp {
     config: Config,
+    /// Shown above every tab while set.
+    action_problem: Option<ActionProblem>,
+    /// Writes or removes the autostart entry; a parameter so tests touch no real file.
+    set_autostart: fn(bool) -> anyhow::Result<()>,
     /// `None` when there is no home directory; every save then fails.
     config_path: Option<PathBuf>,
     /// Shown above every tab while set.
@@ -312,7 +349,7 @@ impl eframe::App for SettingsApp {
         frame.show(ui, |ui| {
             self.render_tab_bar(ui);
             ui.add_space(widgets::TAB_BAR_GAP);
-            self.render_save_problem(ui);
+            self.render_problems(ui);
             match self.tab {
                 Tab::General => self.render_general_tab(ui),
                 Tab::Appearance => self.render_appearance_tab(ui),
@@ -337,21 +374,28 @@ impl SettingsApp {
             .send_if_modified(|current| std::mem::replace(current, theme) != theme);
     }
 
-    fn render_save_problem(&self, ui: &mut egui::Ui) {
-        let Some(problem) = &self.save_problem else {
-            return;
-        };
+    /// The save problem and the failed action, if any, as banners.
+    fn render_problems(&self, ui: &mut egui::Ui) {
         let lang = self.config.lang();
-        let (text, detail) = problem.text(lang);
-        let title = fl!(loader(lang), "config-not-saved");
         let warn =
             gui::status_colors(ui.visuals(), self.config.palette, gui::targets(ui.ctx())).low;
-        widgets::banner(ui, &title, warn, |ui| {
-            ui.label(&text);
-            if let Some(detail) = detail {
+        if let Some(problem) = &self.save_problem {
+            let (text, detail) = problem.text(lang);
+            let title = fl!(loader(lang), "config-not-saved");
+            widgets::banner(ui, &title, warn, |ui| {
+                ui.label(&text);
+                if let Some(detail) = detail {
+                    ui.label(widgets::secondary(ui, detail));
+                }
+            });
+        }
+        if let Some(problem) = &self.action_problem {
+            let (title, text, detail) = problem.text(lang);
+            widgets::banner(ui, &title, warn, |ui| {
+                ui.label(&text);
                 ui.label(widgets::secondary(ui, detail));
-            }
-        });
+            });
+        }
     }
 
     fn render_tab_bar(&mut self, ui: &mut egui::Ui) {
@@ -540,6 +584,8 @@ pub fn run(tab: Tab) -> anyhow::Result<()> {
             let config_path = config::config_path();
             let mut app = SettingsApp {
                 config,
+                action_problem: None,
+                set_autostart: autostart::set_enabled,
                 save_problem: SaveProblem::at_open(config_path.as_deref()),
                 config_path,
                 discovered: Vec::new(),
@@ -596,6 +642,8 @@ mod tests {
         let theme = tokio::sync::watch::Sender::new(config.theme);
         SettingsApp {
             config,
+            action_problem: None,
+            set_autostart: |_| Ok(()),
             config_path: None,
             save_problem: None,
             discovered: Vec::new(),

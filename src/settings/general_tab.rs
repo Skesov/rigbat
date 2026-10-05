@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use super::{LOW_THRESHOLD_RANGE, SettingsApp, open_uri, scan, widgets};
+use super::{ActionProblem, LOW_THRESHOLD_RANGE, SettingsApp, open_uri, scan, widgets};
 use crate::autostart;
 use crate::domain::TrayMode;
 use crate::domain::version::Build;
@@ -203,10 +203,19 @@ impl SettingsApp {
         if !toggled {
             return;
         }
-        if let Err(e) = autostart::set_enabled(self.autostart_enabled) {
-            tracing::warn!("failed to update autostart: {e}");
+        let on = self.autostart_enabled;
+        let result = (self.set_autostart)(on);
+        if matches!(self.action_problem, Some(ActionProblem::Autostart { .. })) {
+            self.action_problem = None;
+        }
+        if let Err(e) = result {
+            tracing::warn!("failed to update autostart: {e:#}");
+            self.action_problem = Some(ActionProblem::Autostart {
+                on,
+                detail: format!("{e:#}"),
+            });
             // Revert the switch so it reflects the real filesystem state.
-            self.autostart_enabled = !self.autostart_enabled;
+            self.autostart_enabled = !on;
         } else if self.autostart_enabled {
             self.rt.spawn(async {
                 let started = match zbus::Connection::session().await {
@@ -514,7 +523,7 @@ mod tests {
     }
 
     fn frame(app: &mut SettingsApp, ui: &mut egui::Ui) {
-        app.render_save_problem(ui);
+        app.render_problems(ui);
         app.render_general_tab(ui);
     }
 
@@ -586,6 +595,49 @@ mod tests {
         assert_eq!(SaveProblem::at_open(Some(&path)), None);
         assert_eq!(SaveProblem::at_open(None), Some(SaveProblem::NoConfigDir));
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// A switch that could not write the autostart entry flips back and says
+    /// what failed and what to do, until a later toggle succeeds.
+    #[test]
+    fn a_failed_autostart_toggle_is_shown_in_every_language() {
+        for lang in Lang::ALL {
+            let mut app = settings_app_with(Config {
+                language: Some(lang.tag().to_owned()),
+                ..Config::default()
+            });
+            app.set_autostart = |_| anyhow::bail!("Permission denied (os error 13)");
+            let ctx = egui::Context::default();
+            let size = GENERAL_TAB_TEST_SIZE;
+            for _ in 0..2 {
+                run_frame(&ctx, size, Vec::new(), |ui| frame(&mut app, ui));
+            }
+            let switch = ctx
+                .read_response(switch_id("autostart-enabled"))
+                .expect("the switch was laid out");
+            click_at(&ctx, size, switch.rect.center(), |ui| frame(&mut app, ui));
+            assert!(!app.autostart_enabled, "the switch flips back");
+
+            let painted = fully_painted_text_at(size, |ui| frame(&mut app, ui));
+            let (title, fix, detail) = app.action_problem.as_ref().expect("a problem").text(lang);
+            assert_eq!(title, loader(lang).get("problem-autostart-on"));
+            assert_whole(
+                &painted,
+                &[title, fix, detail.to_owned()],
+                &format!("{lang:?}"),
+            );
+
+            app.set_autostart = |_| Ok(());
+            let ctx = egui::Context::default();
+            for _ in 0..3 {
+                run_frame(&ctx, size, Vec::new(), |ui| frame(&mut app, ui));
+            }
+            let switch = ctx
+                .read_response(switch_id("autostart-enabled"))
+                .expect("the switch was laid out");
+            click_at(&ctx, size, switch.rect.center(), |ui| frame(&mut app, ui));
+            assert_eq!(app.action_problem, None);
+        }
     }
 
     #[test]

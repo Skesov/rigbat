@@ -79,6 +79,11 @@ config-not-saved = Изменения не сохраняются
 config-unreadable = Файл { $path } не читается, и rigbat не станет его перезаписывать. Исправьте или удалите его.
 config-unwritable = Проверьте, что каталог { $dir } существует и доступен для записи.
 config-no-dir = Не найден домашний каталог для хранения настроек.
+problem-autostart-on = Запуск при входе в систему не включён
+problem-autostart-off = Запуск при входе в систему не выключен
+problem-autostart-fix = Проверьте, что каталог { $dir } существует и доступен для записи, и попробуйте ещё раз.
+problem-remove = Устройство { $name } не убрано
+problem-remove-fix = Не удалось удалить его историю. Попробуйте ещё раз; rigbat doctor проверяет базу состояния.
 
 ## Settings window: General tab
 

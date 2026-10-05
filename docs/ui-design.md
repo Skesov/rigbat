@@ -499,6 +499,11 @@ not an error state.
   refused save — `config::Unreadable`, with the parser's message from `config::read`), the
   directory is not writable, or there is no home directory. Each says what to fix. The banner
   stays until a save succeeds.
+- **An action that did not happen.** `SettingsApp::action_problem`, a banner under the save
+  problem's: "Start with session" could not write or remove its autostart entry (the switch flips
+  back; check that the autostart directory is writable), or a confirmed removal could not delete
+  the device from the inventory (the row stays; try again, `rigbat doctor` checks the state
+  database). Each shows the error under the advice and stays until the same action succeeds.
 - **No access.** When any device reads `NoAccess`, the Devices tab shows a banner: how many
   devices rigbat cannot read, that USB devices need a udev rule, the command that installs it
   (`domain::INSTALL_UDEV_RULE`, the same constant `rigbat doctor` prints) with a copy button

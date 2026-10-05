@@ -4,7 +4,7 @@ use anyhow::Context;
 
 /// `~/.config/autostart/rigbat.desktop`. Returns `None` if the config base dir
 /// is unavailable (e.g. no home directory in the environment).
-fn desktop_path() -> Option<PathBuf> {
+pub fn desktop_path() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|b| b.config_dir().join("autostart").join("rigbat.desktop"))
 }
 
