@@ -300,7 +300,10 @@ const REFRESH: &str = "\u{21BB}";
 fn refresh_button(ui: &mut egui::Ui, enabled: bool, lang: Lang) -> egui::Response {
     let label = fl!(loader(lang), "button-refresh");
     let response = ui
-        .add_enabled(enabled, egui::Button::new(REFRESH))
+        .add_enabled(
+            enabled,
+            egui::Button::new(REFRESH).min_size(egui::Vec2::splat(gui::MIN_TARGET)),
+        )
         .on_hover_text(&label);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &label));
     response
@@ -889,6 +892,21 @@ mod tests {
                 "{kind:?} leaves its column: {rect:?}"
             );
         }
+    }
+
+    #[test]
+    fn every_dashboard_target_is_at_least_24_points() {
+        let mut d = dashboard(roster(), Lang::En);
+        let size = d.wanted_size();
+        let targets = crate::egui_test::targets_at(size, |ui| {
+            d.show(ui);
+            refresh_button(ui, true, Lang::En);
+        });
+        assert!(
+            targets.iter().any(|t| t.name.as_deref() == Some("Refresh")),
+            "{targets:?}"
+        );
+        crate::egui_test::assert_targets_at_least(&targets, gui::MIN_TARGET);
     }
 
     #[test]

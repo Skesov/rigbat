@@ -194,3 +194,91 @@ pub const KINDS: [DeviceKind; 5] = [
     DeviceKind::Controller,
     DeviceKind::Other,
 ];
+
+/// One node of a frame's AccessKit tree; the context must have AccessKit on.
+#[derive(Debug, Clone)]
+pub struct Node {
+    pub role: egui::accesskit::Role,
+    pub name: Option<String>,
+    pub rect: egui::Rect,
+}
+
+/// Every node `output` sent to AccessKit.
+pub fn nodes(output: &egui::FullOutput) -> Vec<Node> {
+    let Some(update) = &output.platform_output.accesskit_update else {
+        return Vec::new();
+    };
+    update
+        .nodes
+        .iter()
+        .map(|(_, node)| Node {
+            role: node.role(),
+            name: node.label().or_else(|| node.value()).map(str::to_owned),
+            rect: node.bounds().map_or(egui::Rect::NOTHING, |b| {
+                egui::Rect::from_min_max(
+                    egui::pos2(b.x0 as f32, b.y0 as f32),
+                    egui::pos2(b.x1 as f32, b.y1 as f32),
+                )
+            }),
+        })
+        .collect()
+}
+
+/// The nodes a pointer operates.
+pub fn targets(output: &egui::FullOutput) -> Vec<Node> {
+    use egui::accesskit::Role;
+    nodes(output)
+        .into_iter()
+        .filter(|node| {
+            matches!(
+                node.role,
+                Role::Button
+                    | Role::CheckBox
+                    | Role::RadioButton
+                    | Role::ComboBox
+                    | Role::Slider
+                    | Role::SpinButton
+                    | Role::TextInput
+                    | Role::Link
+            )
+        })
+        .collect()
+}
+
+/// Each target is at least `min` × `min` (WCAG 2.2 SC 2.5.8). A link inside a
+/// line of text is the one exception the criterion allows: a circle of
+/// diameter `min` on its centre must touch no other target.
+pub fn assert_targets_at_least(targets: &[Node], min: f32) {
+    assert!(!targets.is_empty(), "no targets were laid out");
+    for (i, target) in targets.iter().enumerate() {
+        let size = target.rect.size();
+        if size.x + 0.01 >= min && size.y + 0.01 >= min {
+            continue;
+        }
+        assert_eq!(
+            target.role,
+            egui::accesskit::Role::Link,
+            "{:?} is {size:?}",
+            target.name
+        );
+        let centre = target.rect.center();
+        for (j, other) in targets.iter().enumerate() {
+            assert!(
+                i == j || other.rect.distance_to_pos(centre) >= min / 2.0,
+                "{:?} is {size:?} and too close to {:?}",
+                target.name,
+                other.name
+            );
+        }
+    }
+}
+
+/// The targets `contents` lays out on a `size` screen, styled as a window is
+/// (`gui::apply` with the default look), after two frames.
+pub fn targets_at(size: [f32; 2], mut contents: impl FnMut(&mut egui::Ui)) -> Vec<Node> {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    crate::gui::apply(&ctx, &crate::appearance::Appearance::default());
+    run_frame(&ctx, size, Vec::new(), &mut contents);
+    targets(&run_frame(&ctx, size, Vec::new(), &mut contents))
+}

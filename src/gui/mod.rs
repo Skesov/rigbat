@@ -11,6 +11,8 @@ use crate::palette::{self, DIM, GRAPHIC_CONTRAST, Rgb, TEXT_CONTRAST};
 pub const ROW_HEIGHT: f32 = 48.0;
 pub const GLYPH_COLUMN: f32 = 30.0;
 pub const GLYPH_SIZE: f32 = 20.0;
+/// WCAG 2.2 SC 2.5.8: the least width and height of anything a pointer operates.
+pub const MIN_TARGET: f32 = 24.0;
 
 /// Accent goes into both styles so a scheme switch keeps it.
 pub fn apply(ctx: &egui::Context, appearance: &Appearance) {
@@ -20,6 +22,7 @@ pub fn apply(ctx: &egui::Context, appearance: &Appearance) {
     });
     ctx.set_zoom_factor(appearance.text_scale);
     ctx.all_styles_mut(|style| {
+        style.spacing.interact_size.y = MIN_TARGET;
         let defaults = if style.visuals.dark_mode {
             egui::Visuals::dark()
         } else {

@@ -473,7 +473,9 @@ fn default_subtitle(ui: &mut egui::Ui, overridden: bool, default: &str, lang: La
         let text = fl!(l, "device-default-value", value = default);
         ui.label(widgets::secondary(ui, &text));
         let reset = fl!(l, "device-reset");
-        let response = ui.small_button(RESET).on_hover_text(&reset);
+        let response = ui
+            .add(egui::Button::new(RESET).min_size(egui::Vec2::splat(gui::MIN_TARGET)))
+            .on_hover_text(&reset);
         let enabled = ui.is_enabled();
         response
             .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &reset));
@@ -774,6 +776,41 @@ mod tests {
                 "%".to_owned(),
             ]);
             assert_whole(&painted, &expected, &format!("{lang:?} at {scale}"));
+        }
+    }
+
+    #[test]
+    fn every_devices_tab_target_is_at_least_24_points() {
+        for armed in [false, true] {
+            let mut overrides = HashMap::new();
+            overrides.insert(
+                keyboard().device.name,
+                DeviceSettings {
+                    poll_interval_secs: Some(300),
+                    low_threshold: Some(10),
+                },
+            );
+            let mut app = app_in(
+                Lang::En,
+                Config {
+                    device_overrides: overrides,
+                    ..Config::default()
+                },
+            );
+            app.expanded_device = Some(keyboard().device);
+            if armed {
+                app.delete_state = DeleteState::Confirming(1);
+            }
+            let targets = crate::egui_test::targets_at(tab_size(1.0, 1800.0), |ui| {
+                app.render_devices_tab(ui);
+            });
+            assert!(
+                targets
+                    .iter()
+                    .any(|t| t.name.as_deref() == Some("Use the default")),
+                "{targets:?}"
+            );
+            crate::egui_test::assert_targets_at_least(&targets, gui::MIN_TARGET);
         }
     }
 

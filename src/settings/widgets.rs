@@ -31,7 +31,7 @@ const FOOTER_SEPARATOR: &str = "·";
 /// How long a copied commit hash reads "Copied", seconds.
 const COPIED_FOR: f64 = 1.5;
 
-const SWITCH_SIZE: egui::Vec2 = egui::vec2(40.0, 22.0);
+const SWITCH_SIZE: egui::Vec2 = egui::vec2(44.0, gui::MIN_TARGET);
 const KNOB_INSET: f32 = 3.0;
 const FOCUS_GAP: f32 = 2.5;
 const FOCUS_WIDTH: f32 = 1.5;
@@ -668,7 +668,7 @@ impl CommitHash<'_> {
             .layout_no_wrap(self.hash.to_owned(), font.clone(), color)
             .size()
             .y;
-        let size = egui::vec2(self.slot_width(ui, font), height);
+        let size = egui::vec2(self.slot_width(ui, font), height.max(gui::MIN_TARGET));
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
         let now = ui.input(|input| input.time);
         if response.clicked() {

@@ -330,6 +330,15 @@ mod tests {
     }
 
     #[test]
+    fn every_appearance_tab_target_is_at_least_24_points() {
+        let mut app = settings_app_with(Config::default());
+        let targets = crate::egui_test::targets_at(tab_size(1.0, 1400.0), |ui| {
+            app.render_appearance_tab(ui);
+        });
+        crate::egui_test::assert_targets_at_least(&targets, gui::MIN_TARGET);
+    }
+
+    #[test]
     fn choosing_a_theme_in_the_combo_saves_it() {
         let (mut app, path) = app_saving_to("theme-combo", Config::default());
         let ctx = egui::Context::default();

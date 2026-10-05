@@ -75,7 +75,7 @@ impl SettingsApp {
                 |ui| {
                     ui.label(widgets::secondary(ui, &hint));
                     if pinned {
-                        clear_pin = ui.small_button(fl!(l, "button-clear")).clicked();
+                        clear_pin = ui.button(fl!(l, "button-clear")).clicked();
                     }
                 },
                 |ui| {
@@ -338,8 +338,8 @@ mod tests {
     use super::*;
     use crate::config::{self, Config};
     use crate::egui_test::{
-        TEXT_SCALES, assert_no_overlap, assert_whole, click_at, fully_painted_text_at,
-        painted_text_at, run_frame,
+        TEXT_SCALES, assert_no_overlap, assert_targets_at_least, assert_whole, click_at,
+        fully_painted_text_at, painted_text_at, run_frame, targets_at,
     };
     use crate::settings::WINDOW_MIN_SIZE;
     use crate::settings::tests::{app_saving_to, settings_app_with, tab_size};
@@ -487,6 +487,30 @@ mod tests {
                 .iter()
                 .any(|p| p.text == "Copied")
         );
+    }
+
+    #[test]
+    fn every_general_tab_target_is_at_least_24_points() {
+        for systemd in [false, true] {
+            let mut app = settings_app_with(Config {
+                primary_device: Some("MX Anywhere 3".to_owned()),
+                ..Config::default()
+            });
+            app.systemd_service_enabled = systemd;
+            let targets = targets_at(tab_size(1.0, 1600.0), |ui| {
+                app.render_tab_bar(ui);
+                app.render_general_tab(ui);
+            });
+            for label in ["Clear", "Start with session", "Copy"] {
+                let expected = label != "Copy" || systemd;
+                assert_eq!(
+                    targets.iter().any(|t| t.name.as_deref() == Some(label)),
+                    expected,
+                    "{label}: {targets:?}"
+                );
+            }
+            assert_targets_at_least(&targets, crate::gui::MIN_TARGET);
+        }
     }
 
     #[test]
