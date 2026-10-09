@@ -285,16 +285,12 @@ pub fn contrast_ratio(a: egui::Color32, b: egui::Color32) -> f32 {
 mod tests {
     use super::*;
 
-    fn run_pass(ctx: &egui::Context) {
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
-    }
-
-    /// The windows draw catalogue text in egui's bundled fonts, which have no U+202F, so a
-    /// unit is joined by U+00A0 instead; a character outside them would paint as "◻".
+    /// The windows draw catalogue text in egui's bundled fonts; a character outside them
+    /// would paint as "◻".
     #[test]
     fn every_catalogue_character_is_in_the_bundled_fonts() {
         let ctx = egui::Context::default();
-        run_pass(&ctx);
+        crate::egui_test::empty_pass(&ctx);
         let font = egui::TextStyle::Body.resolve(&ctx.global_style());
         let catalogues = [
             include_str!("../../i18n/en/rigbat.ftl"),
@@ -308,9 +304,37 @@ mod tests {
             .collect();
         ctx.fonts_mut(|fonts| {
             for c in text.chars() {
-                assert!(fonts.has_glyph(&font, c), "{c:?} (U+{:04X})", u32::from(c));
+                assert!(
+                    crate::egui_test::has_glyph(fonts, &font, c),
+                    "{c:?} (U+{:04X})",
+                    u32::from(c)
+                );
             }
-            assert!(!fonts.has_glyph(&font, '\u{202f}'));
+            assert!(!crate::egui_test::has_glyph(fonts, &font, '中'));
+        });
+    }
+
+    /// egui breaks a line at U+202F, the space GNOME prescribes between a number and its
+    /// unit, so the catalogues join them with U+00A0, the one space it never breaks at.
+    #[test]
+    fn only_u00a0_keeps_a_number_and_its_unit_on_one_row() {
+        let ctx = egui::Context::default();
+        crate::egui_test::empty_pass(&ctx);
+        let font = egui::TextStyle::Body.resolve(&ctx.global_style());
+        let rows = |fonts: &mut egui::epaint::text::FontsView<'_>, text: &str, width: f32| {
+            let galley = fonts.layout(text.to_owned(), font.clone(), egui::Color32::WHITE, width);
+            galley.rows.iter().map(|row| row.text()).collect::<Vec<_>>()
+        };
+        ctx.fonts_mut(|fonts| {
+            let width = fonts
+                .layout_no_wrap("10\u{a0}min".to_owned(), font.clone(), egui::Color32::WHITE)
+                .size()
+                .x;
+            assert_eq!(rows(fonts, "x 10\u{a0}min", width), ["x ", "10\u{a0}min"]);
+            assert_eq!(
+                rows(fonts, "x 10\u{202f}min", width),
+                ["x 10\u{202f}", "min"]
+            );
         });
     }
 
@@ -327,7 +351,7 @@ mod tests {
                 ..Appearance::default()
             },
         );
-        run_pass(&ctx);
+        crate::egui_test::empty_pass(&ctx);
 
         assert_eq!(ctx.theme(), egui::Theme::Light);
         assert!(!ctx.global_style().visuals.dark_mode);
@@ -353,7 +377,7 @@ mod tests {
         apply(&ctx, &appearance);
         appearance.accent = None;
         apply(&ctx, &appearance);
-        run_pass(&ctx);
+        crate::egui_test::empty_pass(&ctx);
 
         assert_eq!(ctx.theme(), egui::Theme::Dark);
         assert_eq!(
@@ -389,7 +413,7 @@ mod tests {
         let ctx = egui::Context::default();
 
         follow(rt.handle(), ctx.clone(), appearance, theme_rx);
-        run_pass(&ctx);
+        crate::egui_test::empty_pass(&ctx);
         assert_eq!(preference(&ctx), egui::ThemePreference::Light);
         assert!(!ctx.global_style().visuals.dark_mode);
 
@@ -498,7 +522,7 @@ mod tests {
                     ..Appearance::default()
                 },
             );
-            run_pass(&ctx);
+            crate::egui_test::empty_pass(&ctx);
             let visuals = ctx.global_style().visuals.clone();
             for surface in text_surfaces(&visuals) {
                 for (role, color) in [
@@ -514,7 +538,7 @@ mod tests {
             assert_eq!(targets(&ctx), Targets::HIGH);
         }
         apply(&ctx, &Appearance::default());
-        run_pass(&ctx);
+        crate::egui_test::empty_pass(&ctx);
         assert_eq!(targets(&ctx), Targets::NORMAL);
         assert_eq!(
             ctx.global_style().visuals.text_color(),
@@ -532,7 +556,7 @@ mod tests {
                 ..Appearance::default()
             },
         );
-        run_pass(&ctx);
+        crate::egui_test::empty_pass(&ctx);
         assert!(reduced_motion(&ctx));
         assert_eq!(ctx.global_style().animation_time, 0.0);
         let id = egui::Id::new("switch");
@@ -540,7 +564,7 @@ mod tests {
         assert_eq!(ctx.animate_bool_responsive(id, true), 1.0);
 
         apply(&ctx, &Appearance::default());
-        run_pass(&ctx);
+        crate::egui_test::empty_pass(&ctx);
         assert!(!reduced_motion(&ctx));
         assert!(ctx.global_style().animation_time > 0.0);
     }

@@ -396,7 +396,7 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let _ = window.run_ui(egui::RawInput::default(), |_| {});
+        crate::egui_test::empty_pass(&window);
         assert!(!window.global_style().visuals.dark_mode);
     }
 
@@ -469,14 +469,19 @@ mod tests {
                 .iter()
                 .find(|(mode, _)| *mode == DisplayMode::PercentOnly)
                 .expect("a digits preview");
-            let delta = ctx.tex_manager().write().take_delta();
-            let (_, image) = delta
+            let mut delta = ctx.tex_manager().write().take_delta();
+            let uploads = delta
                 .set
-                .iter()
-                .find(|(id, _)| *id == texture.id())
+                .get(&texture.id())
                 .expect("the digits texture upload");
-            let egui::ImageData::Color(image) = &image.image;
-            let ink = image.pixels.iter().filter(|px| px.a() > 0).count();
+            let ink: usize = uploads
+                .iter()
+                .map(|upload| {
+                    let egui::ImageData::Color(image) = &upload.image;
+                    image.pixels.iter().filter(|px| px.a() > 0).count()
+                })
+                .sum();
+            delta.clear();
             assert!(ink > 0, "{pixels} px: the digits preview is empty");
         }
     }

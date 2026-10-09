@@ -189,8 +189,8 @@ painted-text tests are deterministic, and there is no fontconfig dependency. GNO
 system font; rigbat does not follow it here. The emoji fonts in egui's default set stay:
 `LOW_SIGN`, `CHARGING_SIGN`, `REFRESH`, "↺" and the kind emoji (`gui::kind_glyph`) are text and
 come from them. Every catalogue character must have a glyph in them
-(`every_catalogue_character_is_in_the_bundled_fonts`); the bundled Ubuntu-Light has no U+202F,
-which is why a unit joins its number with U+00A0 ([Text](#text)).
+(`every_catalogue_character_is_in_the_bundled_fonts`). egui breaks a line at U+202F, which is why
+a unit joins its number with U+00A0 ([Text](#text)).
 
 | Role                     | Style                                                         | Where                          |
 | ------------------------ | ------------------------------------------------------------- | ------------------------------ |
@@ -475,9 +475,10 @@ The value (`charge_value`) and the note (`status_note`), English:
 ago`) when it reads a running tray; its own poll, without one, has no estimate and no note.
 - **Numbers and units.** A number and its unit are joined by a no-break space so they never part:
   `~45 min`, `~7 h`, `>4 d` (`format_coarse`), "just now", `5 min ago`, `2 h ago`, `3 d ago`
-  (`format_age`), `30 s`, `2 h` (intervals). GNOME prescribes U+202F, but egui's bundled
-  Ubuntu-Light has no glyph for it and egui wraps at it, so the catalogues write U+00A0
-  (`{" "}`). Estimates and ages are coarse, so aged text changes at most every `AGE_STEP`.
+  (`format_age`), `30 s`, `2 h` (intervals). GNOME prescribes U+202F, but egui (0.36 draws
+  it as half a space) breaks a line at it and at every space but U+00A0, so the catalogues write
+  U+00A0 (`only_u00a0_keeps_a_number_and_its_unit_on_one_row`; `{" "}`). Estimates and ages are
+  coarse, so aged text changes at most every `AGE_STEP`.
 - **Plurals.** A count next to a word goes through a Fluent selector over the language's CLDR
   categories (Russian: one, few, many), never a plural built in code. Russian spells durations
   out: `~5 часов`, `2 часа назад`, `3 дня назад`, `>4 дней`; «д» is no standard abbreviation.
@@ -560,11 +561,11 @@ targets. `egui_test::assert_targets_at_least` checks every AccessKit node with a
 
 ### Screen readers
 
-Both windows export an AT-SPI tree through eframe's `accesskit` feature (egui 0.34.3,
+Both windows export an AT-SPI tree through eframe's `accesskit` feature (egui 0.36.2,
 accesskit 0.24.1, accesskit_atspi_common 0.18.1).
 
 - **Hover text is not a description.** egui never calls `set_description`
-  (`egui-0.34.3/src/response.rs`, `fill_accesskit_node_from_widget_info`); a tooltip exists only
+  (`egui-0.36.2/src/response.rs`, `fill_accesskit_node_from_widget_info`); a tooltip exists only
   while a pointer hovers, as nodes of its own. So hover text reaches no screen reader, which is
   why no fact lives only there.
 - **Live regions work.** `accesskit::Node::set_live` is honoured: the AT-SPI adapter emits an

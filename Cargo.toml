@@ -24,7 +24,7 @@ directories = "6"
 ksni = { version = "0.3.6", features = ["tokio"] }
 tiny-skia = "0.12"
 # Tray digit outlines from the embedded League Gothic; already in the tree through epaint.
-skrifa = { version = "0.40", default-features = false, features = ["std"] }
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
 ashpd = { version = "0.13.11", default-features = false, features = ["tokio", "settings"] }
 futures-util = { version = "0.3", default-features = false }
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
@@ -40,7 +40,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # zbus >= 5.19 picks the backend per thread (tokio only where a runtime is
 # current), so that thread gets async-io; older zbus forced tokio there and
 # panicked with "no reactor running". Hence the 5.19 floor on zbus above.
-eframe = { version = "0.34.3", default-features = false, features = [
+eframe = { version = "0.36.2", default-features = false, features = [
     "accesskit",
     "default_fonts",
     "glow",

@@ -1303,9 +1303,9 @@ mod tests {
     #[test]
     fn the_reset_glyph_is_in_the_bundled_fonts() {
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        crate::egui_test::empty_pass(&ctx);
         let font = egui::TextStyle::Button.resolve(&ctx.global_style());
-        ctx.fonts_mut(|fonts| assert!(fonts.has_glyphs(&font, RESET)));
+        ctx.fonts_mut(|fonts| assert!(crate::egui_test::has_glyphs(fonts, &font, RESET)));
     }
 
     #[test]

@@ -274,7 +274,7 @@ pub(super) fn threshold_slider(ui: &mut egui::Ui, value: &mut u8) -> bool {
 /// A poll-interval combo box showing `current`; the newly chosen value, if any.
 pub(super) fn interval_combo(
     ui: &mut egui::Ui,
-    id_salt: impl std::hash::Hash,
+    id_salt: impl egui::AsIdSalt,
     current: u64,
     lang: Lang,
 ) -> Option<u64> {
@@ -285,7 +285,7 @@ pub(super) fn interval_combo(
 /// value, if any.
 fn preset_combo(
     ui: &mut egui::Ui,
-    id_salt: impl std::hash::Hash,
+    id_salt: impl egui::AsIdSalt,
     presets: &[u64],
     current: u64,
     lang: Lang,

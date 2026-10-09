@@ -102,7 +102,39 @@ fn frame(
         events,
         ..Default::default()
     };
-    ctx.run_ui(input, |ui| contents(ui))
+    discard_textures(ctx.run_ui(input, |ui| contents(ui)))
+}
+
+/// Whether `font` draws `c` from one of its own faces, not as the replacement
+/// "◻". egui 0.36's `has_glyph` alone answers no for every character of the
+/// face that holds "◻", one of the bundled emoji fonts, "⚡" among them.
+pub fn has_glyph(
+    fonts: &mut egui::epaint::text::FontsView<'_>,
+    font: &egui::FontId,
+    c: char,
+) -> bool {
+    let mut family = fonts.fonts.font(&font.family);
+    family.has_glyph(c) || family.characters().contains_key(&c)
+}
+
+pub fn has_glyphs(
+    fonts: &mut egui::epaint::text::FontsView<'_>,
+    font: &egui::FontId,
+    s: &str,
+) -> bool {
+    s.chars().all(|c| has_glyph(fonts, font, c))
+}
+
+/// One pass with no screen or input, for tests that need fonts or style loaded.
+pub fn empty_pass(ctx: &egui::Context) {
+    discard_textures(ctx.run_ui(egui::RawInput::default(), |_| {}));
+}
+
+/// No renderer uploads the textures here; epaint panics on dropping a delta
+/// nobody applied.
+fn discard_textures(mut output: egui::FullOutput) -> egui::FullOutput {
+    output.textures_delta.clear();
+    output
 }
 
 /// A primary-button click at `pos`: move, press, release, one frame each.

@@ -425,7 +425,7 @@ impl Dashboard {
     fn show(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(ui.style()).inner_margin(MARGIN))
-            .show_inside(ui, |ui| self.render(ui));
+            .show(ui, |ui| self.render(ui));
     }
 
     fn render(&mut self, ui: &mut egui::Ui) {
@@ -1015,17 +1015,18 @@ mod tests {
 
     #[test]
     fn every_glyph_is_in_the_bundled_fonts() {
+        use crate::egui_test::{has_glyph, has_glyphs};
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        crate::egui_test::empty_pass(&ctx);
         let font = egui::TextStyle::Body.resolve(&ctx.global_style());
         let glyph_font = egui::FontId::proportional(GLYPH_SIZE);
         ctx.fonts_mut(|fonts| {
-            assert!(fonts.has_glyphs(&font, REFRESH), "{REFRESH:?}");
+            assert!(has_glyphs(fonts, &font, REFRESH), "{REFRESH:?}");
             for sign in [CHARGING_SIGN, LOW_SIGN] {
-                assert!(fonts.has_glyph(&font, sign), "{sign:?}");
+                assert!(has_glyph(fonts, &font, sign), "{sign:?}");
             }
             for glyph in crate::egui_test::KINDS.map(kind_glyph) {
-                assert!(fonts.has_glyphs(&glyph_font, glyph), "{glyph:?}");
+                assert!(has_glyphs(fonts, &glyph_font, glyph), "{glyph:?}");
             }
         });
     }
@@ -1075,8 +1076,6 @@ mod tests {
         let ctx = egui::Context::default();
         run_frame(&ctx, size, Vec::new(), |ui| d.show(ui));
         let output = run_frame(&ctx, size, Vec::new(), |ui| d.show(ui));
-        // egui widens every clip rect by this margin, so focus outlines are not cut.
-        let bleed = ctx.global_style().visuals.clip_rect_margin + 0.5;
         for clipped in &output.shapes {
             let visible = clipped
                 .shape
@@ -1089,7 +1088,7 @@ mod tests {
                 background
                     || inside_footer
                     || into_footer.width() <= 0.5
-                    || into_footer.height() <= bleed,
+                    || into_footer.height() <= 0.5,
                 "{:?} paints into the footer {footer:?}",
                 clipped.shape
             );
@@ -1372,7 +1371,7 @@ mod tests {
             });
             let ctx = egui::Context::default();
             follow_appearance(rt.handle(), &ctx, appearance, theme);
-            let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+            crate::egui_test::empty_pass(&ctx);
 
             assert_eq!(ctx.global_style().visuals.dark_mode, dark, "{theme:?}");
             let status = gui::status_colors(
