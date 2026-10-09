@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.5.0](https://github.com/Skesov/rigbat/compare/v0.4.0...v0.5.0) (2026-10-09)
+
+
+### Features
+
+* **appearance:** follow the portal's high contrast and reduced motion in both windows ([e1edd3b](https://github.com/Skesov/rigbat/commit/e1edd3bd3731940055aac746bbf018b8a1cc56be))
+* **doctor:** print the udev rule from the binary so the fix needs no source tree ([966c146](https://github.com/Skesov/rigbat/commit/966c14663db6271391888694835aed99dae79d74))
+* **i18n:** join numbers and units, and spell Russian durations with plurals ([7a4a7ec](https://github.com/Skesov/rigbat/commit/7a4a7ecf0f11bb7cbded36a43791f0d9f3c0580d))
+* **icon:** draw tray digits with embedded League Gothic ([e959cc2](https://github.com/Skesov/rigbat/commit/e959cc227145c4661e69a10fe3777f4b2e1f1140))
+* **settings:** show a failed autostart toggle and a failed removal in the window ([17c375f](https://github.com/Skesov/rigbat/commit/17c375fcd57eb047c6c0beebf2d50311037ca66b))
+* **settings:** start the tray when Start with session turns on and none runs ([0c1018d](https://github.com/Skesov/rigbat/commit/0c1018db3e7dbe36ebf9e8527e2c67bee0030602))
+* show the commit and commits since the last tag beside the version ([94f82e6](https://github.com/Skesov/rigbat/commit/94f82e6791508f654038c9f5a4c1a26656272aa1))
+* **tray:** set SNI status NeedsAttention while a shown device is low and not charging ([dcaeb1c](https://github.com/Skesov/rigbat/commit/dcaeb1c16e9ac648254e3fc7fc72fe3b342051c1))
+* **ui:** announce device changes, a finished refresh and save problems as AccessKit live regions ([35efb4a](https://github.com/Skesov/rigbat/commit/35efb4a21d5c3ef85a05e23140b288d639cca513))
+* **ui:** say what failed and what to do for save errors, a stopped tray, no devices and no access ([a4dbdf0](https://github.com/Skesov/rigbat/commit/a4dbdf018ef08031e78f3588aa17e6b6fbb72911))
+
+
+### Bug Fixes
+
+* **appearance:** treat no portal preference as light ([9979f63](https://github.com/Skesov/rigbat/commit/9979f6399fcf88da6b3f08d9e8bd618f91abcc99))
+* **config:** never apply defaults over or write over an unparsable config.json ([17f21bb](https://github.com/Skesov/rigbat/commit/17f21bbc76df99ec0bfacaa53447631ceb53934c))
+* **dashboard:** announce the refresh button as "Refresh", not "↻" ([8e42c6d](https://github.com/Skesov/rigbat/commit/8e42c6dcbc6cb21ac17ea824c9e5d1ec4378056b))
+* **dashboard:** scroll rows above a pinned footer when the window does not grow ([4bd322a](https://github.com/Skesov/rigbat/commit/4bd322aeb800d15036f13c38270510fcc1ed2cfd))
+* **dashboard:** show a solid scroll bar when rows do not fit ([38aff93](https://github.com/Skesov/rigbat/commit/38aff93e05f588932da5dda79f8db65384429354))
+* **dashboard:** show refresh progress only after 300 ms ([21e34e0](https://github.com/Skesov/rigbat/commit/21e34e08601d3256e63a950c3e6851ca1b3fd9ef))
+* **discovery:** bound backend sweeps and system-bus calls so a hung bluetoothd fails the sweep ([dffa437](https://github.com/Skesov/rigbat/commit/dffa437afbb73ec4e748580977c386f1cc3d9ed6))
+* **i18n:** keep the ellipsis for confirmations only ([fab5070](https://github.com/Skesov/rigbat/commit/fab50706a63e76488e4b43a8d04b31fcab15e757))
+* **i18n:** plainer hint when a removal fails ([1a02576](https://github.com/Skesov/rigbat/commit/1a025766fbd17db36e02e86d65dedcef62884820))
+* **i18n:** plainer wording for an unparsable config and a device's last contact ([4ba0f88](https://github.com/Skesov/rigbat/commit/4ba0f8862bb4ca4aadbe4787df0e5a4d0edd7544))
+* **i18n:** title windows with the menu item that opens them ([cb3343d](https://github.com/Skesov/rigbat/commit/cb3343d23da847447508b4ca74e4394a3891b15a))
+* **i18n:** use one Russian verb for removal and plainer hints ([5c9bcea](https://github.com/Skesov/rigbat/commit/5c9bcea9970cd086e4de83681d60ccc7791db7c1))
+* **launch:** run the upgraded binary instead of a deleted current_exe path ([c29f250](https://github.com/Skesov/rigbat/commit/c29f250111b002657256b5fdb9c247f0fdb90dc8))
+* **notifications:** a click never closes an open overview ([53c8271](https://github.com/Skesov/rigbat/commit/53c8271090fff70524f367c13cf77f761cd815b1))
+* **notifications:** normal urgency, one toast per device, withdraw when stale ([2261aa6](https://github.com/Skesov/rigbat/commit/2261aa6d49b56eb9c9a941b494337f3710053c3b))
+* **packaging:** reload and trigger udev from the deb and rpm scripts ([68da751](https://github.com/Skesov/rigbat/commit/68da751c316965b45b7e8c95e090635dfd7d1289))
+* **settings:** open the GitHub link through the xdg-desktop-portal ([a739232](https://github.com/Skesov/rigbat/commit/a7392327dcd5e84e7716dc8419cdda5d56c6a570))
+* **settings:** paint the systemd command and device details instead of hiding them in hover text ([688dee7](https://github.com/Skesov/rigbat/commit/688dee705ce39af00a2863b7fdd3b9613a0e82d7))
+* **settings:** raise the open window instead of opening a second one ([8121ade](https://github.com/Skesov/rigbat/commit/8121aded17ec9b82fe60fc32eba057cdb70e0b9a))
+* **settings:** relabel Refresh only after the shared 300 ms progress delay ([c805ecb](https://github.com/Skesov/rigbat/commit/c805ecb5ff51796316812fa1ba92a5abe2107ac7))
+* **text:** read a device state the same way on every surface ([35653e8](https://github.com/Skesov/rigbat/commit/35653e81510cf9ef14f91c3355fee3c476accde3))
+* **tray:** register icons when the SNI watcher appears instead of failing at login ([9ca9fd6](https://github.com/Skesov/rigbat/commit/9ca9fd67726672d9e9c6ae3d4019468e3669b64e))
+* **ui:** let labels wrap and cap the window minimum at the smallest screen at any text scale ([1664982](https://github.com/Skesov/rigbat/commit/16649826e7e1065974f7cf24e608f5e4b3110fb6))
+* **ui:** make every pointer target at least 24 by 24 points ([717456a](https://github.com/Skesov/rigbat/commit/717456ae1ad591f00f7fda92afca62d9973e6735))
+* **waybar:** follow the running tray instead of polling the devices beside it ([e560f9a](https://github.com/Skesov/rigbat/commit/e560f9a705c1bf5be49f6520ed47df2ef144b81e))
+
+
+### Performance
+
+* **supervisor:** re-poll on a config change only when the device's interval moves ([453e5a1](https://github.com/Skesov/rigbat/commit/453e5a1abdb3a1dfb550dd5feb9f61d2072af623))
+
+
+### Documentation
+
+* **packaging:** say a second tray exits instead of warning about two instances ([9cce9e2](https://github.com/Skesov/rigbat/commit/9cce9e28c6f4f27f338c23cb712813285ea480c0))
+* **ui:** document errors and empty states, contrast and motion, target size, wrapping and screen readers ([865e496](https://github.com/Skesov/rigbat/commit/865e496148fb170f4f6f4edbcf5402ef2605c532))
+* **ui:** source the rulebook and record its deliberate departures ([6237cd6](https://github.com/Skesov/rigbat/commit/6237cd69255eb600f2a2ef8272c74323d2bc566b))
+
 ## [0.4.0](https://github.com/Skesov/rigbat/compare/v0.3.0...v0.4.0) (2026-09-28)
 
 
