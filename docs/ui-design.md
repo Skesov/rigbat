@@ -306,7 +306,9 @@ running tray's state over the session bus and never polls a device.
 
 - Titled "rigbat — Device overview" (`dashboard-title`), the tray menu's item. Undecorated,
   `WINDOW_WIDTH` wide, exactly as tall as its rows plus footer (`window_size`), and it
-  resizes when a device comes or goes (`fit_window`). Past `MAX_VISIBLE_ROWS` the list scrolls.
+  resizes when a device comes or goes (`fit_window`), up to `MAX_VISIBLE_ROWS` rows. The footer is
+  pinned to the bottom and the rows scroll above it whenever the window is shorter than they are:
+  past the cap, or when the compositor ignores the resize (COSMIC, see `CLAUDE.md`).
 - Closes like a popup: Esc, or losing focus after having had it (`close_like_a_popup`). A second
   click on the icon closes it. Project choice: no guideline covers closing a toplevel window on
   focus loss.

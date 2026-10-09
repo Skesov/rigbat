@@ -457,18 +457,14 @@ impl Dashboard {
                     .saturating_duration_since(self.received_at)
                     .as_secs();
                 list_ui.spacing_mut().item_spacing.y = 0.0;
-                let rows = |ui: &mut egui::Ui| {
-                    for card in &snapshot.devices {
-                        render_row(ui, card, lang, elapsed, &status);
-                    }
-                };
-                if snapshot.devices.len() > MAX_VISIBLE_ROWS {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink(false)
-                        .show(&mut list_ui, rows);
-                } else {
-                    rows(&mut list_ui);
-                }
+                // A compositor may ignore the resize: rows scroll, never run under the footer.
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(&mut list_ui, |ui| {
+                        for card in &snapshot.devices {
+                            render_row(ui, card, lang, elapsed, &status);
+                        }
+                    });
             }
         }
         self.render_footer(ui, footer);
@@ -1063,6 +1059,52 @@ mod tests {
         }));
         d.fit_window(&ctx);
         assert_eq!(d.size, window_size(6));
+    }
+
+    #[test]
+    fn rows_a_window_has_no_room_for_scroll_instead_of_covering_the_footer() {
+        let mut d = dashboard(every_state(), Lang::En);
+        // The compositor kept the two-row height when four more devices appeared.
+        let size = window_size(2);
+        let footer = egui::Rect::from_min_max(
+            egui::pos2(MARGIN, size[1] - MARGIN - FOOTER_HEIGHT),
+            egui::pos2(size[0] - MARGIN, size[1] - MARGIN),
+        );
+        let ctx = egui::Context::default();
+        run_frame(&ctx, size, Vec::new(), |ui| d.show(ui));
+        let output = run_frame(&ctx, size, Vec::new(), |ui| d.show(ui));
+        // egui widens every clip rect by this margin, so focus outlines are not cut.
+        let bleed = ctx.global_style().visuals.clip_rect_margin + 0.5;
+        for clipped in &output.shapes {
+            let visible = clipped
+                .shape
+                .visual_bounding_rect()
+                .intersect(clipped.clip_rect);
+            let into_footer = visible.intersect(footer);
+            let background = visible.contains_rect(footer);
+            let inside_footer = footer.expand(0.5).contains_rect(visible);
+            assert!(
+                background
+                    || inside_footer
+                    || into_footer.width() <= 0.5
+                    || into_footer.height() <= bleed,
+                "{:?} paints into the footer {footer:?}",
+                clipped.shape
+            );
+        }
+        let settings = crate::egui_test::painted(&output)
+            .into_iter()
+            .find(|p| p.text == "Settings")
+            .expect("the Settings button is painted whole");
+        let pointer = settings.rect.center();
+        run_frame(&ctx, size, vec![egui::Event::PointerMoved(pointer)], |ui| {
+            d.show(ui)
+        });
+        let click_target = ctx.viewport(|v| v.hits.click.map(|w| w.interact_rect));
+        assert!(
+            click_target.is_some_and(|rect| footer.contains_rect(rect)),
+            "a click on Settings lands on {click_target:?}"
+        );
     }
 
     /// Fills of every rect and colours of every text the dashboard painted.

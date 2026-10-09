@@ -212,3 +212,7 @@ COSMIC-specific — the strictest SNI host; these workarounds are safe everywher
   are always zero and a Wayland toplevel cannot place itself — the dashboard opens where the
   compositor puts it. The applet's `ProvideXdgActivationToken` call fails (ksni lacks it), so
   the window may open unfocused.
+- `cosmic-comp` 1.9 with `clip_floating_windows` (the default) configures every floating window
+  with all four `tiled_*` states, and winit 0.30 drops `request_inner_size` on a tiled window, so
+  the dashboard's `ViewportCommand::InnerSize` never lands there: it keeps its launch height and
+  the rows scroll above the pinned footer. `MinInnerSize`/`MaxInnerSize` do not help either.
