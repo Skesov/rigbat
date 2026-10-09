@@ -458,6 +458,8 @@ impl Dashboard {
                     .as_secs();
                 list_ui.spacing_mut().item_spacing.y = 0.0;
                 // A compositor may ignore the resize: rows scroll, never run under the footer.
+                // A solid bar, not egui's hover-only one: the rows below must look reachable.
+                list_ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(&mut list_ui, |ui| {
@@ -1105,6 +1107,36 @@ mod tests {
             click_target.is_some_and(|rect| footer.contains_rect(rect)),
             "a click on Settings lands on {click_target:?}"
         );
+    }
+
+    #[test]
+    fn a_scroll_bar_shows_only_when_rows_do_not_fit() {
+        let bar_width = egui::style::ScrollStyle::solid().bar_width;
+        let bars = |size: [f32; 2]| {
+            let mut d = dashboard(every_state(), Lang::En);
+            let ctx = egui::Context::default();
+            run_frame(&ctx, size, Vec::new(), |ui| d.show(ui));
+            let output = run_frame(&ctx, size, Vec::new(), |ui| d.show(ui));
+            let edge = size[0] - MARGIN - bar_width - 4.0;
+            output
+                .shapes
+                .iter()
+                .filter(|c| match &c.shape {
+                    egui::Shape::Rect(r) => {
+                        r.rect.left() >= edge
+                            && r.rect.width() <= bar_width + 1.0
+                            && r.rect.height() >= bar_width
+                            && r.fill.a() > 0
+                    }
+                    _ => false,
+                })
+                .count()
+        };
+        assert!(
+            bars(window_size(2)) > 0,
+            "six rows in a two-row window show no scroll bar"
+        );
+        assert_eq!(bars(window_size(6)), 0, "rows that fit show a scroll bar");
     }
 
     /// Fills of every rect and colours of every text the dashboard painted.
