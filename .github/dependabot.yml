@@ -23,19 +23,13 @@ updates:
     # Major bumps arrive as their own pull requests: they need a human to read
     # the changelog.
     #
-    # eframe and egui_extras are excluded from anything but a patch bump, and
-    # proved it on the first run: Dependabot's eframe 0.34 -> 0.36 pull request
-    # failed with `eframe::egui::Button` not satisfying `egui::widgets::Widget`
-    # — two egui versions in one graph. `egui_extras` is pinned to eframe's
-    # exact egui build by hand, so the two only move together, and which
-    # version matches is something a human reads off eframe's release notes.
+    # eframe is excluded from anything but a patch bump: Dependabot's eframe
+    # 0.34 -> 0.36 pull request failed with `eframe::egui::Button` not
+    # satisfying `egui::widgets::Widget` — two egui versions in one graph.
     # skrifa likewise follows epaint's pin: a newer one builds, but ships a second
     # copy of skrifa, read-fonts and font-types beside egui's.
     ignore:
       - dependency-name: "eframe"
-        update-types:
-          ["version-update:semver-major", "version-update:semver-minor"]
-      - dependency-name: "egui_extras"
         update-types:
           ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "skrifa"
