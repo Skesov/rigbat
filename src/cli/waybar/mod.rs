@@ -1,10 +1,9 @@
 use std::time::Duration;
 
 use tokio::sync::watch;
-use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 use crate::config::Config;
-use crate::domain::{AGE_STEP, TrayState};
+use crate::domain::TrayState;
 
 mod follow;
 mod render;
@@ -17,61 +16,20 @@ pub use render::waybar_featured;
 /// whatever state it has.
 const FIRST_SWEEP_WAIT: Duration = Duration::from_secs(2);
 
-// See print_json: the waybar module line is program output on stdout.
-#[expect(clippy::print_stdout)]
-fn print_line(line: &str) {
-    println!("{line}");
-}
-
 /// Prints the featured device's line on startup and on every change of the
 /// supervisor's state or the config.
 pub async fn run(mut rx: watch::Receiver<TrayState>, mut cfg_rx: watch::Receiver<Config>) {
-    // `Supervisor::spawn` publishes an empty `TrayState` before any backend has
-    // run, so printing straight away puts a false "no devices" frame on the bar
-    // until the first sweep lands. A device that has been discovered but not yet
-    // polled is indistinguishable in `TrayState` from one that is genuinely
-    // unreachable — both carry no reading — so waiting for the first publication
-    // is not enough: that one announces the roster, not its charge.
-    //
-    // Wait for a reading, bounded: an all-offline roster never produces one, and
-    // a module with no label at all is worse than a late one. An empty roster is
-    // already final and does not wait.
+    // The first value is the placeholder published before discovery; a device
+    // not yet polled carries no reading, like one that is asleep.
     let _ = tokio::time::timeout(FIRST_SWEEP_WAIT, async {
-        // The value already in the channel is the placeholder the supervisor
-        // published before discovery ran; an empty roster there means "not yet",
-        // not "none". Take the first real publication before judging.
-        if rx.changed().await.is_err() {
-            return;
-        }
-        loop {
-            {
-                let state = rx.borrow();
-                let cfg = cfg_rx.borrow();
-                // Judge the device the frame is actually built from. A roster can
-                // carry the same mouse twice (sysfs and Bluetooth), and requiring
-                // every shown device to answer never settles when one of them is
-                // permanently asleep, which is the normal state of a wireless
-                // mouse on its charger.
-                let now = crate::clock::now();
-                let settled = match waybar_featured(&state.devices, &cfg, now) {
-                    Some((d, _)) => d.last_reading.is_some(),
-                    None => !state.devices.iter().any(|d| cfg.is_shown(&d.info.name)),
-                };
-                if settled {
-                    return;
-                }
-            }
-            if rx.changed().await.is_err() {
-                return;
-            }
+        if rx.changed().await.is_ok() {
+            let _ = rx.wait_for(|state| settled(state, &cfg_rx.borrow())).await;
         }
     })
     .await;
 
     let mut last_line: Option<String> = None;
-    // The tooltip's "last reading 2 h ago" ages with nothing published.
-    let mut age_tick = interval_at(Instant::now() + AGE_STEP, AGE_STEP);
-    age_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut age_tick = crate::clock::age_ticker();
 
     loop {
         {
@@ -79,7 +37,7 @@ pub async fn run(mut rx: watch::Receiver<TrayState>, mut cfg_rx: watch::Receiver
             let cfg = cfg_rx.borrow();
             let line = render_waybar_line(&state.devices, &cfg, crate::clock::now());
             if last_line.as_deref() != Some(line.as_str()) {
-                print_line(&line);
+                super::out(&format!("{line}\n"));
                 last_line = Some(line);
             }
         }
@@ -97,18 +55,25 @@ pub async fn run(mut rx: watch::Receiver<TrayState>, mut cfg_rx: watch::Receiver
     tracing::error!("state channel closed, waybar module exiting");
 }
 
+/// Whether the first frame may print: the featured device has a reading, or
+/// nothing is shown. Judging every shown device would never settle while one
+/// copy of a mouse seen over two transports sleeps.
+fn settled(state: &TrayState, cfg: &Config) -> bool {
+    match waybar_featured(&state.devices, cfg, crate::clock::now()) {
+        Some((d, _)) => d.last_reading.is_some(),
+        None => !state.devices.iter().any(|d| cfg.is_shown(&d.info.name)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::follow::tray_state;
     use super::render::to_waybar;
     use super::*;
-    use crate::cli::tests::device;
-    use crate::domain::{BatteryReading, BootTime, ChargeState, DeviceState, Presence};
+    use crate::domain::{BatteryReading, BootTime, ChargeState, DeviceState, Estimate, Presence};
     use serde_json::Value;
 
     use std::time::Duration;
-
-    use crate::domain::Estimate;
 
     fn assert_single_line_json(text: &str) -> Value {
         assert_eq!(text.lines().count(), 1, "expected exactly one line");
@@ -121,50 +86,31 @@ mod tests {
         last_reading: Option<BatteryReading>,
         last_seen: Option<BootTime>,
     ) -> DeviceState {
-        DeviceState {
-            info: device(name),
-            last_reading,
-            last_seen,
-            presence,
-            estimate: Estimate::Unknown,
+        DeviceState::test(name)
+            .presence(presence)
+            .reading(last_reading)
+            .seen(last_seen)
+    }
+
+    #[test]
+    fn waybar_class_follows_the_featured_reading() {
+        for (percent, state, class) in [
+            (80, ChargeState::Charging, "charging"),
+            (10, ChargeState::Discharging, "low"),
+            (80, ChargeState::Discharging, "ok"),
+        ] {
+            let reading = BatteryReading::new(percent, state);
+            let states = vec![device_state("mouse", Presence::Online, Some(reading), None)];
+            let cfg = Config {
+                low_threshold: 20,
+                ..Config::default()
+            };
+
+            let value = to_waybar(&states, &cfg, crate::clock::now());
+            assert_eq!(value["class"], class);
+            assert_eq!(value["percentage"], percent);
+            assert_eq!(value["text"], format!("{percent}%"));
         }
-    }
-
-    #[test]
-    fn waybar_charging_device_is_charging_class() {
-        let reading = BatteryReading::new(80, ChargeState::Charging);
-        let states = vec![device_state("mouse", Presence::Online, Some(reading), None)];
-        let cfg = Config::default();
-
-        let value = to_waybar(&states, &cfg, crate::clock::now());
-        assert_eq!(value["class"], "charging");
-        assert_eq!(value["percentage"], 80);
-        assert_eq!(value["text"], "80%");
-    }
-
-    #[test]
-    fn waybar_low_battery_is_low_class() {
-        let reading = BatteryReading::new(10, ChargeState::Discharging);
-        let states = vec![device_state("mouse", Presence::Online, Some(reading), None)];
-        let cfg = Config {
-            low_threshold: 20,
-            ..Config::default()
-        };
-
-        let value = to_waybar(&states, &cfg, crate::clock::now());
-        assert_eq!(value["class"], "low");
-        assert_eq!(value["percentage"], 10);
-    }
-
-    #[test]
-    fn waybar_healthy_battery_is_ok_class() {
-        let reading = BatteryReading::new(80, ChargeState::Discharging);
-        let states = vec![device_state("mouse", Presence::Online, Some(reading), None)];
-        let cfg = Config::default();
-
-        let value = to_waybar(&states, &cfg, crate::clock::now());
-        assert_eq!(value["class"], "ok");
-        assert_eq!(value["percentage"], 80);
     }
 
     #[test]
@@ -395,13 +341,10 @@ mod bus_tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::bus_test::isolated;
+    use crate::bus_test::{claim_tray_name, isolated};
     use futures_util::StreamExt as _;
 
-    use crate::domain::{
-        BatteryReading, ChargeState, DeviceInfo, DeviceKind, DeviceState, Estimate, Presence,
-        Transport,
-    };
+    use crate::domain::{DeviceState, Transport};
     use crate::ipc::TRAY_NAME;
     use crate::refresh::RefreshSignal;
 
@@ -409,18 +352,11 @@ mod bus_tests {
 
     fn mouse(percent: u8) -> TrayState {
         TrayState {
-            devices: vec![DeviceState {
-                info: DeviceInfo {
-                    name: "mouse".to_owned(),
-                    kind: DeviceKind::Mouse,
-                    transport: Transport::Hidraw,
-                    locator: None,
-                },
-                last_reading: Some(BatteryReading::new(percent, ChargeState::Discharging)),
-                last_seen: Some(crate::clock::now()),
-                presence: Presence::Online,
-                estimate: Estimate::Unknown,
-            }],
+            devices: vec![
+                DeviceState::test("mouse")
+                    .transport(Transport::Hidraw)
+                    .read(percent, crate::clock::now()),
+            ],
         }
     }
 
@@ -452,13 +388,7 @@ mod bus_tests {
 
         let (state_tx, state_rx) = watch::channel(mouse(80));
         let (_config_tx, config_rx) = watch::channel(Config::default());
-        let tray = zbus::connection::Builder::session()
-            .expect("private bus")
-            .name(TRAY_NAME)
-            .expect("name")
-            .build()
-            .await
-            .expect("claiming the tray name");
+        let tray = claim_tray_name().await;
         tokio::spawn(crate::tray::state_service::serve(
             tray.clone(),
             state_rx,
@@ -489,10 +419,7 @@ mod featured_tests {
     use std::time::Duration;
 
     use crate::config::Config;
-    use crate::domain::{
-        BatteryReading, BootTime, ChargeState, DeviceInfo, DeviceKind, DeviceState, Estimate,
-        Presence, PrimaryStatus, Transport, TrayState,
-    };
+    use crate::domain::{BootTime, DeviceState, Presence, PrimaryStatus, Transport, TrayState};
 
     fn device(
         name: &str,
@@ -501,17 +428,12 @@ mod featured_tests {
         percent: Option<u8>,
         seen: BootTime,
     ) -> DeviceState {
-        DeviceState {
-            info: DeviceInfo {
-                name: name.to_owned(),
-                kind: DeviceKind::Mouse,
-                transport,
-                locator: None,
-            },
-            last_reading: percent.map(|p| BatteryReading::new(p, ChargeState::Discharging)),
-            last_seen: percent.map(|_| seen),
-            presence,
-            estimate: Estimate::Unknown,
+        let device = DeviceState::test(name)
+            .transport(transport)
+            .presence(presence);
+        match percent {
+            Some(percent) => device.read(percent, seen),
+            None => device,
         }
     }
 
@@ -561,11 +483,15 @@ mod featured_tests {
                 primary_device: primary.map(str::to_owned),
                 ..Config::default()
             };
-            let tray = crate::tray::resolve::resolve_for(None, &state, &cfg, now)
-                .expect("the tray features a device");
+            let tray = crate::tray::resolve::resolve_for(
+                None,
+                &crate::tray::resolve::visible(&state, &cfg, now),
+                &cfg,
+            )
+            .expect("the tray features a device");
             let (waybar, waybar_status) =
                 crate::cli::waybar::waybar_featured(&state.devices, &cfg, now).expect("waybar too");
-            assert_eq!(waybar.info.id(), tray.state.info.id(), "pin {primary:?}");
+            assert_eq!(waybar.info.id(), tray.device.info.id(), "pin {primary:?}");
             assert_eq!(waybar_status, tray.status, "pin {primary:?}");
             assert_eq!(
                 (

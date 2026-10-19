@@ -44,150 +44,110 @@ fn to_json(rows: &[Row]) -> Value {
     Value::Array(items)
 }
 
-// The battery table/JSON/waybar line is the program's output on stdout, not
-// a diagnostic — hence the narrow exemption from the project's tracing-only
-// print lint.
+// The battery table, JSON and waybar line are the program's output on stdout,
+// not diagnostics: the one exemption from the tracing-only print lint.
 #[expect(clippy::print_stdout)]
+fn out(text: &str) {
+    print!("{text}");
+}
+
 pub fn print_json(rows: &[Row]) {
-    let value = to_json(rows);
     // serde_json::to_string_pretty cannot fail on a valid Value
-    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "[]".to_owned());
-    println!("{}", text);
+    let text = serde_json::to_string_pretty(&to_json(rows)).unwrap_or_else(|_| "[]".to_owned());
+    out(&format!("{text}\n"));
 }
 
-// See print_json: the battery table is program output on stdout.
-#[expect(clippy::print_stdout)]
 pub fn print_table(rows: &[Row]) {
-    print!("{}", table(rows));
+    out(&table(rows));
 }
 
-// See print_json: the wide battery table is program output on stdout.
-#[expect(clippy::print_stdout)]
 pub fn print_table_wide(rows: &[Row]) {
-    print!("{}", table_wide(rows));
+    out(&table_wide(rows));
 }
 
 fn table(rows: &[Row]) -> String {
     if rows.is_empty() {
         return "No devices found\n".to_owned();
     }
-
-    // Width in chars, not bytes: names come from BlueZ Alias/hardware and can be
-    // non-ASCII, and `{:<width$}` pads by chars while `str::len()` counts bytes.
-    // Still not true terminal display width (CJK double-width, combining marks
-    // zero-width) — that needs the unicode-width crate, out of scope for this fix.
-    let name_width = rows
+    let lines: Vec<Vec<String>> = rows
         .iter()
-        .map(|(info, _)| info.name.chars().count())
-        .max()
-        .unwrap_or(0);
-
-    let mut out = String::new();
-    for (info, outcome) in rows {
-        let status = match outcome {
-            PollOutcome::Reading(r) => format!("{}%  {}", r.percent, state_str(r.state)),
-            PollOutcome::Failed | PollOutcome::NoAccess => state_word(*outcome).to_owned(),
-        };
-        out += &format!("{:<width$}  {}\n", info.name, status, width = name_width);
-    }
-    out
+        .map(|(info, outcome)| {
+            let status = match outcome {
+                PollOutcome::Reading(r) => format!("{}%  {}", r.percent, state_str(r.state)),
+                PollOutcome::Failed | PollOutcome::NoAccess => state_word(*outcome).to_owned(),
+            };
+            vec![info.name.clone(), status]
+        })
+        .collect();
+    columns(&lines)
 }
 
 fn table_wide(rows: &[Row]) -> String {
     if rows.is_empty() {
         return "No devices found\n".to_owned();
     }
-
-    // Compute per-column widths from data plus header, in chars (see `table`
-    // for why: names can be non-ASCII and `{:<width$}` pads by chars, not bytes).
-    let name_w = rows
-        .iter()
-        .map(|(info, _)| info.name.chars().count())
-        .max()
-        .unwrap_or(0)
-        .max("NAME".chars().count());
-    let kind_w = rows
-        .iter()
-        .map(|(info, _)| info.kind.as_str().chars().count())
-        .max()
-        .unwrap_or(0)
-        .max("KIND".chars().count());
-    let transport_w = rows
-        .iter()
-        .map(|(info, _)| info.transport.as_str().chars().count())
-        .max()
-        .unwrap_or(0)
-        .max("TRANSPORT".chars().count());
-    let locator_w = rows
-        .iter()
-        .map(|(info, _)| info.locator.as_deref().unwrap_or("-").chars().count())
-        .max()
-        .unwrap_or(0)
-        .max("LOCATOR".chars().count());
-    // PERCENT and STATE are short fixed-width columns; anchor to header width.
-    let percent_w = "PERCENT".chars().count();
-    let state_w = rows
-        .iter()
-        .map(|(_, outcome)| state_word(*outcome).chars().count())
-        .max()
-        .unwrap_or(0)
-        .max("STATE".chars().count());
-
-    let line = |cells: [&str; 6]| {
-        format!(
-            "{:<nw$}  {:<kw$}  {:<tw$}  {:<lw$}  {:<pw$}  {:<sw$}\n",
-            cells[0],
-            cells[1],
-            cells[2],
-            cells[3],
-            cells[4],
-            cells[5],
-            nw = name_w,
-            kw = kind_w,
-            tw = transport_w,
-            lw = locator_w,
-            pw = percent_w,
-            sw = state_w,
-        )
-    };
-
-    let mut out = line(["NAME", "KIND", "TRANSPORT", "LOCATOR", "PERCENT", "STATE"]);
-    for (info, outcome) in rows {
-        let percent_col = outcome
+    let header = ["NAME", "KIND", "TRANSPORT", "LOCATOR", "PERCENT", "STATE"];
+    let mut lines = vec![header.map(str::to_owned).to_vec()];
+    lines.extend(rows.iter().map(|(info, outcome)| {
+        let percent = outcome
             .reading()
             .map_or_else(|| "-".to_owned(), |r| format!("{}%", r.percent));
-        out += &line([
-            &info.name,
-            info.kind.as_str(),
-            info.transport.as_str(),
-            info.locator.as_deref().unwrap_or("-"),
-            &percent_col,
-            state_word(*outcome),
-        ]);
-    }
-    out
+        vec![
+            info.name.clone(),
+            info.kind.as_str().to_owned(),
+            info.transport.as_str().to_owned(),
+            info.locator.clone().unwrap_or_else(|| "-".to_owned()),
+            percent,
+            state_word(*outcome).to_owned(),
+        ]
+    }));
+    columns(&lines)
+}
+
+/// Left-aligned columns two spaces apart. Widths count chars, not bytes: names
+/// can be non-ASCII. Double-width (CJK) characters still misalign.
+fn columns(lines: &[Vec<String>]) -> String {
+    let count = lines.first().map_or(0, Vec::len);
+    let widths: Vec<usize> = (0..count)
+        .map(|column| {
+            lines
+                .iter()
+                .filter_map(|line| line.get(column))
+                .map(|cell| cell.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    lines
+        .iter()
+        .map(|line| {
+            let cells: Vec<String> = line
+                .iter()
+                .zip(&widths)
+                .map(|(cell, &width)| format!("{cell:<width$}"))
+                .collect();
+            format!("{}\n", cells.join("  ").trim_end())
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
+    use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind, Transport};
 
-    pub(super) fn device(name: &str) -> DeviceInfo {
+    fn device(name: &str) -> DeviceInfo {
         DeviceInfo {
-            name: name.to_owned(),
             kind: DeviceKind::Other,
-            transport: crate::domain::Transport::Sysfs,
-            locator: None,
+            ..DeviceInfo::test(name)
         }
     }
 
     fn device_with_locator(name: &str, locator: &str) -> DeviceInfo {
         DeviceInfo {
-            name: name.to_owned(),
-            kind: DeviceKind::Other,
-            transport: crate::domain::Transport::Bluetooth,
+            transport: Transport::Bluetooth,
             locator: Some(locator.to_owned()),
+            ..device(name)
         }
     }
 
@@ -346,7 +306,6 @@ mod tests {
 
     #[test]
     fn transport_as_str() {
-        use crate::domain::Transport;
         assert_eq!(Transport::Sysfs.as_str(), "sysfs");
         assert_eq!(Transport::Bluetooth.as_str(), "bluetooth");
         assert_eq!(Transport::Hidraw.as_str(), "hidraw");

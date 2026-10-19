@@ -7,7 +7,7 @@ use zbus::fdo::{DBusProxy, NameOwnerChangedStream};
 use zbus::names::BusName;
 
 use super::FIRST_SWEEP_WAIT;
-use crate::domain::{BatteryReading, BootTime, DeviceInfo, DeviceState, Estimate, TrayState};
+use crate::domain::{BatteryReading, BootTime, DeviceInfo, DeviceState, TrayState};
 use crate::ipc::{DeviceCard, Snapshot, TRAY_NAME, Tray1Proxy};
 
 /// How long one `State` call to the tray may take.
@@ -33,9 +33,7 @@ pub fn tray_state(snapshot: Snapshot, now: BootTime) -> TrayState {
             .seen_secs_ago
             .and_then(|secs| now.checked_sub(Duration::from_secs(secs))),
         presence: card.presence,
-        estimate: card.remaining_secs.map_or(Estimate::Unknown, |secs| {
-            Estimate::Remaining(Duration::from_secs(secs))
-        }),
+        estimate: card.remaining_secs.map(Duration::from_secs).into(),
     };
     TrayState {
         devices: snapshot
