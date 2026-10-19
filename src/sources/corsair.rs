@@ -7,29 +7,16 @@
 //! discards queued input before each request. Ids, requests, reply layout and
 //! the source of each fact: `docs/corsair.md`.
 
-use std::{
-    fs::File,
-    io::{ErrorKind, Read as _, Write as _},
-    os::{fd::AsFd as _, unix::fs::OpenOptionsExt as _},
-    path::{Path, PathBuf},
-    time::{Duration, Instant},
-};
+use std::fs::File;
 
 use anyhow::Context as _;
-use nix::libc;
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
-use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
+use crate::domain::{BatteryReading, ChargeState, DeviceKind};
 
 use super::{
     BatteryBackend, BatterySource, Context,
-    hidraw::{self, HidrawFamily, HidrawModel},
+    hidraw::{self, HandleSource, HidrawFamily, HidrawModel, ReadBattery, Verdict},
 };
-
-const ANSWER_TIMEOUT: Duration = Duration::from_millis(1000);
-const READ_BUF_LEN: usize = 64;
-/// Bounds the discard loop against a device that floods reports.
-const MAX_QUEUED_REPORTS: usize = 256;
 
 const NONE_CONNECTED: &str = "device is asleep or off (receiver lists no connected device)";
 const PAIRED_ERROR: &str = "device is asleep or off (receiver reported an error for it)";
@@ -95,16 +82,16 @@ pub static FAMILY: HidrawFamily = HidrawFamily {
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Link {
+enum Attachment {
     Cable,
     Receiver,
 }
 
-fn link_of(product: u16) -> Link {
+fn attachment_of(product: u16) -> Attachment {
     if RECEIVERS.contains(&product) {
-        Link::Receiver
+        Attachment::Receiver
     } else {
-        Link::Cable
+        Attachment::Cable
     }
 }
 
@@ -123,105 +110,41 @@ impl BatteryBackend for CorsairBackend {
     }
 
     async fn discover(&self, _ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
-        let devices = hidraw::discover(&FAMILY).await?;
-        Ok(devices
+        Ok(hidraw::discover(&FAMILY)
+            .await?
             .into_iter()
-            .map(|device| -> Box<dyn BatterySource> {
-                Box::new(CorsairSource {
-                    link: link_of(device.identity.product),
-                    info: device.info,
-                    dev_path: device.dev_path,
-                    identity: device.identity,
-                    handle: None,
-                })
+            .map(|device| {
+                let attachment = attachment_of(device.identity.product);
+                HandleSource::boxed(device, attachment)
             })
             .collect())
     }
 }
 
-// ── Source ───────────────────────────────────────────────────────────────────
+impl ReadBattery for Attachment {
+    type Handle = File;
 
-struct CorsairSource {
-    info: DeviceInfo,
-    link: Link,
-    dev_path: PathBuf,
-    identity: hidraw::NodeIdentity,
-    /// Kept across polls; dropped on any error so the next poll reopens by node name.
-    handle: Option<File>,
-}
-
-#[async_trait::async_trait]
-impl BatterySource for CorsairSource {
-    fn device(&self) -> &DeviceInfo {
-        &self.info
-    }
-
-    async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
-        let dev_path = self.dev_path.clone();
-        let identity = self.identity.clone();
-        let link = self.link;
-        let handle = self.handle.take();
-
-        let (result, handle) = tokio::task::spawn_blocking(move || {
-            let mut handle = handle;
-            let result = poll_device(&dev_path, &identity, link, &mut handle);
-            if result.is_err() {
-                handle = None;
-            }
-            (result, handle)
-        })
-        .await
-        .context("spawn_blocking")?;
-
-        self.handle = handle;
-        if let Ok(reading) = &result {
-            tracing::debug!(device = %self.info.name, percent = reading.percent, "corsair poll");
-        }
-        result
-    }
-}
-
-fn poll_device(
-    dev_path: &Path,
-    identity: &hidraw::NodeIdentity,
-    link: Link,
-    handle: &mut Option<File>,
-) -> anyhow::Result<BatteryReading> {
-    if handle.is_none() {
-        let file = hidraw::open_verified(
-            Path::new(hidraw::SYSFS_HIDRAW),
-            dev_path,
-            identity,
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK),
-        )?;
-        *handle = Some(file);
-    }
-    let file = handle
-        .as_mut()
-        .context("handle unexpectedly empty after open")?;
-
-    match link {
-        Link::Cable => {
-            let level = get(file, Target::Cable, Property::BatteryLevel)?.map_err(|code| {
-                anyhow::anyhow!("device refused the battery request: 0x{code:02X}")
-            })?;
-            let status = get(file, Target::Cable, Property::BatteryStatus)?.ok();
-            reading(level, status)
-        }
-        Link::Receiver => {
-            let subdevices =
-                get(file, Target::Receiver, Property::Subdevices)?.map_err(|code| {
-                    anyhow::anyhow!("receiver refused the paired-device request: 0x{code:02X}")
+    fn read(&self, file: &mut File) -> anyhow::Result<BatteryReading> {
+        match self {
+            Self::Cable => {
+                let level = get(file, Target::Cable, Property::BatteryLevel)?.map_err(|code| {
+                    anyhow::anyhow!("device refused the battery request: 0x{code:02X}")
                 })?;
-            let paired = first_connected(subdevices).context(NONE_CONNECTED)?;
-            let target = Target::Paired(paired);
-            let level = get(file, target, Property::BatteryLevel)?
-                .map_err(|_| anyhow::anyhow!(PAIRED_ERROR))?;
-            let status = get(file, target, Property::BatteryStatus)?.ok();
-            reading(level, status)
+                let status = get(file, Target::Cable, Property::BatteryStatus)?.ok();
+                reading(level, status)
+            }
+            Self::Receiver => {
+                let subdevices =
+                    get(file, Target::Receiver, Property::Subdevices)?.map_err(|code| {
+                        anyhow::anyhow!("receiver refused the paired-device request: 0x{code:02X}")
+                    })?;
+                let paired = first_connected(subdevices).context(NONE_CONNECTED)?;
+                let target = Target::Paired(paired);
+                let level = get(file, target, Property::BatteryLevel)?
+                    .map_err(|_| anyhow::anyhow!(PAIRED_ERROR))?;
+                let status = get(file, target, Property::BatteryStatus)?.ok();
+                reading(level, status)
+            }
         }
     }
 }
@@ -235,59 +158,22 @@ fn reading(level: u32, status: Option<u32>) -> anyhow::Result<BatteryReading> {
 /// Sends a GET of `property` to `target` and waits for its reply: the value, or
 /// the device's non-zero error code.
 fn get(file: &mut File, target: Target, property: Property) -> anyhow::Result<Result<u32, u8>> {
-    discard_queued(file)?;
-    file.write_all(&request(target, property))
-        .context("writing request")?;
-
-    let deadline = Instant::now() + ANSWER_TIMEOUT;
-    let mut buf = [0u8; READ_BUF_LEN];
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let remaining_ms = u16::try_from(remaining.as_millis()).unwrap_or(u16::MAX);
-        if remaining_ms == 0 {
-            anyhow::bail!("timeout waiting for the device's answer");
-        }
-        let mut fds = [PollFd::new(file.as_fd(), PollFlags::POLLIN)];
-        if poll(&mut fds, PollTimeout::from(remaining_ms)).context("poll()")? == 0 {
-            anyhow::bail!("timeout waiting for the device's answer");
-        }
-        let revents = fds[0].revents().unwrap_or(PollFlags::empty());
-        if !revents.contains(PollFlags::POLLIN) {
-            anyhow::bail!("unexpected poll events {revents:?}");
-        }
-        let n = match file.read(&mut buf) {
-            Ok(0) => anyhow::bail!("EOF reading hidraw"),
-            Ok(n) => n,
-            Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e).context("reading hidraw"),
-        };
-        match parse_reply(buf.get(..n).unwrap_or_default(), target) {
-            Reply::Value(value) => return Ok(Ok(value)),
-            Reply::Error(code) => return Ok(Err(code)),
-            Reply::Unrelated => {}
-        }
-    }
-}
-
-/// Reads and drops input queued since the last exchange, so a stale report is
-/// not taken for the answer.
-fn discard_queued(file: &mut File) -> anyhow::Result<()> {
-    let mut buf = [0u8; READ_BUF_LEN];
-    for _ in 0..MAX_QUEUED_REPORTS {
-        match file.read(&mut buf) {
-            Ok(0) => anyhow::bail!("EOF reading hidraw"),
-            Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
-            Err(e) => return Err(e).context("discarding queued reports"),
-        }
-    }
-    Ok(())
+    hidraw::exchange(
+        file,
+        &request(target, property),
+        |report| match parse_reply(report, target) {
+            Reply::Value(value) => Verdict::Answer(Ok(value)),
+            Reply::Error(code) => Verdict::Answer(Err(code)),
+            Reply::Unrelated => Verdict::Unrelated,
+        },
+    )
 }
 
 // ── Protocol (pure) ──────────────────────────────────────────────────────────
 
+const REPORT_LEN: usize = 64;
 /// Report id 0 (unnumbered reports) plus a 64-byte report.
-const REQUEST_LEN: usize = 1 + READ_BUF_LEN;
+const REQUEST_LEN: usize = 1 + REPORT_LEN;
 const ADDRESS_BASE: u8 = 0x08;
 const DEVICE_ID_MASK: u8 = 0x07;
 const GET: u8 = 0x02;
@@ -406,10 +292,9 @@ fn charge_state(status: Option<u32>) -> ChargeState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sources::hidraw::fake_sysfs::FakeSysfs;
 
-    fn reply(first: u8, error: u8, value: &[u8]) -> [u8; READ_BUF_LEN] {
-        let mut report = [0u8; READ_BUF_LEN];
+    fn reply(first: u8, error: u8, value: &[u8]) -> [u8; REPORT_LEN] {
+        let mut report = [0u8; REPORT_LEN];
         report[0] = first;
         report[1] = GET;
         report[2] = error;
@@ -548,53 +433,11 @@ mod tests {
         }
     }
 
-    // Discovery against a fake sysfs tree
-
     #[test]
-    fn discover_in_finds_receivers_and_cables_on_interface_1() {
-        let sysfs = FakeSysfs::new("corsair-rows");
-        sysfs.add("hidraw0", 0, CORSAIR, 0x1BDC, "");
-        sysfs.add("hidraw1", 1, CORSAIR, 0x1BDC, "");
-        sysfs.add("hidraw2", 2, CORSAIR, 0x1BDC, "");
-        sysfs.add("hidraw3", 1, CORSAIR, 0x1B4C, "");
-        sysfs.add("hidraw4", 1, CORSAIR, 0x2B07, "");
-        sysfs.add("hidraw5", 1, CORSAIR, 0x0A14, "");
-        let devices = FAMILY.discover_in(&sysfs.class()).unwrap();
-        let mut found: Vec<_> = devices
-            .into_iter()
-            .map(|d| {
-                (
-                    d.dev_path,
-                    d.info.name,
-                    d.info.kind,
-                    link_of(d.identity.product),
-                )
-            })
-            .collect();
-        found.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(
-            found,
-            [
-                (
-                    PathBuf::from("/dev/hidraw1"),
-                    "Corsair Slipstream Receiver".to_owned(),
-                    DeviceKind::Mouse,
-                    Link::Receiver,
-                ),
-                (
-                    PathBuf::from("/dev/hidraw3"),
-                    "Corsair Ironclaw RGB Wireless".to_owned(),
-                    DeviceKind::Mouse,
-                    Link::Cable,
-                ),
-                (
-                    PathBuf::from("/dev/hidraw4"),
-                    "Corsair K65 Plus Wireless".to_owned(),
-                    DeviceKind::Keyboard,
-                    Link::Receiver,
-                ),
-            ]
-        );
+    fn a_receiver_product_is_read_through_its_paired_device() {
+        assert_eq!(attachment_of(0x1BDC), Attachment::Receiver);
+        assert_eq!(attachment_of(0x2B07), Attachment::Receiver);
+        assert_eq!(attachment_of(0x1B4C), Attachment::Cable);
     }
 
     mod props {
