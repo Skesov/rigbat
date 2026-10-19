@@ -108,13 +108,13 @@ pub fn run() -> anyhow::Result<()> {
     let (first, appearance) = rt.block_on(async {
         let first = async {
             match &live {
-                Some((tray, _, _)) => fetch(tray).await,
+                Some(live) => fetch(&live.tray).await,
                 None => None,
             }
         };
         tokio::join!(first, crate::appearance::window_appearance())
     });
-    let tray = live.as_ref().map(|(tray, _, _)| tray.clone());
+    let tray = live.as_ref().map(|live| live.tray.clone());
 
     let config = config::load();
     let (lang, palette, theme) = (config.lang(), config.palette, config.theme);
@@ -137,7 +137,12 @@ pub fn run() -> anyhow::Result<()> {
             follow_appearance(&handle, &cc.egui_ctx, appearance, theme);
             close.attach(&cc.egui_ctx);
             let (tx, updates) = mpsc::channel();
-            if let Some((tray, changes, owners)) = live {
+            if let Some(Subscription {
+                tray,
+                changes,
+                owners,
+            }) = live
+            {
                 handle.spawn(follow(tray, changes, owners, tx, cc.egui_ctx.clone()));
             }
             Ok(Box::new(Dashboard::new(
@@ -145,7 +150,7 @@ pub fn run() -> anyhow::Result<()> {
                 lang,
                 palette,
                 updates,
-                tray.zip(Some(handle)),
+                tray.map(|tray| (tray, handle)),
             )))
         }),
     )
@@ -188,11 +193,11 @@ async fn fetch(tray: &Tray1Proxy<'_>) -> Option<Snapshot> {
         .ok()
 }
 
-type Subscription = (
-    Tray1Proxy<'static>,
-    crate::ipc::StateChangedStream,
-    Option<NameOwnerChangedStream>,
-);
+struct Subscription {
+    tray: Tray1Proxy<'static>,
+    changes: crate::ipc::StateChangedStream,
+    owners: Option<NameOwnerChangedStream>,
+}
 
 async fn subscribe(conn: &zbus::Connection) -> Option<Subscription> {
     let tray = Tray1Proxy::new(conn).await.ok()?;
@@ -210,7 +215,11 @@ async fn subscribe(conn: &zbus::Connection) -> Option<Subscription> {
             .ok(),
         Err(_) => None,
     };
-    Some((tray, changes, owners))
+    Some(Subscription {
+        tray,
+        changes,
+        owners,
+    })
 }
 
 /// Re-reads the state on every `StateChanged`, and follows the tray going away
@@ -552,12 +561,12 @@ fn render_row(
     let (top, bottom) = body.split_top_bottom_at_fraction(0.5);
 
     let value = gui::charge_value_text(&visuals, status, value, low, online);
-    let value_rect = place(ui, top, egui::Align::Max, egui::Label::new(value));
+    let value_rect = place(ui, top, Edge::Right, egui::Label::new(value));
     let name = egui::Label::new(egui::RichText::new(&card.name).strong()).truncate();
     place(
         ui,
         top.with_max_x(value_rect.left() - GAP),
-        egui::Align::Min,
+        Edge::Left,
         name,
     );
 
@@ -570,25 +579,44 @@ fn render_row(
     });
     let Some(percent) = card.percent else {
         if let Some(note) = note {
-            place(ui, bottom, egui::Align::Min, note);
+            place(ui, bottom, Edge::Left, note);
         }
         return;
     };
     let bar_right = match note {
-        Some(note) => place(ui, bottom, egui::Align::Max, note).left() - GAP,
+        Some(note) => place(ui, bottom, Edge::Right, note).left() - GAP,
         None => bottom.right(),
-    };
-    let fill = match card.status {
-        PrimaryStatus::Low { .. } => status.low,
-        PrimaryStatus::Charging { .. } => status.charging,
-        PrimaryStatus::Ok { .. } | PrimaryStatus::Offline => status.normal,
     };
     // Like the tray icon: dimmed when not live, except a low reading.
     let opacity = if online || low { 1.0 } else { DIM };
-    let track = egui::Rect::from_center_size(
-        egui::pos2((bottom.left() + bar_right) / 2.0, bottom.center().y),
-        egui::vec2(bar_right - bottom.left(), BAR_HEIGHT),
+    let bar = bottom.with_max_x(bar_right);
+    paint_bar(
+        ui,
+        bar,
+        percent,
+        bar_fill(card.status, status),
+        opacity,
+        status,
     );
+}
+
+fn bar_fill(reading: PrimaryStatus, status: &StatusColors) -> egui::Color32 {
+    match reading {
+        PrimaryStatus::Low { .. } => status.low,
+        PrimaryStatus::Charging { .. } => status.charging,
+        PrimaryStatus::Ok { .. } | PrimaryStatus::Offline => status.normal,
+    }
+}
+
+fn paint_bar(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    percent: u8,
+    fill: egui::Color32,
+    opacity: f32,
+    status: &StatusColors,
+) {
+    let track = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), BAR_HEIGHT));
     let filled = track.with_max_x(track.left() + track.width() * f32::from(percent) / 100.0);
     let painter = ui.painter();
     painter.rect_filled(
@@ -599,16 +627,17 @@ fn render_row(
     painter.rect_filled(filled, BAR_HEIGHT / 2.0, fill.gamma_multiply(opacity));
 }
 
+#[derive(Clone, Copy)]
+enum Edge {
+    Left,
+    Right,
+}
+
 /// Leaves the parent's cursor alone: the row already allocated its rect.
-fn place(
-    ui: &mut egui::Ui,
-    rect: egui::Rect,
-    from: egui::Align,
-    widget: egui::Label,
-) -> egui::Rect {
+fn place(ui: &mut egui::Ui, rect: egui::Rect, from: Edge, widget: egui::Label) -> egui::Rect {
     let layout = match from {
-        egui::Align::Max => egui::Layout::right_to_left(egui::Align::Center),
-        _ => egui::Layout::left_to_right(egui::Align::Center),
+        Edge::Left => egui::Layout::left_to_right(egui::Align::Center),
+        Edge::Right => egui::Layout::right_to_left(egui::Align::Center),
     };
     ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout))
         .add(widget.selectable(false))
@@ -1439,7 +1468,11 @@ mod bus_tests {
         ));
 
         let dashboard_bus = rt.block_on(zbus::Connection::session()).expect("bus");
-        let (tray, changes, owners) = rt.block_on(subscribe(&dashboard_bus)).expect("subscribe");
+        let Subscription {
+            tray,
+            changes,
+            owners,
+        } = rt.block_on(subscribe(&dashboard_bus)).expect("subscribe");
         let (tx, updates) = mpsc::channel();
         rt.spawn(follow(tray, changes, owners, tx, egui::Context::default()));
 
