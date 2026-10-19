@@ -144,18 +144,21 @@ mod tests {
         ]
     }
 
+    fn outcomes(sweeps: &[BackendSweep]) -> Vec<(&str, Option<usize>)> {
+        sweeps
+            .iter()
+            .map(|s| (s.name, s.result.as_ref().ok().map(Vec::len)))
+            .collect()
+    }
+
     /// The supervisor retires a device only when its backend's sweep succeeded,
     /// so a failure must not reach it as an empty result.
     #[tokio::test]
     async fn a_failing_backend_is_reported_apart_from_an_empty_one() {
         let sweeps = sweep(backends(), &Context::new()).await;
 
-        let outcomes: Vec<(&str, Option<usize>)> = sweeps
-            .iter()
-            .map(|s| (s.name, s.result.as_ref().ok().map(Vec::len)))
-            .collect();
         assert_eq!(
-            outcomes,
+            outcomes(&sweeps),
             [("empty", Some(0)), ("failing", None), ("found", Some(2))]
         );
     }
@@ -192,12 +195,8 @@ mod tests {
             .await
             .expect("the sweep waited on the hung backend");
 
-        let outcomes: Vec<(&str, Option<usize>)> = sweeps
-            .iter()
-            .map(|s| (s.name, s.result.as_ref().ok().map(Vec::len)))
-            .collect();
         assert_eq!(
-            outcomes,
+            outcomes(&sweeps),
             [
                 ("empty", Some(0)),
                 ("failing", None),
