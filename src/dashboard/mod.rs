@@ -1,4 +1,4 @@
-//! `rigbat dashboard`: the tray icon's left click (R61). A row per shown
+//! `rigbat dashboard`: the tray icon's left click. A row per shown
 //! device, read from the running tray over the session bus — it never polls a
 //! device itself, so it opens instantly and classifies each device exactly as
 //! its tray icon does.

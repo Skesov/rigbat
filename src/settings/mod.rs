@@ -195,9 +195,8 @@ struct SettingsApp {
     /// Reflects `~/.config/autostart/rigbat.desktop` existence — not stored in Config.
     autostart_enabled: bool,
     /// Whether `rigbat.service` is enabled in the systemd user manager,
-    /// checked once when the window opens (T29): a second launch path to the
-    /// same `rigbat tray` that the autostart checkbox must not silently
-    /// duplicate.
+    /// checked once when the window opens: a second launch path to the same
+    /// `rigbat tray` that the autostart checkbox must not silently duplicate.
     systemd_service_enabled: bool,
     /// Kept alive for the life of the window and used to spawn scans; never
     /// entered blockingly from `ui()`, which runs on the main thread.
@@ -211,8 +210,7 @@ struct SettingsApp {
     scanning: Option<std::time::Instant>,
     tab: Tab,
     /// `None` if the state store failed to open (see `state::open`) — the
-    /// Devices tab then shows only what the current scan finds, same as
-    /// this window behaved before the inventory existed.
+    /// Devices tab then shows only what the current scan finds.
     store: Option<state::Store>,
     /// The Devices tab's backing list: every inventory record merged with
     /// the last scan. Search is applied to a copy of this on render, never in
@@ -234,12 +232,6 @@ struct SettingsApp {
 impl SettingsApp {
     /// Saves one user edit. On failure every control keeps showing the value
     /// that is on disk, and the window says why until a save succeeds.
-    ///
-    /// `edit` names exactly the field the call site just changed — see
-    /// `save_edit` for why. On success, `self.config` adopts the freshly
-    /// saved config, so any field changed on disk by another process since
-    /// this window opened is picked up too, not just the one this call
-    /// touched.
     fn persist(&mut self, edit: impl FnOnce(&mut Config)) {
         let Some(path) = self.config_path.clone() else {
             tracing::error!("failed to save config: cannot determine config directory");
@@ -260,17 +252,9 @@ impl SettingsApp {
         }
     }
 
-    /// Spawns one scan on `rt` if none is already in flight, plus a fresh
-    /// read of the device inventory, wiring the result to a fresh channel and
-    /// waking `egui_ctx` when it lands so the window updates without waiting
-    /// for the next input event.
-    ///
-    /// With a tray running, the scan reads its roster (see `scan`), after
-    /// having it re-poll when `kind` is `Refresh`. Without one it polls every
-    /// discovered device, because the Devices tab needs each one's charge;
-    /// this only runs on an explicit Refresh click or window open, not on a
-    /// timer, so the extra device wake-up this costs is the same one-off the
-    /// user just asked for, not the continuous drain of a short poll interval.
+    /// Scans unless a scan is in flight, and re-reads the inventory. Without a
+    /// tray this polls every device; it runs only on window open or a Refresh
+    /// click, so the wake-up it costs is one the user asked for.
     fn spawn_scan(&mut self, egui_ctx: egui::Context, kind: scan::Scan) {
         if self.scanning.is_some() {
             return;
@@ -318,12 +302,9 @@ impl SettingsApp {
         }
     }
 
-    /// Applies a freshly completed scan's result: `self.device_rows` (the
-    /// Devices tab's rows) is the fresh inventory merged with the scan, or
-    /// with the last scan that answered when this one failed.
-    /// `hidden_devices` and `device_overrides` are keyed by device name and
-    /// are left exactly as the user set them, whether or not the device set
-    /// changed since the previous scan.
+    /// The rows become the fresh inventory merged with this scan, or with the
+    /// last scan that answered; `hidden_devices` and `device_overrides` stay
+    /// as the user set them.
     fn apply_scan_result(&mut self, result: ScanResult) {
         match result.discovered {
             Ok(discovered) => {
@@ -416,25 +397,9 @@ fn title(lang: Lang) -> String {
     fl!(loader(lang), "settings-title")
 }
 
-/// Re-reads the on-disk config via `load_config`, applies `edit` — the one
-/// change a call site just made — to that fresh copy, and writes the result
-/// back via `save_config`. Returns the saved config on success.
-///
-/// Replaces the earlier `apply_to`, which copied every window-owned field
-/// from the window's in-memory snapshot regardless of whether the user had
-/// touched it in this window session. That blanket overwrite is what let the
-/// tray's one-time `shown_devices` → `hidden_devices` migration be silently
-/// undone: a window opened before the migration ran held `hidden_devices`
-/// empty, and its next save — for any field, even an unrelated one — wrote
-/// that stale empty list back over the migrated value, permanently, since
-/// the migration cannot re-run once `shown_devices` is already empty. `edit`
-/// makes that impossible by construction: every field other than the one it
-/// names always comes from `load_config`, never from a window snapshot.
-///
-/// `load_config`/`save_config` are parameters, not `config::load`/`save`
-/// called directly, so tests can point this at a temporary file instead of
-/// the real `config::config_path()` — mirrors
-/// `app::migration::migrate_shown_devices_once`.
+/// Re-reads the on-disk config, applies `edit` — the one change a call site
+/// just made — to it and writes it back, so a field the user did not touch is
+/// never overwritten from the window's snapshot. Returns the saved config.
 fn save_edit<L, S>(
     load_config: &L,
     save_config: &S,
@@ -500,10 +465,8 @@ async fn raise_running() {
     }
 }
 
-/// Keeps a tokio runtime alive for the life of the window (unlike the old
-/// discover-once-and-drop approach) so devices that connect after the window
-/// opens still show up: a scan is spawned on it at startup and again on
-/// every "Refresh" click, never entered blockingly from `ui()`.
+/// Lives as long as the window, so a Refresh still scans after it opened;
+/// never entered blockingly from `ui()`.
 fn runtime() -> anyhow::Result<Arc<tokio::runtime::Runtime>> {
     use anyhow::Context as _;
 
@@ -696,9 +659,6 @@ mod tests {
         }
     }
 
-    /// Wraps a plain device list into a `ScanResult` with no reading and no
-    /// inventory records — what `apply_scan_result`'s pre-T35 tests exercised
-    /// before it started merging in the store's half.
     fn scan_result(devices: Vec<DeviceInfo>) -> ScanResult {
         ScanResult {
             discovered: Ok(devices
@@ -749,9 +709,7 @@ mod tests {
     }
 
     /// A field `edit` does not name — here `primary_device`, which no UI
-    /// control ever sets — must survive untouched. Replaces the old
-    /// `apply_to_preserves_primary_device`, which tested the same guarantee
-    /// against the blanket-overwrite `apply_to` this function replaces.
+    /// control ever sets — must survive untouched.
     #[test]
     fn save_edit_preserves_fields_it_does_not_touch() {
         let path = scratch_config_path("preserves-untouched-fields");
@@ -773,13 +731,8 @@ mod tests {
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
-    /// Regression test for C1: a settings window's own `self.config` snapshot
-    /// is never fed to `save_edit` — only `load_config`'s fresh read is. This
-    /// reproduces the failing sequence directly: the window "opens" (saved
-    /// once with `hidden_devices` empty), something else — the tray's
-    /// one-time `shown_devices` migration, in this test's role — writes
-    /// `hidden_devices` afterward, and the window then saves an unrelated
-    /// field. The migrated value must survive.
+    /// Another process writes `hidden_devices` after the window opened; the
+    /// window's next save of an unrelated field keeps it.
     #[test]
     fn save_edit_stale_window_snapshot_does_not_clobber_concurrent_disk_write() {
         let path = scratch_config_path("stale-snapshot");

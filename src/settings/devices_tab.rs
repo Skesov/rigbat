@@ -30,13 +30,6 @@ enum RemoveStep {
 }
 
 impl SettingsApp {
-    /// Renders a "Refresh" button, disabled and relabeled while a scan is
-    /// already in flight.
-    ///
-    /// Named the same as the tray menu's "Refresh" item (T36): with a tray
-    /// running it triggers the same re-poll, and without one it runs a
-    /// one-shot discovery-and-poll in the settings process — both mean "go
-    /// look again now" from the user's side.
     fn render_refresh_button(&mut self, ui: &mut egui::Ui) {
         let egui_ctx = ui.ctx().clone();
         let l = loader(self.config.lang());
@@ -58,9 +51,6 @@ impl SettingsApp {
         });
     }
 
-    /// The Devices tab: every device `apply_scan_result` merged into
-    /// `self.device_rows` — the inventory and the current scan, so a device
-    /// the scan did not find still shows — as expander rows in two groups.
     pub(super) fn render_devices_tab(&mut self, ui: &mut egui::Ui) {
         widgets::page(ui, "devices-tab", |ui| self.render_device_groups(ui));
     }
@@ -341,7 +331,7 @@ impl SettingsApp {
         self.render_remove_row(rows, row);
     }
 
-    /// `Remove…` arms, then `Remove` deletes (T35: never on the first click).
+    /// `Remove…` arms, then `Remove` deletes: never on the first click.
     /// A device the inventory has not recorded yet has nothing to remove.
     fn render_remove_row(&mut self, rows: &mut widgets::Rows<'_>, row: &DeviceRow) {
         let Some(store_id) = row.store_id else {
@@ -434,14 +424,9 @@ impl SettingsApp {
         });
     }
 
-    /// Forgets a device (T34): deletes its inventory row and readings, its
-    /// `hidden_devices` entry — nothing left to show it as hidden once it no
-    /// longer exists — and its pin on the aggregate icon, which would
-    /// otherwise reattach itself the moment a sold device is plugged in
-    /// somewhere else and seen again. The UI thread waits for the store, the
-    /// same as `persist`'s config write: a deliberate, infrequent,
-    /// user-confirmed click, not the per-frame inventory read `spawn_scan`
-    /// keeps off the UI thread.
+    /// Deletes the inventory row and readings, the `hidden_devices` entry and
+    /// the pin, which would reattach to a sold device seen again. Waits on the
+    /// store on the UI thread, as `persist` does: a rare, confirmed click.
     fn delete_device(&mut self, store_id: i64, device: &DeviceId) {
         let deleted = match &self.store {
             Some(store) => store.delete_device_blocking(store_id),
@@ -478,13 +463,6 @@ impl SettingsApp {
         self.delete_state = DeleteState::Idle;
     }
 
-    /// Escape, resolved by `devices::escape_action`: dismiss the armed
-    /// removal, else collapse the open row, else clear the device search,
-    /// else close the window.
-    ///
-    /// The escalation matters more than the closing does — a window that
-    /// closed on the first Escape would discard an armed confirmation by
-    /// doing the one thing that looks like "never mind" and is not.
     pub(super) fn handle_escape(&mut self, ui: &egui::Ui) {
         if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             return;
@@ -579,10 +557,7 @@ fn apply_device_override(
 /// Toggles whether `name` is hidden: `show = true` removes it from
 /// `hidden_devices` (if present), `show = false` adds it (if absent).
 /// Exactly one entry changes; every other entry — including one for a device
-/// that is not in the currently-discovered list — is left untouched. That is
-/// the structural fix for the bug this replaces: a partial view of the
-/// roster can never damage entries it does not display, because it never
-/// rebuilds the list at all.
+/// that is not in the currently-discovered list — is left untouched.
 fn toggle_hidden(hidden_devices: &mut Vec<String>, name: &str, show: bool) {
     if show {
         hidden_devices.retain(|n| n != name);
@@ -1401,11 +1376,7 @@ mod tests {
 
     #[test]
     fn toggle_hidden_leaves_unrelated_entries_untouched() {
-        // Regression test for the bug this replaces: a device not in the
-        // currently-discovered list ("offline-device") must survive a toggle
-        // on an unrelated device. The old `shown_after_toggle` rebuilt the
-        // whole list from the visible roster and silently dropped anything
-        // absent from it.
+        // An entry for a device that is not in the roster survives a toggle.
         let mut hidden = vec!["offline-device".to_string()];
         toggle_hidden(&mut hidden, "mouse", false);
         assert_eq!(

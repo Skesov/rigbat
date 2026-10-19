@@ -1,4 +1,4 @@
-//! State behind the Devices tab (T35): merges the persisted device inventory
+//! State behind the Devices tab: merges the persisted device inventory
 //! (`state::Store::list_devices`) with the current discovery scan into one
 //! row per device, plus the pure filter/order/delete-confirmation/escape
 //! logic the tab renders from, independent of `egui`.
@@ -11,12 +11,8 @@ use crate::domain::{format_age, roster_order};
 use crate::i18n::Lang;
 use crate::state::DeviceRecord;
 
-/// One row of the Devices tab: the union of a device's persisted
-/// inventory record (if any) and its status in the most recent discovery
-/// scan (if any). Either half can be missing — freshly discovered and not
-/// yet recorded (`store_id: None`), or recorded but not currently
-/// discoverable (`presence: Disconnected`, `charge: None`) — but never both,
-/// since a device with neither would not be a row at all.
+/// One row of the Devices tab: a device's inventory record and its status in
+/// the last scan. Either half may be missing, never both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceRow {
     /// The inventory row's SQLite id — `Remove`'s handle. `None` for a
@@ -36,12 +32,8 @@ pub struct DeviceRow {
     pub last_seen: Option<i64>,
 }
 
-/// Merges every inventory record with the current discovery scan into one
-/// row per `DeviceId`. The discovered half supplies `presence`, `charge`,
-/// `remaining` and `read_at`: a device the scan found is `Online` (poll succeeded),
-/// `Unreachable` (poll failed) or `NoAccess` regardless of what the inventory last
-/// recorded; a device the scan did not find stays `Disconnected`, keeping
-/// whatever the inventory last knew about it.
+/// One row per `DeviceId`: the scan decides presence and charge for every
+/// device it found; the rest stay `Disconnected`.
 pub fn merge_devices(records: Vec<DeviceRecord>, discovered: Vec<ScannedDevice>) -> Vec<DeviceRow> {
     let mut rows: Vec<DeviceRow> = records
         .into_iter()
@@ -114,10 +106,7 @@ pub enum DeleteCell {
     Confirm,
 }
 
-/// Decides which of the three states the row is in. Extracted from the
-/// rendering so the "never delete on the first click" rule is testable: the
-/// test that used to carry that name asserted `DeleteState::Confirming(7)`
-/// equals itself and would have passed with the confirmation removed.
+/// Pure so that "never delete on the first click" is testable.
 pub fn delete_cell(state: DeleteState, store_id: Option<i64>) -> DeleteCell {
     match store_id {
         None => DeleteCell::Unavailable,
@@ -181,9 +170,7 @@ pub fn remove_row(rows: &mut Vec<DeviceRow>, store_id: i64) {
 }
 
 /// Formats a unix-seconds timestamp as a relative age ("3 d ago"), relative
-/// to `now` (also unix seconds). Reuses
-/// `domain::format_age`, which already renders this exact vocabulary for
-/// retained readings, instead of a second implementation.
+/// to `now` (also unix seconds).
 pub fn relative_label(now: i64, at: i64, lang: Lang) -> String {
     let age = Duration::from_secs(now.saturating_sub(at).max(0).unsigned_abs());
     format_age(age, lang)
@@ -488,7 +475,6 @@ mod tests {
         assert_eq!(DeleteState::default(), DeleteState::Idle);
     }
 
-    /// The rule this replaces a tautology for: one click never deletes.
     #[test]
     fn first_click_only_arms_the_confirmation() {
         assert_eq!(delete_cell(DeleteState::Idle, Some(7)), DeleteCell::Arm);

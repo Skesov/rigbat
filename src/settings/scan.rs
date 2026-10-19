@@ -68,7 +68,6 @@ where
 
 enum TrayRoster {
     Absent,
-    /// A tray runs but did not answer; polling next to it is what this avoids.
     Unreadable(anyhow::Error),
     Read(Snapshot),
 }
