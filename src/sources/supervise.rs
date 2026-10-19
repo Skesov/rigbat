@@ -1,7 +1,6 @@
-//! Supervising retry loop for the bus watchers (`sources::bluez::watch_events`,
-//! `session::watch_resume`, the portal color-scheme watcher) and its exponential backoff. The policy is pure and
-//! synchronous, deliberately: the watchers need a live D-Bus connection to
-//! test, but growth, the cap, and the reset rule do not.
+//! Supervising retry loop for bus watchers and its exponential backoff. The
+//! policy is pure and synchronous, deliberately: the watchers need a live
+//! D-Bus connection to test, but growth, the cap, and the reset rule do not.
 
 use std::future::Future;
 use std::time::Duration;

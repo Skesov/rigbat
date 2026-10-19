@@ -14,8 +14,8 @@ pub const BUS_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// connection slot, so a source that keeps a clone sees every reconnect.
 #[derive(Clone, Default)]
 pub struct Context {
-    /// `Mutex<Option<_>>` rather than a `OnceCell`, deliberately: the cached
-    /// connection has to be *replaceable*. See `system_bus`.
+    /// `Mutex<Option<_>>` rather than a `OnceCell`: the cached connection has
+    /// to be replaceable.
     // A memoized handle, not shared data: the lock serialises one dial.
     #[expect(clippy::disallowed_types)]
     system_bus: std::sync::Arc<tokio::sync::Mutex<Option<zbus::Connection>>>,
@@ -34,8 +34,6 @@ impl Context {
     /// so a `dbus-daemon` restart leaves the cached connection permanently
     /// closed; handing that corpse back to every caller would make BlueZ
     /// devices drop out of the roster for the rest of the process's life.
-    /// Before this connection was shared, each discovery sweep opened its own
-    /// and self-healed within one sweep — re-dialling here preserves that.
     ///
     /// A failed attempt is not cached either: the slot is left empty, so a bus
     /// that comes up later is picked up by the next call.
