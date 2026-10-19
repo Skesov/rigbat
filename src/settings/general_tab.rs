@@ -49,71 +49,80 @@ impl SettingsApp {
     }
 
     fn render_tray_group(&mut self, ui: &mut egui::Ui) {
+        let l = loader(self.config.lang());
+        widgets::group(ui, &fl!(l, "group-tray"), None, |rows| {
+            self.render_tray_mode_row(rows);
+            self.render_hide_offline_row(rows);
+        });
+    }
+
+    fn render_tray_mode_row(&mut self, rows: &mut widgets::Rows<'_>) {
         let lang = self.config.lang();
         let l = loader(lang);
-        widgets::group(ui, &fl!(l, "group-tray"), None, |rows| {
-            // Bound to a local copy, not to `self.config`: `persist` adopts
-            // the saved config only when the write succeeds, so a failed save
-            // leaves `self.config` as it was and the next frame redraws the
-            // real value.
-            let mut per_device = self.config.tray_mode == TrayMode::PerDevice;
-            let hint = if per_device {
-                fl!(l, "tray-per-device-hint")
+        // Bound to a local copy, not to `self.config`: `persist` adopts
+        // the saved config only when the write succeeds, so a failed save
+        // leaves `self.config` as it was and the next frame redraws the
+        // real value.
+        let mut per_device = self.config.tray_mode == TrayMode::PerDevice;
+        let hint = if per_device {
+            fl!(l, "tray-per-device-hint")
+        } else {
+            aggregate_icon_hint(self.config.primary_device.as_deref(), lang)
+        };
+        // The pin is set from a device's row, so a pin naming a device the
+        // Devices tab has no row for — one retired before the inventory
+        // existed, or deleted since — would be unreachable without this.
+        // Clearing is the only action that needs no row, which is why it
+        // is the only one that lives here.
+        let pinned = !per_device && self.config.primary_device.is_some();
+        let mut clear_pin = false;
+        let title = fl!(l, "tray-per-device");
+        let toggled = rows.row(
+            &title,
+            |ui| {
+                ui.label(widgets::secondary(ui, &hint));
+                if pinned {
+                    clear_pin = ui.button(fl!(l, "button-clear")).clicked();
+                }
+            },
+            |ui| {
+                widgets::switch(ui, switch_id("tray-per-device"), &mut per_device, &title).changed()
+            },
+        );
+        if toggled {
+            let tray_mode = if per_device {
+                TrayMode::PerDevice
             } else {
-                aggregate_icon_hint(self.config.primary_device.as_deref(), lang)
+                TrayMode::PrimaryOnly
             };
-            // The pin is set from a device's row, so a pin naming a device the
-            // Devices tab has no row for — one retired before the inventory
-            // existed, or deleted since — would be unreachable without this.
-            // Clearing is the only action that needs no row, which is why it
-            // is the only one that lives here.
-            let pinned = !per_device && self.config.primary_device.is_some();
-            let mut clear_pin = false;
-            let title = fl!(l, "tray-per-device");
-            let toggled = rows.row(
-                &title,
-                |ui| {
-                    ui.label(widgets::secondary(ui, &hint));
-                    if pinned {
-                        clear_pin = ui.button(fl!(l, "button-clear")).clicked();
-                    }
-                },
-                |ui| {
-                    widgets::switch(ui, switch_id("tray-per-device"), &mut per_device, &title)
-                        .changed()
-                },
-            );
-            if toggled {
-                let tray_mode = if per_device {
-                    TrayMode::PerDevice
-                } else {
-                    TrayMode::PrimaryOnly
-                };
-                self.persist(move |target| target.tray_mode = tray_mode);
-            }
-            if clear_pin {
-                self.persist(|target| target.primary_device = None);
-            }
+            self.persist(move |target| target.tray_mode = tray_mode);
+        }
+        if clear_pin {
+            self.persist(|target| target.primary_device = None);
+        }
+    }
 
-            let hint = fl!(l, "hide-offline-after-hint");
-            let current = self.config.hide_offline_after().as_secs();
-            let chosen = rows.row(
-                &fl!(l, "hide-offline-after"),
-                widgets::subtitle(&hint),
-                |ui| {
-                    preset_combo(
-                        ui,
-                        "hide-offline-after",
-                        &HIDE_OFFLINE_PRESETS,
-                        current,
-                        lang,
-                    )
-                },
-            );
-            if let Some(mins) = chosen.and_then(|secs| u32::try_from(secs / 60).ok()) {
-                self.persist(move |target| target.hide_offline_after_mins = mins);
-            }
-        });
+    fn render_hide_offline_row(&mut self, rows: &mut widgets::Rows<'_>) {
+        let lang = self.config.lang();
+        let l = loader(lang);
+        let hint = fl!(l, "hide-offline-after-hint");
+        let current = self.config.hide_offline_after().as_secs();
+        let chosen = rows.row(
+            &fl!(l, "hide-offline-after"),
+            widgets::subtitle(&hint),
+            |ui| {
+                preset_combo(
+                    ui,
+                    "hide-offline-after",
+                    &HIDE_OFFLINE_PRESETS,
+                    current,
+                    lang,
+                )
+            },
+        );
+        if let Some(mins) = chosen.and_then(|secs| u32::try_from(secs / 60).ok()) {
+            self.persist(move |target| target.hide_offline_after_mins = mins);
+        }
     }
 
     fn render_battery_group(&mut self, ui: &mut egui::Ui) {
@@ -200,10 +209,13 @@ impl SettingsApp {
         let toggled = rows.row(&title, widgets::none, |ui| {
             widgets::switch(ui, id, &mut self.autostart_enabled, &title).changed()
         });
-        if !toggled {
-            return;
+        if toggled {
+            self.apply_autostart(self.autostart_enabled);
         }
-        let on = self.autostart_enabled;
+    }
+
+    /// Writes or removes the autostart entry, and turning it on starts a tray if none runs.
+    fn apply_autostart(&mut self, on: bool) {
         let result = (self.set_autostart)(on);
         self.clear_problem(|p| matches!(p, ActionProblem::Autostart { .. }));
         if let Err(e) = result {
@@ -214,7 +226,7 @@ impl SettingsApp {
             });
             // Revert the switch so it reflects the real filesystem state.
             self.autostart_enabled = !on;
-        } else if self.autostart_enabled {
+        } else if on {
             self.rt.spawn(async {
                 let started = match zbus::Connection::session().await {
                     Ok(conn) => scan::start_tray_if_absent(&conn, autostart::start_tray).await,
