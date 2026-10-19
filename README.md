@@ -37,11 +37,27 @@ System tray battery monitor for gaming peripherals on Linux.
 Two backends read a battery from any device the kernel already knows about, so most peripherals
 work without rigbat knowing their model:
 
-- **sysfs** (`/sys/class/power_supply`) — anything the kernel exposes a battery for, which
-  includes Logitech devices over a Unifying or Bolt receiver via `hid-logitech-hidpp`, many
-  Bluetooth peripherals through `hid-generic`, and Xbox controllers through `xpadneo` (a level
-  band rather than a percentage, shown without a time-remaining estimate).
+- **sysfs** (`/sys/class/power_supply`) — anything the kernel exposes a battery for.
 - **BlueZ** — any Bluetooth device that implements `org.bluez.Battery1`.
+
+Expected to work through these two, by kernel driver (check `lsmod`); only the Logitech MX
+Anywhere 3 is verified on hardware. _Coarse_ means a level band rather than a percentage, shown
+without a time-remaining estimate.
+
+- PlayStation: DualSense, DualShock 4 (`hid-playstation`), DualShock 3 (`hid-sony`).
+- Nintendo: Switch Pro Controller, Joy-Con, NSO controllers (`hid-nintendo`) — coarse.
+- Xbox: over Bluetooth with `xpadneo`, over the Wireless Adapter with `xone` (both
+  out-of-tree) — coarse.
+- Valve: Steam Controller, Steam Deck (`hid-steam`).
+- Logitech mice and keyboards on a Unifying, Bolt or Lightspeed receiver
+  (`hid-logitech-hidpp`).
+- Kysona M600, VXE Dragonfly R1 Pro (`hid-kysona`).
+- SteelSeries Arctis headsets (`hid-steelseries-arctis`).
+- Corsair Void / Void Pro / Void Elite headsets (`hid-corsair-void`).
+- Bluetooth devices with a battery in their HID descriptor (`hid-input`) or exposing
+  `Battery1` through BlueZ; a device that does both is listed twice, once per backend.
+
+No battery reading today: Xbox 360 wireless pads (`xpad`), the Switch 2 Pro Controller.
 
 The rest speak a vendor protocol over `/dev/hidraw`, and those need the device to be in the table:
 
