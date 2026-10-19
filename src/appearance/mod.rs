@@ -139,39 +139,29 @@ async fn follow_portal(tx: watch::Sender<Appearance>) {
     tx.send_replace(initial);
 
     let mut changes = Vec::new();
-    match settings.receive_color_scheme_changed().await {
-        Ok(s) => changes.push(s.map(|cs| Change::Scheme(map_scheme(cs))).boxed()),
-        Err(e) => tracing::warn!("xdg-portal color-scheme signal unavailable: {e}"),
-    }
-    match settings.receive_accent_color_changed().await {
-        Ok(s) => changes.push(
-            s.map(|c| Change::Accent(map_accent(c.red(), c.green(), c.blue())))
-                .boxed(),
-        ),
-        Err(e) => tracing::warn!("xdg-portal accent-color signal unavailable: {e}"),
-    }
-    match settings
+    let scheme = settings.receive_color_scheme_changed().await;
+    subscribe(&mut changes, "color-scheme", scheme, |cs| {
+        Change::Scheme(map_scheme(cs))
+    });
+    let accent = settings.receive_accent_color_changed().await;
+    subscribe(&mut changes, "accent-color", accent, |c| {
+        Change::Accent(map_accent(c.red(), c.green(), c.blue()))
+    });
+    let scale = settings
         .receive_setting_changed_with_args::<f64>(INTERFACE_NAMESPACE, TEXT_SCALE_KEY)
         .await
-    {
-        Ok(s) => changes.push(
-            s.filter_map(|r| std::future::ready(r.ok()))
-                .map(|scale| Change::TextScale(clamp_text_scale(scale)))
-                .boxed(),
-        ),
-        Err(e) => tracing::warn!("xdg-portal text-scaling signal unavailable: {e}"),
-    }
-    match settings.receive_contrast_changed().await {
-        Ok(s) => changes.push(s.map(|c| Change::HighContrast(c == Contrast::High)).boxed()),
-        Err(e) => tracing::warn!("xdg-portal contrast signal unavailable: {e}"),
-    }
-    match settings.receive_reduced_motion_changed().await {
-        Ok(s) => changes.push(
-            s.map(|m| Change::ReducedMotion(m == ReducedMotion::ReducedMotion))
-                .boxed(),
-        ),
-        Err(e) => tracing::warn!("xdg-portal reduced-motion signal unavailable: {e}"),
-    }
+        .map(|s| s.filter_map(|r| std::future::ready(r.ok())));
+    subscribe(&mut changes, "text-scaling", scale, |scale| {
+        Change::TextScale(clamp_text_scale(scale))
+    });
+    let contrast = settings.receive_contrast_changed().await;
+    subscribe(&mut changes, "contrast", contrast, |c| {
+        Change::HighContrast(c == Contrast::High)
+    });
+    let motion = settings.receive_reduced_motion_changed().await;
+    subscribe(&mut changes, "reduced-motion", motion, |m| {
+        Change::ReducedMotion(m == ReducedMotion::ReducedMotion)
+    });
     if changes.is_empty() {
         return;
     }
@@ -185,6 +175,18 @@ async fn follow_portal(tx: watch::Sender<Appearance>) {
             }
             () = tx.closed() => return,
         }
+    }
+}
+
+fn subscribe<'a, T>(
+    changes: &mut Vec<futures_util::stream::BoxStream<'a, Change>>,
+    what: &str,
+    stream: ashpd::Result<impl futures_util::Stream<Item = T> + Send + 'a>,
+    change: impl Fn(T) -> Change + Send + 'a,
+) {
+    match stream {
+        Ok(s) => changes.push(s.map(change).boxed()),
+        Err(e) => tracing::warn!("xdg-portal {what} signal unavailable: {e}"),
     }
 }
 
@@ -229,24 +231,14 @@ mod tests {
     use ashpd::desktop::settings::ColorScheme as AshpdColorScheme;
 
     #[test]
-    fn map_prefer_light_to_light() {
-        assert_eq!(
-            map_scheme(AshpdColorScheme::PreferLight),
-            ColorScheme::Light
-        );
-    }
-
-    #[test]
-    fn map_prefer_dark_to_dark() {
-        assert_eq!(map_scheme(AshpdColorScheme::PreferDark), ColorScheme::Dark);
-    }
-
-    #[test]
-    fn map_no_preference_to_light() {
-        assert_eq!(
-            map_scheme(AshpdColorScheme::NoPreference),
-            ColorScheme::Light
-        );
+    fn only_prefer_dark_maps_to_dark() {
+        for (portal, scheme) in [
+            (AshpdColorScheme::PreferLight, ColorScheme::Light),
+            (AshpdColorScheme::PreferDark, ColorScheme::Dark),
+            (AshpdColorScheme::NoPreference, ColorScheme::Light),
+        ] {
+            assert_eq!(map_scheme(portal), scheme, "{portal:?}");
+        }
     }
 
     #[test]

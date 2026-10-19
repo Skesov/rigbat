@@ -154,10 +154,6 @@ mod tests {
 
     const SCHEMES: [ColorScheme; 2] = [ColorScheme::Light, ColorScheme::Dark];
 
-    fn luminance(c: Rgb) -> f32 {
-        relative_luminance(c)
-    }
-
     /// Hue in degrees, `None` for a colour too grey to have a stable one.
     fn hue([r, g, b]: Rgb) -> Option<f32> {
         let (r, g, b) = (f32::from(r), f32::from(g), f32::from(b));
@@ -208,9 +204,11 @@ mod tests {
                         }
                         match scheme {
                             ColorScheme::Light => {
-                                assert!(luminance(out) < luminance(color), "{at}")
+                                assert!(relative_luminance(out) < relative_luminance(color), "{at}")
                             }
-                            ColorScheme::Dark => assert!(luminance(out) > luminance(color), "{at}"),
+                            ColorScheme::Dark => {
+                                assert!(relative_luminance(out) > relative_luminance(color), "{at}")
+                            }
                         }
                         if let (Some(before), Some(after)) = (hue(color), hue(out)) {
                             let drift = (before - after).abs().min(360.0 - (before - after).abs());
@@ -228,7 +226,7 @@ mod tests {
         let green = rgb(0x40a02b);
         let opaque = readable(green, surface, GRAPHIC_CONTRAST, 1.0);
         let dimmed = readable(green, surface, GRAPHIC_CONTRAST, DIM);
-        assert!(luminance(dimmed) < luminance(opaque));
+        assert!(relative_luminance(dimmed) < relative_luminance(opaque));
         assert!(contrast_ratio(over(dimmed, surface, DIM), surface) >= GRAPHIC_CONTRAST);
     }
 
