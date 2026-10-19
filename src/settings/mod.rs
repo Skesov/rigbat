@@ -1,3 +1,4 @@
+mod about;
 mod appearance_tab;
 mod devices;
 mod devices_tab;

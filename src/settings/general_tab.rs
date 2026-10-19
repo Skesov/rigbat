@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use super::{ActionProblem, LOW_THRESHOLD_RANGE, SettingsApp, open_uri, scan, widgets};
+use super::{ActionProblem, LOW_THRESHOLD_RANGE, SettingsApp, about, open_uri, scan, widgets};
 use crate::autostart;
 use crate::domain::TrayMode;
 use crate::domain::version::Build;
@@ -30,12 +30,12 @@ impl SettingsApp {
             let l = loader(self.config.lang());
             let build = Build::current();
             let (copied, label) = (fl!(l, "about-commit-copied"), fl!(l, "about-commit-copy"));
-            let commit = build.commit.map(|hash| widgets::CommitHash {
+            let commit = build.commit.map(|hash| about::CommitHash {
                 hash,
                 copied: &copied,
                 label: &label,
             });
-            let link = widgets::footer(
+            let link = about::footer(
                 ui,
                 &format!("rigbat {}", build.version()),
                 commit.as_ref(),
