@@ -393,6 +393,20 @@ mod tests {
     }
 
     #[test]
+    fn device_line_shows_the_estimate_rounded_once() {
+        let at = |mins: u64| BootTime::TEST_NOW + Duration::from_secs(mins * 60);
+        let history: Vec<_> = (0..=6).map(|i| (at(i * 6), 90 - 5 * i as u8)).collect();
+        let reading = BatteryReading::new(35, ChargeState::Discharging);
+        let device = state_with_estimate(
+            "mouse",
+            Some(reading),
+            crate::domain::estimate::estimate(&history, reading),
+        );
+        let text = line(&device, BootTime::TEST_NOW, Lang::En);
+        assert_eq!(text, "mouse: 35% · ~45\u{a0}min left");
+    }
+
+    #[test]
     fn an_absent_device_reads_disconnected() {
         assert_eq!(absent_line("pad", Lang::En), "pad: disconnected");
         assert_eq!(absent_line("pad", Lang::Ru), "pad: отключено");
