@@ -375,6 +375,44 @@ mod tests {
         }
     }
 
+    /// Walks the variants through an exhaustive match: a new variant fails to
+    /// compile here until handled, and fails the test until it is in `ALL`.
+    fn every<T: Copy>(first: T, next: impl Fn(T) -> Option<T>) -> Vec<T> {
+        std::iter::successors(Some(first), |&v| next(v)).collect()
+    }
+
+    #[test]
+    fn device_kind_all_lists_every_variant_once() {
+        let all = every(DeviceKind::Mouse, |k| match k {
+            DeviceKind::Mouse => Some(DeviceKind::Keyboard),
+            DeviceKind::Keyboard => Some(DeviceKind::Headset),
+            DeviceKind::Headset => Some(DeviceKind::Controller),
+            DeviceKind::Controller => Some(DeviceKind::Other),
+            DeviceKind::Other => None,
+        });
+        assert_eq!(all, DeviceKind::ALL);
+    }
+
+    #[test]
+    fn transport_all_lists_every_variant_once() {
+        let all = every(Transport::Sysfs, |t| match t {
+            Transport::Sysfs => Some(Transport::Bluetooth),
+            Transport::Bluetooth => Some(Transport::Hidraw),
+            Transport::Hidraw => None,
+        });
+        assert_eq!(all, Transport::ALL);
+    }
+
+    #[test]
+    fn charge_state_all_lists_every_variant_once() {
+        let all = every(ChargeState::Discharging, |c| match c {
+            ChargeState::Discharging => Some(ChargeState::Charging),
+            ChargeState::Charging => Some(ChargeState::Full),
+            ChargeState::Full => None,
+        });
+        assert_eq!(all, ChargeState::ALL);
+    }
+
     #[test]
     fn battery_reading_clamps_over_100() {
         let r = BatteryReading::new(150, ChargeState::Discharging);

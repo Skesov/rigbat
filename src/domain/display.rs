@@ -97,6 +97,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn display_mode_all_lists_every_variant_once() {
+        let all = std::iter::successors(Some(DisplayMode::IconOnly), |&m| match m {
+            DisplayMode::IconOnly => Some(DisplayMode::DeviceAndBattery),
+            DisplayMode::DeviceAndBattery => Some(DisplayMode::PercentOnly),
+            DisplayMode::PercentOnly => None,
+        });
+        assert_eq!(all.collect::<Vec<_>>(), DisplayMode::ALL);
+    }
+
+    #[test]
     fn display_mode_label_non_empty() {
         for lang in Lang::ALL {
             for mode in DisplayMode::ALL {

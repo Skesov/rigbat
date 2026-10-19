@@ -270,6 +270,11 @@ async fn run(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn notify_timeout_is_well_under_the_dbus_reply_timeout() {
+        assert!(super::NOTIFY_TIMEOUT > std::time::Duration::ZERO);
+        assert!(super::NOTIFY_TIMEOUT < std::time::Duration::from_secs(25));
+    }
 
     mod bus {
         use std::collections::HashMap;

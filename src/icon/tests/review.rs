@@ -128,7 +128,10 @@ fn dump_icons() {
             .save_png(dir.join(name))
             .expect("saving the sheet");
     }
-    for kind in DeviceKind::ALL.into_iter().skip(1) {
+    for kind in DeviceKind::ALL
+        .into_iter()
+        .filter(|&kind| kind != DeviceKind::Mouse)
+    {
         contact_sheet(&[ColorScheme::Dark], Some(kind))
             .save_png(dir.join(format!("rigbat-icons-{}.png", kind.as_str())))
             .expect("saving the sheet");
