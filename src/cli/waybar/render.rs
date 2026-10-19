@@ -4,26 +4,33 @@ use crate::config::Config;
 use crate::domain::{BootTime, DeviceState, PrimaryStatus, Roster, device_line, device_status};
 use crate::i18n::Lang;
 
-/// The device the waybar module features and its status: the aggregate tray
-/// icon's pick and classification, from the same `domain` policy.
-pub fn waybar_featured<'a>(
-    states: &'a [DeviceState],
-    cfg: &Config,
-    now: BootTime,
-) -> Option<(&'a DeviceState, PrimaryStatus)> {
-    let roster = Roster::visible(
+fn roster<'a>(states: &'a [DeviceState], cfg: &Config, now: BootTime) -> Roster<'a> {
+    Roster::visible(
         states,
         |name| cfg.is_shown(name),
         now,
         cfg.hide_offline_after(),
-    );
+    )
+}
+
+/// The device the waybar module features and its status: the aggregate tray
+/// icon's pick and classification, from the same `domain` policy.
+pub fn featured<'a>(
+    states: &'a [DeviceState],
+    cfg: &Config,
+    now: BootTime,
+) -> Option<(&'a DeviceState, PrimaryStatus)> {
+    featured_in(&roster(states, cfg, now), cfg)
+}
+
+fn featured_in<'a>(roster: &Roster<'a>, cfg: &Config) -> Option<(&'a DeviceState, PrimaryStatus)> {
     let device = roster.featured(cfg.primary_device.as_deref())?;
     let (status, _) = device_status(device, cfg.effective_low_threshold(&device.info.name));
     Some((device, status))
 }
 
 /// Builds the waybar `custom` module payload (`return-type: json`): a single
-/// object describing the featured device (`waybar_featured`), with a tooltip
+/// object describing the featured device (`featured`), with a tooltip
 /// line per device the tray lists, in the tray's order.
 ///
 /// Renders from the live `DeviceState` snapshots `Supervisor` publishes, so a
@@ -34,12 +41,7 @@ pub fn waybar_featured<'a>(
 /// `charging`, `low`, `ok`, `offline`. `percentage` is omitted, not `0`, when
 /// there is no reading to report.
 pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: BootTime) -> Value {
-    let roster = Roster::visible(
-        states,
-        |name| cfg.is_shown(name),
-        now,
-        cfg.hide_offline_after(),
-    );
+    let roster = roster(states, cfg, now);
 
     let tooltip = if roster.devices().is_empty() {
         "No devices".to_owned()
@@ -56,18 +58,17 @@ pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: BootTime) -> Value {
             .join("\n")
     };
 
-    let (text, class, percentage): (String, &str, Option<u8>) =
-        match waybar_featured(states, cfg, now) {
-            None => ("no devices".to_owned(), "offline", None),
-            Some((_, status)) => match status {
-                PrimaryStatus::Offline => ("offline".to_owned(), "offline", None),
-                PrimaryStatus::Charging { percent } => {
-                    (format!("{percent}%"), "charging", Some(percent))
-                }
-                PrimaryStatus::Low { percent } => (format!("{percent}%"), "low", Some(percent)),
-                PrimaryStatus::Ok { percent } => (format!("{percent}%"), "ok", Some(percent)),
-            },
-        };
+    let (text, class, percentage): (String, &str, Option<u8>) = match featured_in(&roster, cfg) {
+        None => ("no devices".to_owned(), "offline", None),
+        Some((_, status)) => match status {
+            PrimaryStatus::Offline => ("offline".to_owned(), "offline", None),
+            PrimaryStatus::Charging { percent } => {
+                (format!("{percent}%"), "charging", Some(percent))
+            }
+            PrimaryStatus::Low { percent } => (format!("{percent}%"), "low", Some(percent)),
+            PrimaryStatus::Ok { percent } => (format!("{percent}%"), "ok", Some(percent)),
+        },
+    };
 
     let mut obj = json!({
         "text": text,
@@ -88,7 +89,7 @@ pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: BootTime) -> Value {
 /// Returns the line rather than printing it so the streaming loop can compare
 /// consecutive lines and skip a repeat: the supervisor republishes its state on
 /// every poll, most of which leave the rendered line byte-identical.
-pub(super) fn render_waybar_line(states: &[DeviceState], cfg: &Config, now: BootTime) -> String {
+pub(super) fn render_line(states: &[DeviceState], cfg: &Config, now: BootTime) -> String {
     let value = to_waybar(states, cfg, now);
     serde_json::to_string(&value).unwrap_or_else(|_| {
         r#"{"text":"error","tooltip":"rigbat: failed to render status","class":"offline"}"#

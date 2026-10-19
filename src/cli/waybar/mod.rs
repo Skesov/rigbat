@@ -9,8 +9,8 @@ mod follow;
 mod render;
 
 pub use follow::{follow_tray, forward, watch_tray};
-use render::render_waybar_line;
-pub use render::waybar_featured;
+pub use render::featured;
+use render::render_line;
 
 /// How long `run` waits for a first battery reading before printing
 /// whatever state it has.
@@ -35,7 +35,7 @@ pub async fn run(mut rx: watch::Receiver<TrayState>, mut cfg_rx: watch::Receiver
         {
             let state = rx.borrow();
             let cfg = cfg_rx.borrow();
-            let line = render_waybar_line(&state.devices, &cfg, crate::clock::now());
+            let line = render_line(&state.devices, &cfg, crate::clock::now());
             if last_line.as_deref() != Some(line.as_str()) {
                 super::out(&format!("{line}\n"));
                 last_line = Some(line);
@@ -59,7 +59,7 @@ pub async fn run(mut rx: watch::Receiver<TrayState>, mut cfg_rx: watch::Receiver
 /// nothing is shown. Judging every shown device would never settle while one
 /// copy of a mouse seen over two transports sleeps.
 fn settled(state: &TrayState, cfg: &Config) -> bool {
-    match waybar_featured(&state.devices, cfg, crate::clock::now()) {
+    match featured(&state.devices, cfg, crate::clock::now()) {
         Some((d, _)) => d.last_reading.is_some(),
         None => !state.devices.iter().any(|d| cfg.is_shown(&d.info.name)),
     }
@@ -490,7 +490,7 @@ mod featured_tests {
             )
             .expect("the tray features a device");
             let (waybar, waybar_status) =
-                crate::cli::waybar::waybar_featured(&state.devices, &cfg, now).expect("waybar too");
+                crate::cli::waybar::featured(&state.devices, &cfg, now).expect("waybar too");
             assert_eq!(waybar.info.id(), tray.device.info.id(), "pin {primary:?}");
             assert_eq!(waybar_status, tray.status, "pin {primary:?}");
             assert_eq!(

@@ -219,7 +219,7 @@ Waybar:    tray running: org.rigbat.Tray1 State/StateChanged ──cli::waybar::
            no tray:      OwnRuntime: Supervisor::spawn ──cli::waybar::forward────────────┤
                                                                                          ▼
                                                                     cli::waybar::run
-                                                                    │ render_waybar_line,
+                                                                    │ render_line,
                                                                     │ printed only when the line
                                                                     │ changes, no exit
            NameOwnerChanged(org.rigbat.Tray) ──▶ old source stopped, the other one started
