@@ -40,13 +40,8 @@ async fn watch_resume_inner(refresh: RefreshSignal, conn: zbus::Connection) -> a
     Ok(())
 }
 
-/// Spawns a background task that fires `refresh` whenever the system resumes.
-/// Runs under a supervising retry loop with exponential backoff
-/// (`sources::supervise`): a lost system bus or a logind that stops emitting
-/// is not fatal, the loop re-dials through `ctx.system_bus()` (which
-/// re-connects a closed one) and resubscribes. An environment with no logind
-/// (containers, BSDs) just keeps retrying quietly in the background — this
-/// is an optimisation, never a dependency.
+/// Fires `refresh` on resume; retried under `supervise` because the bus can
+/// drop and logind may be absent (containers).
 pub fn watch_resume(refresh: RefreshSignal, ctx: Arc<Context>) {
     supervise("resume watcher", move || {
         let (refresh, ctx) = (refresh.clone(), ctx.clone());
