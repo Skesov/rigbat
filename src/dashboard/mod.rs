@@ -17,9 +17,7 @@ use crate::domain::{
     status_note,
 };
 use crate::gui::window_command::Pending;
-use crate::gui::{
-    self, GLYPH_COLUMN, GLYPH_SIZE, ROW_HEIGHT, StatusColors, kind_glyph, secondary_text,
-};
+use crate::gui::{self, GLYPH_COLUMN, ROW_HEIGHT, StatusColors, kind_glyph, secondary_text};
 use crate::i18n::{Lang, fl, loader};
 use crate::ipc::single_instance::{SingleInstance, acquire_serving, call_running};
 use crate::ipc::{DASHBOARD_NAME, DASHBOARD_PATH, DeviceCard, Snapshot, TRAY_NAME};
@@ -431,7 +429,7 @@ impl Dashboard {
             }
             Some(snapshot) => {
                 let lang = self.lang;
-                let status = gui::status_colors(ui.visuals(), self.palette, gui::targets(ui.ctx()));
+                let status = gui::status_colors_for(ui, self.palette);
                 let elapsed = crate::clock::now()
                     .saturating_duration_since(self.received_at)
                     .as_secs();
@@ -461,13 +459,6 @@ impl Dashboard {
         self.refreshing.is_some()
     }
 
-    /// How long the refresh in flight waits before showing progress; zero once it shows.
-    fn progress_wait(&self, now: Instant) -> Duration {
-        self.refreshing
-            .as_ref()
-            .map_or(Duration::ZERO, |r| gui::progress_wait(r.since, now))
-    }
-
     fn render_footer(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         let l = loader(self.lang);
         let in_flight = self.refresh_in_flight();
@@ -490,11 +481,11 @@ impl Dashboard {
                     }
                 });
             }
-            if in_flight {
-                match self.progress_wait(Instant::now()) {
-                    Duration::ZERO => progress(&mut ui, self.lang),
-                    wait => ui.ctx().request_repaint_after(wait),
-                }
+            if in_flight
+                && let Some(refreshing) = &self.refreshing
+                && gui::shows_progress(ui.ctx(), refreshing.since)
+            {
+                progress(&mut ui, self.lang);
             }
         }
         if let Some(announcement) = &self.announcement {
@@ -552,13 +543,7 @@ fn render_row(
     let low = matches!(card.status, PrimaryStatus::Low { .. });
     let online = card.presence == Presence::Online;
 
-    ui.painter().text(
-        egui::pos2(rect.left() + GLYPH_COLUMN / 2.0, rect.center().y),
-        egui::Align2::CENTER_CENTER,
-        kind_glyph(card.kind),
-        egui::FontId::proportional(GLYPH_SIZE),
-        visuals.text_color(),
-    );
+    gui::paint_glyph(ui, kind_glyph(card.kind), rect.left(), rect.center().y);
 
     let body = egui::Rect::from_min_max(
         egui::pos2(rect.left() + GLYPH_COLUMN + GAP, rect.top() + ROW_PADDING),
@@ -998,7 +983,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::egui_test::empty_pass(&ctx);
         let font = egui::TextStyle::Body.resolve(&ctx.global_style());
-        let glyph_font = egui::FontId::proportional(GLYPH_SIZE);
+        let glyph_font = egui::FontId::proportional(gui::GLYPH_SIZE);
         ctx.fonts_mut(|fonts| {
             assert!(has_glyphs(fonts, &font, REFRESH), "{REFRESH:?}");
             for sign in [CHARGING_SIGN, LOW_SIGN] {
@@ -1291,16 +1276,6 @@ mod tests {
         }));
         let live = live_regions_of(&mut d);
         assert!(live.contains(&"Device list updated".to_owned()), "{live:?}");
-    }
-
-    #[test]
-    fn the_spinner_waits_for_the_progress_delay() {
-        let mut d = dashboard(roster(), Lang::En);
-        let since = Instant::now();
-        let _pending = start_refresh(&mut d, since);
-        assert_eq!(d.progress_wait(since), gui::PROGRESS_DELAY);
-        assert_eq!(d.progress_wait(since + gui::PROGRESS_DELAY), Duration::ZERO);
-        assert!(d.refresh_in_flight());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use eframe::egui;
 
-use super::widgets::{COPIED_FOR, focus_ring, secondary, secondary_font, text_width};
+use super::widgets::{copy_label, copy_text, focus_ring, secondary, secondary_font, text_width};
 use crate::gui;
 
 const FOOTER_SPACING: f32 = 4.0;
@@ -60,20 +60,10 @@ impl CommitHash<'_> {
             .y;
         let size = egui::vec2(self.slot_width(ui, font), height.max(gui::MIN_TARGET));
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-        let now = ui.input(|input| input.time);
         if response.clicked() {
-            ui.ctx().copy_text(self.hash.to_owned());
-            ui.data_mut(|data| data.insert_temp(response.id, now));
+            copy_text(ui, response.id, self.hash);
         }
-        let copied_at = ui.data(|data| data.get_temp::<f64>(response.id));
-        let left = copied_at.map_or(0.0, |at| at + COPIED_FOR - now);
-        let text = if left > 0.0 {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs_f64(left));
-            self.copied
-        } else {
-            self.hash
-        };
+        let text = copy_label(ui, response.id, self.hash, self.copied);
         let enabled = ui.is_enabled();
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, self.label)
@@ -107,7 +97,7 @@ pub(super) mod tests {
     use crate::egui_test::{
         assert_whole, click_at, fully_painted_text_at, run_frame, run_frame_at,
     };
-    use crate::settings::widgets::{CONTENT_MAX_WIDTH, PANEL_MARGIN};
+    use crate::settings::widgets::{CONTENT_MAX_WIDTH, COPIED_FOR, PANEL_MARGIN};
 
     const SIZE: [f32; 2] = [CONTENT_MAX_WIDTH, 600.0];
 

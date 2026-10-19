@@ -4,8 +4,7 @@
 
 use eframe::egui;
 
-use crate::domain::DeviceKind;
-use crate::gui::{self, GLYPH_COLUMN, GLYPH_SIZE, ROW_HEIGHT};
+use crate::gui::{self, GLYPH_COLUMN, ROW_HEIGHT};
 
 pub const CONTENT_MAX_WIDTH: f32 = 640.0;
 pub const PANEL_MARGIN: f32 = 16.0;
@@ -26,7 +25,7 @@ const GROUP_TITLE_GAP: f32 = 6.0;
 const GROUP_GAP: f32 = 20.0;
 const FOOTER_GAP: f32 = 6.0;
 const SECONDARY_SCALE: f32 = 0.88;
-/// How long a copied commit hash reads "Copied", seconds.
+/// How long a copied text reads "Copied", seconds.
 pub(super) const COPIED_FOR: f64 = 1.5;
 
 const SWITCH_SIZE: egui::Vec2 = egui::vec2(44.0, gui::MIN_TARGET);
@@ -153,7 +152,7 @@ pub struct Rows<'a> {
 /// The always-visible line of `Rows::expander`.
 pub struct Expander<'a> {
     pub id: egui::Id,
-    pub kind: DeviceKind,
+    pub glyph: &'a str,
     pub title: &'a str,
     pub note: Option<&'a str>,
     pub value: egui::RichText,
@@ -222,26 +221,12 @@ impl Rows<'_> {
                 header.title,
             )
         });
-        let visuals = self.ui.visuals().clone();
         let radius = f32::from(GROUP_RADIUS) - 1.0;
         if response.hovered() {
-            let fill = visuals
-                .widgets
-                .hovered
-                .weak_bg_fill
-                .gamma_multiply(HOVER_TINT);
-            self.ui
-                .painter()
-                .rect_filled(rect.shrink(1.0), radius, fill);
+            paint_hover(self.ui, rect, radius);
         }
         let inner = rect.shrink2(egui::vec2(ROW_PADDING_X, 0.0));
-        self.ui.painter().text(
-            egui::pos2(inner.left() + GLYPH_COLUMN / 2.0, rect.center().y),
-            egui::Align2::CENTER_CENTER,
-            gui::kind_glyph(header.kind),
-            egui::FontId::proportional(GLYPH_SIZE),
-            visuals.text_color(),
-        );
+        gui::paint_glyph(self.ui, header.glyph, inner.left(), rect.center().y);
 
         let mut right = self.ui.new_child(
             egui::UiBuilder::new()
@@ -258,31 +243,11 @@ impl Rows<'_> {
             .add(egui::Label::new(header.value).selectable(false))
             .rect;
 
-        let body = egui::FontId::proportional(egui::TextStyle::Body.resolve(self.ui.style()).size);
-        let small = secondary_font(self.ui);
-        let (title_height, note_height) = self
-            .ui
-            .ctx()
-            .fonts_mut(|f| (f.row_height(&body), f.row_height(&small)));
-        let height = title_height + header.note.map_or(0.0, |_| note_height);
-        let text = egui::Rect::from_min_max(
-            egui::pos2(inner.left() + GLYPH_COLUMN, rect.center().y - height / 2.0),
-            egui::pos2(value.left() - ROW_GAP, rect.center().y + height / 2.0),
+        let text = egui::Rect::from_x_y_ranges(
+            inner.left() + GLYPH_COLUMN..=value.left() - ROW_GAP,
+            rect.y_range(),
         );
-        let mut text_ui = self.ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(text)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-        );
-        text_ui.spacing_mut().item_spacing.y = 0.0;
-        text_ui.add(egui::Label::new(header.title).truncate().selectable(false));
-        if let Some(note) = header.note {
-            text_ui.add(
-                egui::Label::new(secondary(&text_ui, note))
-                    .truncate()
-                    .selectable(false),
-            );
-        }
+        expander_text(self.ui, text, header.title, header.note);
         if response.has_focus() {
             focus_ring(self.ui, rect.shrink(FOCUS_GAP + FOCUS_WIDTH), radius);
         }
@@ -354,6 +319,44 @@ fn centred_text(
     }
 }
 
+fn paint_hover(ui: &egui::Ui, rect: egui::Rect, radius: f32) {
+    let fill = ui
+        .visuals()
+        .widgets
+        .hovered
+        .weak_bg_fill
+        .gamma_multiply(HOVER_TINT);
+    ui.painter().rect_filled(rect.shrink(1.0), radius, fill);
+}
+
+/// `title` over `note`, truncated to `rect`'s width and centred on its height.
+fn expander_text(ui: &mut egui::Ui, rect: egui::Rect, title: &str, note: Option<&str>) {
+    let body = egui::FontId::proportional(egui::TextStyle::Body.resolve(ui.style()).size);
+    let small = secondary_font(ui);
+    let (title_height, note_height) = ui
+        .ctx()
+        .fonts_mut(|f| (f.row_height(&body), f.row_height(&small)));
+    let height = title_height + note.map_or(0.0, |_| note_height);
+    let text = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.center().y - height / 2.0),
+        egui::pos2(rect.right(), rect.center().y + height / 2.0),
+    );
+    let mut text_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(text)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    text_ui.spacing_mut().item_spacing.y = 0.0;
+    text_ui.add(egui::Label::new(title).truncate().selectable(false));
+    if let Some(note) = note {
+        text_ui.add(
+            egui::Label::new(secondary(&text_ui, note))
+                .truncate()
+                .selectable(false),
+        );
+    }
+}
+
 /// A down chevron, or an up one when `expanded`.
 fn paint_chevron(ui: &egui::Ui, rect: egui::Rect, expanded: bool) {
     let (half, rise) = (rect.width() / 2.0, rect.height() / 4.0);
@@ -400,27 +403,43 @@ pub fn command(ui: &mut egui::Ui, command: &str, copy: &str, copied: &str) -> eg
                 .color(gui::secondary_text(ui.visuals())),
         );
         let id = ui.id().with(("copy-command", command));
-        let now = ui.input(|input| input.time);
-        let copied_at = ui.data(|data| data.get_temp::<f64>(id));
-        let left = copied_at.map_or(0.0, |at| at + COPIED_FOR - now);
-        let label = if left > 0.0 {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs_f64(left));
-            copied
-        } else {
-            copy
-        };
+        let label = copy_label(ui, id, copy, copied);
         let button_font = egui::TextStyle::Button.resolve(ui.style());
         let width = text_width(ui, copy, &button_font).max(text_width(ui, copied, &button_font))
             + 2.0 * ui.spacing().button_padding.x;
         let response = ui.add(egui::Button::new(label).min_size(egui::vec2(width, 0.0)));
         if response.clicked() {
-            ui.ctx().copy_text(command.to_owned());
-            ui.data_mut(|data| data.insert_temp(id, now));
+            copy_text(ui, id, command);
         }
         response
     })
     .inner
+}
+
+/// Copies `text` and starts `id`'s `COPIED_FOR`.
+pub(super) fn copy_text(ui: &egui::Ui, id: egui::Id, text: &str) {
+    ui.ctx().copy_text(text.to_owned());
+    let now = ui.input(|input| input.time);
+    ui.data_mut(|data| data.insert_temp(id, now));
+}
+
+/// `copied` for `COPIED_FOR` after `copy_text` with `id`, else `copy`.
+pub(super) fn copy_label<'a>(
+    ui: &egui::Ui,
+    id: egui::Id,
+    copy: &'a str,
+    copied: &'a str,
+) -> &'a str {
+    let now = ui.input(|input| input.time);
+    let copied_at = ui.data(|data| data.get_temp::<f64>(id));
+    let left = copied_at.map_or(0.0, |at| at + COPIED_FOR - now);
+    if left > 0.0 {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(left));
+        copied
+    } else {
+        copy
+    }
 }
 
 /// An on/off switch. `id` is global so that a test can find it; `label` is

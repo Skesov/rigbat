@@ -366,8 +366,7 @@ impl SettingsApp {
     /// The save problem and the failed action, if any, as banners.
     fn render_problems(&self, ui: &mut egui::Ui) {
         let lang = self.config.lang();
-        let warn =
-            gui::status_colors(ui.visuals(), self.config.palette, gui::targets(ui.ctx())).low;
+        let warn = gui::status_colors_for(ui, self.config.palette).low;
         if let Some(problem) = &self.save_problem {
             let (text, detail) = problem.text(lang);
             let title = fl!(loader(lang), "config-not-saved");

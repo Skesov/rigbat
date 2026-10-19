@@ -25,6 +25,16 @@ pub fn progress_wait(since: std::time::Instant, now: std::time::Instant) -> std:
     PROGRESS_DELAY.saturating_sub(now.saturating_duration_since(since))
 }
 
+/// Whether an action running since `since` shows its progress yet; until it
+/// does, the window repaints when it will.
+pub fn shows_progress(ctx: &egui::Context, since: std::time::Instant) -> bool {
+    let wait = progress_wait(since, std::time::Instant::now());
+    if !wait.is_zero() {
+        ctx.request_repaint_after(wait);
+    }
+    wait.is_zero()
+}
+
 /// WCAG 2.2 SC 2.5.8: the least width and height of anything a pointer operates.
 pub const MIN_TARGET: f32 = 24.0;
 
@@ -201,6 +211,17 @@ pub fn kind_glyph(kind: DeviceKind) -> &'static str {
     }
 }
 
+/// `glyph` centred in the `GLYPH_COLUMN` that starts at `left`.
+pub fn paint_glyph(ui: &egui::Ui, glyph: &str, left: f32, centre_y: f32) {
+    ui.painter().text(
+        egui::pos2(left + GLYPH_COLUMN / 2.0, centre_y),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        egui::FontId::proportional(GLYPH_SIZE),
+        ui.visuals().text_color(),
+    );
+}
+
 /// Hints, notes and subtitles. `weak_text_color` misses WCAG 4.5:1 on a dark panel.
 pub fn secondary_text(visuals: &egui::Visuals) -> egui::Color32 {
     visuals.text_color()
@@ -238,12 +259,7 @@ pub struct StatusColors {
 /// Text roles reach `targets.text` on every surface text is painted on; bars
 /// reach `targets.graphic` on the panel, dimmed included.
 pub fn status_colors(visuals: &egui::Visuals, palette: Palette, targets: Targets) -> StatusColors {
-    let scheme = if visuals.dark_mode {
-        ColorScheme::Dark
-    } else {
-        ColorScheme::Light
-    };
-    let s = palette::swatches(palette, scheme);
+    let s = palette::swatches(palette, scheme(visuals));
     let panel = rgb(visuals.panel_fill);
     let text = |color| {
         text_surfaces(visuals)
@@ -259,6 +275,19 @@ pub fn status_colors(visuals: &egui::Visuals, palette: Palette, targets: Targets
         low: opaque(text(s.low)),
         warn: opaque(text(s.warn)),
         track: opaque(s.track),
+    }
+}
+
+/// `status_colors` for what `ui` paints on.
+pub fn status_colors_for(ui: &egui::Ui, palette: Palette) -> StatusColors {
+    status_colors(ui.visuals(), palette, targets(ui.ctx()))
+}
+
+pub fn scheme(visuals: &egui::Visuals) -> ColorScheme {
+    if visuals.dark_mode {
+        ColorScheme::Dark
+    } else {
+        ColorScheme::Light
     }
 }
 
@@ -586,6 +615,27 @@ mod tests {
             progress_wait(since, since + ms(900)),
             std::time::Duration::ZERO
         );
+    }
+
+    #[test]
+    fn progress_waits_for_the_delay_and_the_window_repaints_when_it_ends() {
+        let ctx = egui::Context::default();
+        let now = std::time::Instant::now();
+        let mut shown = None;
+        let output = crate::egui_test::run_frame(&ctx, [100.0, 100.0], Vec::new(), |ui| {
+            shown = Some(shows_progress(ui.ctx(), now));
+        });
+        assert_eq!(shown, Some(false));
+        let repaint = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert!(repaint <= PROGRESS_DELAY, "{repaint:?}");
+
+        let since = now
+            .checked_sub(PROGRESS_DELAY)
+            .expect("an instant 300 ms ago");
+        crate::egui_test::run_frame(&ctx, [100.0, 100.0], Vec::new(), |ui| {
+            shown = Some(shows_progress(ui.ctx(), since));
+        });
+        assert_eq!(shown, Some(true));
     }
 
     #[test]

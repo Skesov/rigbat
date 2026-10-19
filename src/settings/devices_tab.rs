@@ -32,17 +32,14 @@ impl SettingsApp {
     fn render_refresh_button(&mut self, ui: &mut egui::Ui) {
         let egui_ctx = ui.ctx().clone();
         let l = loader(self.config.lang());
-        let wait = self
+        let progress = self
             .scanning
-            .map(|since| gui::progress_wait(since, std::time::Instant::now()));
-        ui.add_enabled_ui(wait.is_none(), |ui| {
-            let label = match wait {
-                Some(std::time::Duration::ZERO) => fl!(l, "button-refreshing"),
-                Some(wait) => {
-                    ui.ctx().request_repaint_after(wait);
-                    fl!(l, "button-refresh")
-                }
-                None => fl!(l, "button-refresh"),
+            .is_some_and(|since| gui::shows_progress(ui.ctx(), since));
+        ui.add_enabled_ui(self.scanning.is_none(), |ui| {
+            let label = if progress {
+                fl!(l, "button-refreshing")
+            } else {
+                fl!(l, "button-refresh")
             };
             if ui.button(label).clicked() {
                 self.spawn_scan(egui_ctx.clone(), scan::Scan::Refresh);
@@ -70,8 +67,7 @@ impl SettingsApp {
             });
         });
         if self.tray_unanswered {
-            let warn =
-                gui::status_colors(ui.visuals(), self.config.palette, gui::targets(ui.ctx())).warn;
+            let warn = gui::status_colors_for(ui, self.config.palette).warn;
             let text = fl!(l, "devices-tray-unanswered");
             let label = ui.label(egui::RichText::new(&text).color(warn));
             gui::live_region(ui.ctx(), label.id, &text);
@@ -99,7 +95,7 @@ impl SettingsApp {
             .into_iter()
             .partition(|row| row.presence != Presence::Disconnected);
         let visuals = ui.visuals().clone();
-        let colors = gui::status_colors(&visuals, self.config.palette, gui::targets(ui.ctx()));
+        let colors = gui::status_colors_for(ui, self.config.palette);
         let now = state::now_unix();
         for (title, group) in [
             (fl!(l, "devices-connected"), connected),
@@ -127,8 +123,7 @@ impl SettingsApp {
             return;
         }
         let l = loader(self.config.lang());
-        let warn =
-            gui::status_colors(ui.visuals(), self.config.palette, gui::targets(ui.ctx())).warn;
+        let warn = gui::status_colors_for(ui, self.config.palette).warn;
         let title = fl!(l, "devices-no-access-title", count = count);
         let (copy, copied) = (fl!(l, "button-copy"), fl!(l, "button-copied"));
         let mut help = false;
@@ -158,7 +153,7 @@ impl SettingsApp {
         let hover = device_about(row, lang);
         let header = widgets::Expander {
             id: egui::Id::new(("device-row", &row.device)),
-            kind: row.kind,
+            glyph: gui::kind_glyph(row.kind),
             title: name,
             note: note.as_deref(),
             value,
@@ -361,12 +356,7 @@ impl SettingsApp {
                     .clicked()
                     .then_some(RemoveStep::Arm),
                 DeleteCell::Confirm => {
-                    let error = gui::status_colors(
-                        ui.visuals(),
-                        self.config.palette,
-                        gui::targets(ui.ctx()),
-                    )
-                    .low;
+                    let error = gui::status_colors_for(ui, self.config.palette).low;
                     let confirm = egui::RichText::new(fl!(l, "device-remove-confirm")).color(error);
                     let confirmed = ui.button(confirm).clicked();
                     let cancelled = ui.button(fl!(l, "button-cancel")).clicked();
