@@ -541,7 +541,7 @@ mod tests {
     /// the parser's message, until a save goes through again.
     #[test]
     fn a_refused_save_is_shown_until_a_save_succeeds() {
-        let (mut app, path) = app_saving_to("refused-save", Config::default());
+        let (mut app, path, _dir) = app_saving_to("refused-save", Config::default());
         let ctx = egui::Context::default();
         let size = GENERAL_TAB_TEST_SIZE;
         for _ in 0..2 {
@@ -586,14 +586,12 @@ mod tests {
         assert_eq!(app.save_problem, None);
         let painted = fully_painted_text_at(size, |ui| frame(&mut app, ui));
         assert!(!painted.iter().any(|p| p.text == "Changes are not saved"));
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn a_config_that_does_not_parse_is_reported_when_the_window_opens() {
         use crate::settings::SaveProblem;
-        let path = crate::settings::tests::scratch_config_path("unreadable-at-open");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let (_dir, path) = crate::settings::tests::scratch_config_path("unreadable-at-open");
         std::fs::write(&path, "[1,").unwrap();
         let problem = SaveProblem::at_open(Some(&path));
         assert!(
@@ -604,7 +602,6 @@ mod tests {
         std::fs::write(&path, "{}").unwrap();
         assert_eq!(SaveProblem::at_open(Some(&path)), None);
         assert_eq!(SaveProblem::at_open(None), Some(SaveProblem::NoConfigDir));
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     /// A switch that could not write the autostart entry flips back and says
@@ -728,7 +725,7 @@ mod tests {
 
     #[test]
     fn clicking_the_per_device_switch_saves_the_tray_mode() {
-        let (mut app, path) = app_saving_to("per-device-switch", Config::default());
+        let (mut app, path, _dir) = app_saving_to("per-device-switch", Config::default());
         let ctx = egui::Context::default();
         let size = GENERAL_TAB_TEST_SIZE;
         run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
@@ -742,14 +739,13 @@ mod tests {
 
         assert_eq!(config::load_from(&path).tray_mode, TrayMode::PerDevice);
         assert_eq!(app.config.tray_mode, TrayMode::PerDevice);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     /// Focus and Space are enough to flip a switch, and the switch reports
     /// itself as a labelled checkbox to accessibility tools.
     #[test]
     fn a_switch_toggles_from_the_keyboard_and_carries_its_label() {
-        let (mut app, path) = app_saving_to("notifications-switch", Config::default());
+        let (mut app, path, _dir) = app_saving_to("notifications-switch", Config::default());
         let ctx = egui::Context::default();
         let size = GENERAL_TAB_TEST_SIZE;
         run_frame(&ctx, size, Vec::new(), |ui| app.render_general_tab(ui));
@@ -773,7 +769,6 @@ mod tests {
                 && info.selected == Some(false)
         });
         assert!(announced, "{:?}", output.platform_output.events);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     /// Clicks the footer link with a recording URL opener; returns the
@@ -913,7 +908,7 @@ mod tests {
 
     #[test]
     fn choosing_a_hide_offline_period_saves_it_in_minutes() {
-        let (mut app, path) = app_saving_to("hide-offline-after", Config::default());
+        let (mut app, path, _dir) = app_saving_to("hide-offline-after", Config::default());
         let ctx = egui::Context::default();
         let size = GENERAL_TAB_TEST_SIZE;
         let rect_of = |output: &egui::FullOutput, text: &str| {
@@ -933,7 +928,6 @@ mod tests {
 
         assert_eq!(config::load_from(&path).hide_offline_after_mins, 360);
         assert_eq!(app.config.hide_offline_after_mins, 360);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

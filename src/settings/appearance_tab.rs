@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn choosing_a_theme_in_the_combo_saves_it() {
-        let (mut app, path) = app_saving_to("theme-combo", Config::default());
+        let (mut app, path, _dir) = app_saving_to("theme-combo", Config::default());
         let ctx = egui::Context::default();
         let size = TEST_SIZE;
         run_frame(&ctx, size, Vec::new(), |ui| app.render_appearance_tab(ui));
@@ -347,7 +347,6 @@ mod tests {
 
         assert_eq!(config::load_from(&path).theme, WindowTheme::Light);
         assert_eq!(app.config.theme, WindowTheme::Light);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     /// The window's look follows the saved theme; the portal still says dark.
@@ -386,7 +385,7 @@ mod tests {
 
     #[test]
     fn clicking_a_palette_tile_saves_the_palette_and_restyles_the_previews() {
-        let (mut app, path) = app_saving_to("palette-tile", Config::default());
+        let (mut app, path, _dir) = app_saving_to("palette-tile", Config::default());
         let size = TEST_SIZE;
         let nord = fully_painted_text_at(size, |ui| app.render_appearance_tab(ui))
             .into_iter()
@@ -407,7 +406,6 @@ mod tests {
             Some(Palette::Nord),
             "the icon-style tiles are drawn in the new palette"
         );
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

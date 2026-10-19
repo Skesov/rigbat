@@ -556,20 +556,9 @@ mod tests {
     use super::*;
     use crate::config::DeviceSettings;
     use crate::domain::{DeviceInfo, PollOutcome};
+    use crate::test_support::ScratchDir;
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    /// Unique scratch directory under the OS temp dir for one test. Removed
-    /// at the end of the test regardless of outcome.
-    fn scratch_dir(test_name: &str) -> PathBuf {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "rigbat-settings-test-{test_name}-{}-{n}",
-            std::process::id()
-        ))
-    }
 
     pub(super) fn settings_app_with(mut config: Config) -> SettingsApp {
         // Tests assert English text unless they pick a language; LANG must not decide.
@@ -646,26 +635,31 @@ mod tests {
         }
     }
 
-    /// Unique scratch config file path under the OS temp dir for one test.
-    /// Never the real `config::config_path()` — `save_edit` tests must not
-    /// touch `~/.config/rigbat/config.json`.
-    pub(super) fn scratch_config_path(test_name: &str) -> PathBuf {
-        scratch_dir(test_name).join("config.json")
+    /// A config file path in a directory removed when the `ScratchDir` drops.
+    /// Never the real `config::config_path()` — tests must not touch
+    /// `~/.config/rigbat/config.json`.
+    pub(super) fn scratch_config_path(test_name: &str) -> (ScratchDir, PathBuf) {
+        let dir = ScratchDir::new(&format!("settings-{test_name}"));
+        let path = dir.join("config.json");
+        (dir, path)
     }
 
     /// A fresh settings window over a scratch config file, so a click saves
     /// somewhere other than `~/.config/rigbat/config.json`.
-    pub(super) fn app_saving_to(test_name: &str, config: Config) -> (SettingsApp, PathBuf) {
-        let path = scratch_config_path(test_name);
+    pub(super) fn app_saving_to(
+        test_name: &str,
+        config: Config,
+    ) -> (SettingsApp, PathBuf, ScratchDir) {
+        let (dir, path) = scratch_config_path(test_name);
         config::save_to(&path, &config).unwrap();
         let mut app = settings_app_with(config::load_from(&path));
         app.config_path = Some(path.clone());
-        (app, path)
+        (app, path, dir)
     }
 
     #[test]
     fn save_edit_writes_only_the_edited_field() {
-        let path = scratch_config_path("writes-only-edited-field");
+        let (_dir, path) = scratch_config_path("writes-only-edited-field");
         config::save_to(&path, &Config::default()).unwrap();
 
         let result = save_edit(&path, |target| target.low_threshold = 15).unwrap();
@@ -675,14 +669,13 @@ mod tests {
             result.poll_interval_secs,
             Config::default().poll_interval_secs
         );
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     /// A field `edit` does not name — here `primary_device`, which no UI
     /// control ever sets — must survive untouched.
     #[test]
     fn save_edit_preserves_fields_it_does_not_touch() {
-        let path = scratch_config_path("preserves-untouched-fields");
+        let (_dir, path) = scratch_config_path("preserves-untouched-fields");
         config::save_to(
             &path,
             &Config {
@@ -696,14 +689,13 @@ mod tests {
 
         assert_eq!(result.primary_device, Some("mouse".to_string()));
         assert_eq!(result.low_threshold, 10);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     /// Another process writes `hidden_devices` after the window opened; the
     /// window's next save of an unrelated field keeps it.
     #[test]
     fn save_edit_stale_window_snapshot_does_not_clobber_concurrent_disk_write() {
-        let path = scratch_config_path("stale-snapshot");
+        let (_dir, path) = scratch_config_path("stale-snapshot");
         config::save_to(&path, &Config::default()).unwrap();
 
         // The window would have opened here, holding hidden_devices == [].
@@ -722,13 +714,11 @@ mod tests {
 
         assert_eq!(result.hidden_devices, vec!["keyboard".to_string()]);
         assert!(!result.notifications_enabled);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn save_edit_refuses_to_write_over_a_config_that_does_not_parse() {
-        let path = scratch_config_path("broken-on-disk");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let (_dir, path) = scratch_config_path("broken-on-disk");
         let broken = "{ \"hidden_devices\": [\"mouse\"], oops }";
         std::fs::write(&path, broken).unwrap();
 
@@ -736,7 +726,6 @@ mod tests {
 
         assert!(err.is::<config::Unreadable>(), "{err:#}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

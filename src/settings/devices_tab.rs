@@ -981,7 +981,7 @@ mod tests {
 
     #[test]
     fn the_tray_switch_edits_hidden_devices_without_expanding_the_row() {
-        let (mut app, path) = app_saving_to("device-shown-switch", Config::default());
+        let (mut app, path, _dir) = app_saving_to("device-shown-switch", Config::default());
         app.tab = Tab::Devices;
         app.device_rows = every_state();
         let ctx = egui::Context::default();
@@ -999,7 +999,6 @@ mod tests {
             [keyboard().device.name]
         );
         assert_eq!(app.expanded_device, None);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     /// Where `text` was painted this frame, top to bottom.
@@ -1032,7 +1031,7 @@ mod tests {
                 low_threshold: Some(10),
             },
         );
-        let (mut app, path) = app_saving_to(
+        let (mut app, path, _dir) = app_saving_to(
             "device-settings",
             Config {
                 device_overrides: overrides,
@@ -1092,12 +1091,11 @@ mod tests {
         let reset = text_rects(&output, RESET)[0];
         click_at(&ctx, size, reset.center(), |ui| app.render_devices_tab(ui));
         assert!(config::load_from(&path).device_overrides.is_empty());
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn a_seen_before_row_shows_its_age_and_offers_remove_but_no_switch() {
-        let (mut app, path) = app_saving_to("device-remove", Config::default());
+        let (mut app, _path, _dir) = app_saving_to("device-remove", Config::default());
         app.tab = Tab::Devices;
         app.device_rows = every_state();
         let ctx = egui::Context::default();
@@ -1131,7 +1129,6 @@ mod tests {
         assert!(!app.device_rows.iter().any(|r| r.device == earbuds().device));
         assert_eq!(app.expanded_device, None);
         assert_eq!(app.delete_state, DeleteState::Idle);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
