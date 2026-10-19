@@ -2,29 +2,22 @@ use std::collections::HashMap;
 
 use ksni::TrayMethods;
 use tokio::sync::watch;
-use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 use super::item::{RigbatTray, SaveConfig, View};
 use super::resolve::visible;
 use crate::appearance::ColorScheme;
 use crate::config::Config;
-use crate::domain::{AGE_STEP, BootTime, DeviceId, TrayMode, TrayState};
+use crate::domain::{BootTime, DeviceId, TrayMode, TrayState};
 use crate::icon::{IconCache, TinySkiaRenderer};
 use crate::refresh::RefreshSignal;
 
-// ---------------------------------------------------------------------------
-// desired_keys: compute the set of icon keys from mode and shown devices
-// ---------------------------------------------------------------------------
-
 /// Returns the list of tray icon keys for the given mode and shown devices.
 /// `None` is the aggregate/primary icon; `Some(id)` is a per-device icon.
-pub fn desired_keys(mode: TrayMode, shown: &[DeviceId]) -> Vec<Option<DeviceId>> {
+fn desired_keys(mode: TrayMode, shown: &[DeviceId]) -> Vec<Option<DeviceId>> {
     match (mode, shown.is_empty()) {
         // No devices → always one "No devices" aggregate icon.
         (_, true) => vec![None],
-        // One aggregate icon.
         (TrayMode::PrimaryOnly, _) => vec![None],
-        // One icon per shown device.
         (TrayMode::PerDevice, _) => shown.iter().map(|n| Some(n.clone())).collect(),
     }
 }
@@ -40,10 +33,6 @@ fn shown_ids(state: &TrayState, cfg: &Config, now: BootTime) -> Vec<DeviceId> {
     }
     shown
 }
-
-// ---------------------------------------------------------------------------
-// reconcile — sync live SNI items against the desired icon set
-// ---------------------------------------------------------------------------
 
 struct Item {
     handle: ksni::Handle<RigbatTray>,
@@ -89,64 +78,24 @@ async fn reconcile(
             })
             .collect()
     };
-
     let prev_len = items.live.len();
-
-    let to_remove: Vec<Option<DeviceId>> = items
-        .live
-        .keys()
-        .filter(|k| !desired.iter().any(|(key, _)| key == *k))
-        .cloned()
-        .collect();
-    for key in to_remove {
-        if let Some(item) = items.live.remove(&key) {
-            // ksni 0.3.4 keeps the SNI item alive on drop; shutdown() unregisters it.
-            item.handle.shutdown().await;
-        }
-    }
-
+    retire_missing(items, &desired).await;
     let mut touched = 0;
     for (key, view) in desired {
         if let Some(item) = items.live.get_mut(&key) {
-            if item.handle.is_closed() {
-                tracing::warn!("tray icon for {key:?} stopped serving; recreating it");
-            } else if item.view == view {
-                continue;
-            } else {
-                let icon = items.icons.icons(&view.icon);
-                let next = view.clone();
-                let updated = item
-                    .handle
-                    .update(move |tray| {
-                        tray.view = next;
-                        tray.icon = icon;
-                    })
-                    .await;
-                if updated.is_some() {
-                    item.view = view;
+            match try_update(item, &key, &view, &mut items.icons).await {
+                Update::Unchanged => continue,
+                Update::Updated => {
                     touched += 1;
                     continue;
                 }
-                tracing::warn!("tray icon for {key:?} did not take an update; recreating it");
+                Update::Respawn => {
+                    items.live.remove(&key);
+                }
             }
-            items.live.remove(&key);
         }
-        let tray = RigbatTray {
-            key: key.clone(),
-            icon: items.icons.icons(&view.icon),
-            view: view.clone(),
-            config: config.clone(),
-            save_config,
-            refresh: refresh.clone(),
-        };
-        match tray.assume_sni_available(true).spawn().await {
-            Ok(handle) => {
-                items.live.insert(key, Item { handle, view });
-                touched += 1;
-            }
-            Err(e) => {
-                tracing::error!("failed to spawn tray icon for {key:?}: {e}");
-            }
+        if spawn_item(items, key, view, config, save_config, refresh).await {
+            touched += 1;
         }
     }
 
@@ -161,9 +110,84 @@ async fn reconcile(
     touched
 }
 
-// ---------------------------------------------------------------------------
-// run — the manager loop, called from run_tray
-// ---------------------------------------------------------------------------
+async fn retire_missing(items: &mut Items, desired: &[(Option<DeviceId>, View)]) {
+    let to_remove: Vec<Option<DeviceId>> = items
+        .live
+        .keys()
+        .filter(|k| !desired.iter().any(|(key, _)| key == *k))
+        .cloned()
+        .collect();
+    for key in to_remove {
+        if let Some(item) = items.live.remove(&key) {
+            // ksni 0.3.4 keeps the SNI item alive on drop; shutdown() unregisters it.
+            item.handle.shutdown().await;
+        }
+    }
+}
+
+enum Update {
+    Unchanged,
+    Updated,
+    Respawn,
+}
+
+async fn try_update(
+    item: &mut Item,
+    key: &Option<DeviceId>,
+    view: &View,
+    icons: &mut IconCache,
+) -> Update {
+    if item.handle.is_closed() {
+        tracing::warn!("tray icon for {key:?} stopped serving; recreating it");
+        return Update::Respawn;
+    }
+    if item.view == *view {
+        return Update::Unchanged;
+    }
+    let icon = icons.icons(&view.icon);
+    let next = view.clone();
+    let updated = item
+        .handle
+        .update(move |tray| {
+            tray.view = next;
+            tray.icon = icon;
+        })
+        .await;
+    if updated.is_none() {
+        tracing::warn!("tray icon for {key:?} did not take an update; recreating it");
+        return Update::Respawn;
+    }
+    item.view = view.clone();
+    Update::Updated
+}
+
+async fn spawn_item(
+    items: &mut Items,
+    key: Option<DeviceId>,
+    view: View,
+    config: &watch::Sender<Config>,
+    save_config: SaveConfig,
+    refresh: &RefreshSignal,
+) -> bool {
+    let tray = RigbatTray {
+        key: key.clone(),
+        icon: items.icons.icons(&view.icon),
+        view: view.clone(),
+        config: config.clone(),
+        save_config,
+        refresh: refresh.clone(),
+    };
+    match tray.assume_sni_available(true).spawn().await {
+        Ok(handle) => {
+            items.live.insert(key, Item { handle, view });
+            true
+        }
+        Err(e) => {
+            tracing::error!("failed to spawn tray icon for {key:?}: {e}");
+            false
+        }
+    }
+}
 
 pub async fn run(
     mut rx: watch::Receiver<TrayState>,
@@ -175,8 +199,7 @@ pub async fn run(
     let mut items = Items::new();
     let mut config_rx = config.subscribe();
     // Views change with time alone: text that ages ("2h ago") and the offline shelf life.
-    let mut age_tick = interval_at(Instant::now() + AGE_STEP, AGE_STEP);
-    age_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut age_tick = crate::clock::age_ticker();
 
     loop {
         reconcile(&mut items, &rx, &theme_rx, &config, save_config, &refresh).await;
@@ -195,12 +218,10 @@ mod tests {
 
     use super::{desired_keys, shown_ids};
     use crate::config::Config;
-    use crate::domain::{Presence, Transport, TrayMode};
+    use crate::domain::{DeviceInfo, Presence, Transport, TrayMode};
     use crate::tray::fixtures::{key, retained, same_name_two_transports};
     use crate::tray::item::sni_id;
-    use crate::tray::resolve::resolve_for;
-
-    // --- desired_keys -------------------------------------------------------
+    use crate::tray::resolve::{resolve_for, visible};
 
     #[test]
     fn desired_keys_primary_only_returns_one_none() {
@@ -253,10 +274,10 @@ mod tests {
         let percents: Vec<(Transport, Option<u8>)> = keys
             .iter()
             .map(|k| {
-                let r = resolve_for(k.as_ref(), &state, &cfg, now).unwrap();
+                let r = resolve_for(k.as_ref(), &visible(&state, &cfg, now), &cfg).unwrap();
                 (
-                    r.state.info.transport,
-                    r.state.last_reading.map(|r| r.percent),
+                    r.device.info.transport,
+                    r.device.last_reading.map(|r| r.percent),
                 )
             })
             .collect();
@@ -281,32 +302,21 @@ mod tests {
         use tokio::sync::watch;
 
         use super::super::{Items, reconcile, run};
-        use super::{Config, Transport, TrayMode, sni_id};
+        use super::{Config, DeviceInfo, Transport, TrayMode, sni_id};
         use crate::appearance::ColorScheme;
         use crate::bus_test::{eventually, isolated};
         use crate::refresh::RefreshSignal;
-        use crate::tray::fixtures::{make_info, make_reading, make_state, saved};
+        use crate::tray::fixtures::{make_reading, make_state, saved};
 
         const TIMEOUT: Duration = Duration::from_secs(5);
 
-        struct FakeWatcher;
-
-        #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
-        impl FakeWatcher {
-            fn register_status_notifier_item(&self, _service: &str) {}
-
-            #[zbus(property)]
-            fn is_status_notifier_host_registered(&self) -> bool {
-                true
-            }
-        }
-
         async fn serve_fake_watcher() -> zbus::Connection {
+            let (registered, _) = tokio::sync::mpsc::unbounded_channel();
             zbus::connection::Builder::session()
                 .expect("private bus")
                 .name("org.kde.StatusNotifierWatcher")
                 .expect("name")
-                .serve_at("/StatusNotifierWatcher", FakeWatcher)
+                .serve_at("/StatusNotifierWatcher", RecordingWatcher(registered))
                 .expect("path")
                 .build()
                 .await
@@ -339,7 +349,7 @@ mod tests {
                 return;
             }
             let (_state_tx, state_rx) = watch::channel(make_state(vec![(
-                make_info("mouse"),
+                DeviceInfo::test("mouse"),
                 Some(make_reading(80)),
             )]));
             let (_theme_tx, theme_rx) = watch::channel(ColorScheme::Dark);
@@ -396,17 +406,25 @@ mod tests {
             String::try_from(value).ok()
         }
 
-        /// The bus name of the item whose SNI `Id` is `id`.
-        async fn item_named(conn: &zbus::Connection, id: &str) -> Option<String> {
-            let dbus = zbus::fdo::DBusProxy::new(conn).await.ok()?;
-            for name in dbus.list_names().await.ok()? {
-                if name.starts_with("org.kde.StatusNotifierItem-")
-                    && item_property(conn, name.as_str(), "Id").await.as_deref() == Some(id)
-                {
-                    return Some(name.to_string());
+        async fn items(conn: &zbus::Connection) -> Vec<(String, Option<String>)> {
+            let dbus = zbus::fdo::DBusProxy::new(conn).await.expect("DBus proxy");
+            let mut items = Vec::new();
+            for name in dbus.list_names().await.expect("ListNames") {
+                if name.starts_with("org.kde.StatusNotifierItem-") {
+                    let id = item_property(conn, name.as_str(), "Id").await;
+                    items.push((name.to_string(), id));
                 }
             }
-            None
+            items
+        }
+
+        /// The bus name of the item whose SNI `Id` is `id`.
+        async fn item_named(conn: &zbus::Connection, id: &str) -> Option<String> {
+            items(conn)
+                .await
+                .into_iter()
+                .find(|(_, item_id)| item_id.as_deref() == Some(id))
+                .map(|(name, _)| name)
         }
 
         type Layout = (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>);
@@ -445,28 +463,11 @@ mod tests {
         }
 
         async fn item_ids(conn: &zbus::Connection) -> BTreeSet<String> {
-            let dbus = zbus::fdo::DBusProxy::new(conn).await.expect("DBus proxy");
-            let mut ids = BTreeSet::new();
-            for name in dbus.list_names().await.expect("ListNames") {
-                if !name.starts_with("org.kde.StatusNotifierItem-") {
-                    continue;
-                }
-                let reply = conn
-                    .call_method(
-                        Some(name.as_str()),
-                        "/StatusNotifierItem",
-                        Some("org.freedesktop.DBus.Properties"),
-                        "Get",
-                        &("org.kde.StatusNotifierItem", "Id"),
-                    )
-                    .await;
-                let id = reply.ok().and_then(|reply| {
-                    let value: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
-                    String::try_from(value).ok()
-                });
-                ids.extend(id);
-            }
-            ids
+            items(conn)
+                .await
+                .into_iter()
+                .filter_map(|(_, id)| id)
+                .collect()
         }
 
         async fn until_ids(conn: &zbus::Connection, want: &[&str]) {
@@ -485,8 +486,8 @@ mod tests {
             }
             let _watcher = serve_fake_watcher().await;
 
-            let sysfs = make_info("mouse");
-            let mut bluetooth = make_info("mouse");
+            let sysfs = DeviceInfo::test("mouse");
+            let mut bluetooth = DeviceInfo::test("mouse");
             bluetooth.transport = Transport::Bluetooth;
             let (state_tx, state_rx) = watch::channel(make_state(vec![
                 (sysfs.clone(), Some(make_reading(80))),
@@ -529,10 +530,10 @@ mod tests {
             }
             let _watcher = serve_fake_watcher().await;
 
-            let mut keyboard = make_info("keyboard");
+            let mut keyboard = DeviceInfo::test("keyboard");
             keyboard.kind = crate::domain::DeviceKind::Keyboard;
             let (_state_tx, state_rx) = watch::channel(make_state(vec![
-                (make_info("mouse"), Some(make_reading(80))),
+                (DeviceInfo::test("mouse"), Some(make_reading(80))),
                 (keyboard, Some(make_reading(50))),
             ]));
             let (_theme_tx, theme_rx) = watch::channel(ColorScheme::Dark);
@@ -602,7 +603,7 @@ mod tests {
             let _watcher = serve_fake_watcher().await;
             let client = zbus::Connection::session().await.expect("private bus");
 
-            let mouse = make_info("mouse");
+            let mouse = DeviceInfo::test("mouse");
             let state = |percent| make_state(vec![(mouse.clone(), Some(make_reading(percent)))]);
             let (state_tx, state_rx) = watch::channel(state(80));
             let (_theme_tx, theme_rx) = watch::channel(ColorScheme::Dark);
@@ -648,7 +649,7 @@ mod tests {
             }
             let _watcher = serve_fake_watcher().await;
 
-            let (mouse, pad) = (make_info("mouse"), make_info("pad"));
+            let (mouse, pad) = (DeviceInfo::test("mouse"), DeviceInfo::test("pad"));
             let state = |mouse_percent| {
                 make_state(vec![
                     (mouse.clone(), Some(make_reading(mouse_percent))),

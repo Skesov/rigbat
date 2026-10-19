@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::domain::{
-    BatteryReading, ChargeState, DeviceId, DeviceInfo, DeviceKind, DeviceState, Presence,
-    Transport, TrayState,
+    BatteryReading, ChargeState, DeviceId, DeviceInfo, DeviceState, Presence, Transport, TrayState,
 };
 
 pub(super) fn id(name: &str, transport: Transport, locator: Option<&str>) -> DeviceId {
@@ -16,18 +15,9 @@ pub(super) fn id(name: &str, transport: Transport, locator: Option<&str>) -> Dev
     }
 }
 
-/// The `DeviceId` of a `make_info` device.
+/// The `DeviceId` of a `DeviceInfo::test` device.
 pub(super) fn key(name: &str) -> DeviceId {
-    make_info(name).id()
-}
-
-pub(super) fn make_info(name: &str) -> DeviceInfo {
-    DeviceInfo {
-        name: name.to_string(),
-        kind: DeviceKind::Mouse,
-        transport: Transport::Sysfs,
-        locator: None,
-    }
+    DeviceInfo::test(name).id()
 }
 
 pub(super) fn make_reading(percent: u8) -> BatteryReading {
@@ -38,32 +28,26 @@ pub(super) fn make_reading(percent: u8) -> BatteryReading {
 /// `age` ago — the state a sleeping Bluetooth peripheral is in, and the
 /// one `Config::hide_offline_after` puts a shelf life on.
 pub(super) fn retained(name: &str, percent: u8, age: Duration) -> DeviceState {
-    DeviceState {
-        info: make_info(name),
-        last_reading: Some(make_reading(percent)),
-        last_seen: crate::clock::now().checked_sub(age),
-        presence: Presence::Unreachable,
-        estimate: crate::domain::Estimate::Unknown,
-    }
+    DeviceState::test(name)
+        .presence(Presence::Unreachable)
+        .reading(make_reading(percent))
+        .seen(crate::clock::now().checked_sub(age))
 }
 
 /// Builds a `TrayState` from (info, reading) pairs: `Some` reading means
-/// `Online`, `None` means never seen (`Unreachable`, nothing retained) —
-/// matching what these tests exercised before presence existed.
+/// `Online`, `None` means never seen (`Unreachable`, nothing retained).
 pub(super) fn make_state(devices: Vec<(DeviceInfo, Option<BatteryReading>)>) -> TrayState {
     TrayState {
         devices: devices
             .into_iter()
             .map(|(info, reading)| DeviceState {
                 info,
-                last_reading: reading,
-                last_seen: reading.map(|_| crate::clock::now()),
-                presence: if reading.is_some() {
-                    Presence::Online
-                } else {
-                    Presence::Unreachable
-                },
-                estimate: crate::domain::Estimate::Unknown,
+                ..match reading {
+                    Some(reading) => DeviceState::test("")
+                        .reading(reading)
+                        .seen(crate::clock::now()),
+                    None => DeviceState::test("").presence(Presence::Unreachable),
+                }
             })
             .collect(),
     }
@@ -81,15 +65,14 @@ pub(super) fn cfg_with_primary(primary: Option<&str>) -> Config {
 pub(super) fn same_name_two_transports(bt_presence: Presence) -> TrayState {
     let mx = |transport, locator: &str, percent, presence| DeviceState {
         info: DeviceInfo {
-            name: "MX".to_owned(),
-            kind: DeviceKind::Mouse,
             transport,
             locator: Some(locator.to_owned()),
+            ..DeviceInfo::test("MX")
         },
-        last_reading: Some(make_reading(percent)),
-        last_seen: Some(crate::clock::now()),
-        presence,
-        estimate: crate::domain::Estimate::Unknown,
+        ..DeviceState::test("MX")
+            .presence(presence)
+            .reading(make_reading(percent))
+            .seen(crate::clock::now())
     };
     TrayState {
         devices: vec![
@@ -100,13 +83,7 @@ pub(super) fn same_name_two_transports(bt_presence: Presence) -> TrayState {
 }
 
 pub(super) fn no_access(name: &str) -> DeviceState {
-    DeviceState {
-        info: make_info(name),
-        last_reading: None,
-        last_seen: None,
-        presence: Presence::NoAccess,
-        estimate: crate::domain::Estimate::Unknown,
-    }
+    DeviceState::test(name).presence(Presence::NoAccess)
 }
 
 pub(super) fn saved(_: &Config) -> anyhow::Result<()> {

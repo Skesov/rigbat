@@ -1,10 +1,10 @@
 use crate::config::Config;
 use crate::domain::{
-    BootTime, DeviceId, DeviceState, PrimaryStatus, Roster, TrayState, device_status, is_visible,
+    BootTime, DeviceId, DeviceState, PrimaryStatus, Roster, TrayState, device_status,
 };
 
 /// The devices the tray shows, in roster order.
-pub(super) fn visible<'a>(state: &'a TrayState, cfg: &Config, now: BootTime) -> Roster<'a> {
+pub(crate) fn visible<'a>(state: &'a TrayState, cfg: &Config, now: BootTime) -> Roster<'a> {
     Roster::visible(
         &state.devices,
         |name| cfg.is_shown(name),
@@ -13,67 +13,39 @@ pub(super) fn visible<'a>(state: &'a TrayState, cfg: &Config, now: BootTime) -> 
     )
 }
 
-/// The device the single (aggregate) icon represents: `Roster::featured`.
-pub(super) fn featured_id(state: &TrayState, cfg: &Config, now: BootTime) -> Option<DeviceId> {
-    visible(state, cfg, now)
-        .featured(cfg.primary_device.as_deref())
-        .map(|d| d.info.id())
-}
-
-// ---------------------------------------------------------------------------
-// resolve — the single answer to "which device does this icon represent?"
-// ---------------------------------------------------------------------------
-
 /// The device a tray icon stands for, resolved against the current state and config.
 pub(crate) struct Resolved {
-    pub(crate) state: DeviceState,
+    pub(crate) device: DeviceState,
     pub(crate) status: PrimaryStatus,
     /// `true` when `status` classifies a retained reading from a device that
     /// is not currently `Online` — the icon should render dimmed.
     pub(super) stale: bool,
 }
 
-/// Resolves an icon's device from its key, the current tray state and config.
+/// Resolves an icon's device from its key among the devices the tray shows.
 ///
-/// Per-device icon (`key = Some(id)`): that device, if present and shown.
-/// A device named in `hidden_devices` resolves to `None` even if `key` still
-/// names it: `desired_keys` only creates per-device icons from the shown
-/// list, so a keyed-but-hidden state is transient (config changed, reconcile
-/// has not yet retired the icon) and showing it for one frame would be the
-/// bug.
-/// Aggregate icon (`key = None`): `featured_id`'s pick.
-///
-/// `classify` only knows readings, not reachability. A device that is not
-/// `Online` still shows its retained percentage (marked `stale`) as long as
-/// one exists — Bluetooth peripherals sleep constantly, and a device whose
-/// last-known charge is 88% should not flash "offline" just because it is
-/// asleep. Only a device with no reading at all falls back to
-/// `PrimaryStatus::Offline`.
-///
-/// The retained charge state does not survive the presence drop, though: a
-/// stored `ChargeState::Charging` describes a live condition that is no
-/// longer known to be true, and (worse) it outranks `Low` in `classify`'s
-/// priority, hiding a low battery behind a stale green icon. So a stale
-/// reading is classified by `classify_stale`, which looks only at the
-/// percentage.
+/// Per-device icon (`key = Some(id)`): that device, if shown. A device named
+/// in `hidden_devices` resolves to `None` even if `key` still names it:
+/// `desired_keys` only creates per-device icons from the shown list, so a
+/// keyed-but-hidden state is transient (config changed, reconcile has not yet
+/// retired the icon) and showing it for one frame would be the bug.
+/// Aggregate icon (`key = None`): `Roster::featured`'s pick.
 pub(crate) fn resolve_for(
     key: Option<&DeviceId>,
-    state: &TrayState,
+    roster: &Roster<'_>,
     cfg: &Config,
-    now: BootTime,
 ) -> Option<Resolved> {
-    let id = match key {
-        Some(id) => id.clone(),
-        None => featured_id(state, cfg, now)?,
-    };
-    let device = state
-        .devices
-        .iter()
-        .find(|d| d.info.id() == id)
-        .filter(|d| is_visible(d, |name| cfg.is_shown(name), now, cfg.hide_offline_after()))?;
+    let device = match key {
+        Some(id) => roster
+            .devices()
+            .iter()
+            .copied()
+            .find(|d| d.info.id() == *id),
+        None => roster.featured(cfg.primary_device.as_deref()),
+    }?;
     let (status, stale) = device_status(device, cfg.effective_low_threshold(&device.info.name));
     Some(Resolved {
-        state: device.clone(),
+        device: device.clone(),
         status,
         stale,
     })
@@ -83,14 +55,40 @@ pub(crate) fn resolve_for(
 mod tests {
     use std::time::Duration;
 
-    use super::{featured_id, resolve_for};
+    use super::{Resolved, visible};
     use crate::config::Config;
-    use crate::domain::{BatteryReading, BootTime, ChargeState, DeviceState, Presence};
-    use crate::domain::{PrimaryStatus, Transport, TrayState};
+    use crate::domain::{BatteryReading, BootTime, ChargeState, DeviceId, DeviceInfo};
+    use crate::domain::{DeviceState, Presence, PrimaryStatus, Transport, TrayState};
     use crate::tray::fixtures::{
-        cfg_with_primary, key, make_info, make_reading, make_state, no_access, retained,
+        cfg_with_primary, key, make_reading, make_state, no_access, retained,
         same_name_two_transports,
     };
+
+    fn featured_id(state: &TrayState, cfg: &Config, now: BootTime) -> Option<DeviceId> {
+        visible(state, cfg, now)
+            .featured(cfg.primary_device.as_deref())
+            .map(|d| d.info.id())
+    }
+
+    fn resolve_for(
+        key: Option<&DeviceId>,
+        state: &TrayState,
+        cfg: &Config,
+        now: BootTime,
+    ) -> Option<Resolved> {
+        super::resolve_for(key, &visible(state, cfg, now), cfg)
+    }
+
+    fn unreachable(reading: Option<BatteryReading>) -> TrayState {
+        TrayState {
+            devices: vec![
+                DeviceState::test("mouse")
+                    .presence(Presence::Unreachable)
+                    .reading(reading)
+                    .seen(reading.map(|_| crate::clock::now())),
+            ],
+        }
+    }
 
     /// The pin is by name; between two devices sharing it, the aggregate icon
     /// shows the one that is answering, not whichever the roster lists first.
@@ -101,7 +99,7 @@ mod tests {
         let featured = featured_id(&state, &cfg, crate::clock::now()).unwrap();
         assert_eq!(featured.transport, Transport::Bluetooth);
         let resolved = resolve_for(None, &state, &cfg, crate::clock::now()).unwrap();
-        assert_eq!(resolved.state.last_reading, Some(make_reading(40)));
+        assert_eq!(resolved.device.last_reading, Some(make_reading(40)));
     }
 
     #[test]
@@ -119,8 +117,8 @@ mod tests {
     #[test]
     fn featured_name_explicit_shown_returns_that_name() {
         let state = make_state(vec![
-            (make_info("mouse"), Some(make_reading(80))),
-            (make_info("keyboard"), Some(make_reading(50))),
+            (DeviceInfo::test("mouse"), Some(make_reading(80))),
+            (DeviceInfo::test("keyboard"), Some(make_reading(50))),
         ]);
         let cfg = cfg_with_primary(Some("keyboard"));
         assert_eq!(
@@ -135,9 +133,9 @@ mod tests {
         let mut cfg = cfg_with_primary(Some("gamepad"));
         cfg.hidden_devices = vec!["gamepad".to_string()];
         let state = make_state(vec![
-            (make_info("mouse"), Some(make_reading(80))),
-            (make_info("keyboard"), Some(make_reading(50))),
-            (make_info("gamepad"), Some(make_reading(30))),
+            (DeviceInfo::test("mouse"), Some(make_reading(80))),
+            (DeviceInfo::test("keyboard"), Some(make_reading(50))),
+            (DeviceInfo::test("gamepad"), Some(make_reading(30))),
         ]);
         assert_eq!(
             featured_name(&state, &cfg, crate::clock::now()),
@@ -148,8 +146,8 @@ mod tests {
     #[test]
     fn featured_name_no_explicit_returns_first_connected_shown() {
         let state = make_state(vec![
-            (make_info("mouse"), None),
-            (make_info("keyboard"), Some(make_reading(60))),
+            (DeviceInfo::test("mouse"), None),
+            (DeviceInfo::test("keyboard"), Some(make_reading(60))),
         ]);
         let cfg = cfg_with_primary(None);
         assert_eq!(
@@ -179,8 +177,8 @@ mod tests {
     #[test]
     fn featured_name_ignores_devices_that_never_answered() {
         let state = make_state(vec![
-            (make_info("mouse"), None),
-            (make_info("keyboard"), None),
+            (DeviceInfo::test("mouse"), None),
+            (DeviceInfo::test("keyboard"), None),
         ]);
         let cfg = cfg_with_primary(None);
         assert_eq!(featured_name(&state, &cfg, crate::clock::now()), None);
@@ -213,8 +211,8 @@ mod tests {
         let mut cfg = cfg_with_primary(None);
         cfg.hidden_devices = vec!["mouse".to_string(), "keyboard".to_string()];
         let state = make_state(vec![
-            (make_info("mouse"), Some(make_reading(80))),
-            (make_info("keyboard"), Some(make_reading(50))),
+            (DeviceInfo::test("mouse"), Some(make_reading(80))),
+            (DeviceInfo::test("keyboard"), Some(make_reading(50))),
         ]);
         // Both present devices are hidden.
         assert_eq!(featured_name(&state, &cfg, crate::clock::now()), None);
@@ -224,24 +222,24 @@ mod tests {
 
     #[test]
     fn resolve_for_per_device_key_present_and_shown() {
-        let state = make_state(vec![(make_info("mouse"), Some(make_reading(80)))]);
+        let state = make_state(vec![(DeviceInfo::test("mouse"), Some(make_reading(80)))]);
         let cfg = cfg_with_primary(None);
         let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
-        assert_eq!(resolved.state.info.name, "mouse");
-        assert_eq!(resolved.state.last_reading, Some(make_reading(80)));
+        assert_eq!(resolved.device.info.name, "mouse");
+        assert_eq!(resolved.device.last_reading, Some(make_reading(80)));
     }
 
     #[test]
     fn resolve_for_per_device_key_hidden_by_hidden_devices_returns_none() {
         let mut cfg = cfg_with_primary(None);
         cfg.hidden_devices = vec!["mouse".to_string()];
-        let state = make_state(vec![(make_info("mouse"), Some(make_reading(80)))]);
+        let state = make_state(vec![(DeviceInfo::test("mouse"), Some(make_reading(80)))]);
         assert!(resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).is_none());
     }
 
     #[test]
     fn resolve_for_per_device_key_absent_from_state_returns_none() {
-        let state = make_state(vec![(make_info("keyboard"), Some(make_reading(50)))]);
+        let state = make_state(vec![(DeviceInfo::test("keyboard"), Some(make_reading(50)))]);
         let cfg = cfg_with_primary(None);
         assert!(resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).is_none());
     }
@@ -249,12 +247,12 @@ mod tests {
     #[test]
     fn resolve_for_aggregate_key_uses_explicit_primary_device() {
         let state = make_state(vec![
-            (make_info("mouse"), Some(make_reading(80))),
-            (make_info("keyboard"), Some(make_reading(50))),
+            (DeviceInfo::test("mouse"), Some(make_reading(80))),
+            (DeviceInfo::test("keyboard"), Some(make_reading(50))),
         ]);
         let cfg = cfg_with_primary(Some("keyboard"));
         let resolved = resolve_for(None, &state, &cfg, crate::clock::now()).unwrap();
-        assert_eq!(resolved.state.info.name, "keyboard");
+        assert_eq!(resolved.device.info.name, "keyboard");
     }
 
     #[test]
@@ -266,7 +264,7 @@ mod tests {
 
     #[test]
     fn resolve_for_status_uses_per_device_low_threshold_override() {
-        let state = make_state(vec![(make_info("mouse"), Some(make_reading(15)))]);
+        let state = make_state(vec![(DeviceInfo::test("mouse"), Some(make_reading(15)))]);
         let mut cfg = cfg_with_primary(None);
 
         // Global threshold (20) would already flag 15% as Low; override it down
@@ -289,36 +287,19 @@ mod tests {
     #[test]
     fn resolve_for_unreachable_device_with_retained_reading_classifies_and_marks_stale() {
         let cfg = cfg_with_primary(None);
-        let state = TrayState {
-            devices: vec![DeviceState {
-                info: make_info("mouse"),
-                last_reading: Some(make_reading(5)), // classifies as Low
-                last_seen: Some(crate::clock::now()),
-                presence: Presence::Unreachable,
-                estimate: crate::domain::Estimate::Unknown,
-            }],
-        };
+        let state = unreachable(Some(make_reading(5)));
         let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
         assert!(matches!(resolved.status, PrimaryStatus::Low { .. }));
         assert!(resolved.stale);
     }
 
+    /// A wireless dongle stays enumerated while its mouse is off, so the device
+    /// is discovered and polled and never answers. An empty battery outline
+    /// that has never meant anything is worse than no icon.
     #[test]
-    /// The icon this removed: a wireless dongle stays enumerated while its
-    /// mouse is off, so the device is discovered and polled and never answers.
-    /// An empty battery outline that has never meant anything is worse than no
-    /// icon — the user reported one sitting in the tray for days.
     fn resolve_for_unreachable_device_with_no_reading_shows_nothing() {
         let cfg = cfg_with_primary(None);
-        let state = TrayState {
-            devices: vec![DeviceState {
-                info: make_info("mouse"),
-                last_reading: None,
-                last_seen: None,
-                presence: Presence::Unreachable,
-                estimate: crate::domain::Estimate::Unknown,
-            }],
-        };
+        let state = unreachable(None);
         assert!(resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).is_none());
     }
 
@@ -348,18 +329,9 @@ mod tests {
 
     #[test]
     fn resolve_for_unreachable_stale_charging_never_shows_charging() {
-        // Regression test for the reported bug: a mouse retained at 80%
-        // Charging, then gone unreachable, must not render green.
+        // A mouse retained at 80% Charging, then gone unreachable, must not render green.
         let cfg = cfg_with_primary(None);
-        let state = TrayState {
-            devices: vec![DeviceState {
-                info: make_info("mouse"),
-                last_reading: Some(BatteryReading::new(80, ChargeState::Charging)),
-                last_seen: Some(crate::clock::now()),
-                presence: Presence::Unreachable,
-                estimate: crate::domain::Estimate::Unknown,
-            }],
-        };
+        let state = unreachable(Some(BatteryReading::new(80, ChargeState::Charging)));
         let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
         assert_eq!(resolved.status, PrimaryStatus::Ok { percent: 80 });
         assert!(resolved.stale);
@@ -370,15 +342,7 @@ mod tests {
         // A stale Charging flag must not outrank and hide a low battery.
         let mut cfg = cfg_with_primary(None);
         cfg.low_threshold = 20;
-        let state = TrayState {
-            devices: vec![DeviceState {
-                info: make_info("mouse"),
-                last_reading: Some(BatteryReading::new(15, ChargeState::Charging)),
-                last_seen: Some(crate::clock::now()),
-                presence: Presence::Unreachable,
-                estimate: crate::domain::Estimate::Unknown,
-            }],
-        };
+        let state = unreachable(Some(BatteryReading::new(15, ChargeState::Charging)));
         let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
         assert_eq!(resolved.status, PrimaryStatus::Low { percent: 15 });
         assert!(resolved.stale);
@@ -386,7 +350,7 @@ mod tests {
 
     #[test]
     fn resolve_for_online_device_is_never_stale() {
-        let state = make_state(vec![(make_info("mouse"), Some(make_reading(80)))]);
+        let state = make_state(vec![(DeviceInfo::test("mouse"), Some(make_reading(80)))]);
         let cfg = cfg_with_primary(None);
         let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
         assert!(!resolved.stale);
@@ -394,7 +358,7 @@ mod tests {
 
     #[test]
     fn featured_id_prefers_an_online_device_over_one_without_access() {
-        let mut state = make_state(vec![(make_info("keyboard"), Some(make_reading(60)))]);
+        let mut state = make_state(vec![(DeviceInfo::test("keyboard"), Some(make_reading(60)))]);
         state.devices.insert(0, no_access("mouse"));
         let cfg = cfg_with_primary(None);
         assert_eq!(

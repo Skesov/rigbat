@@ -2,21 +2,17 @@ use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{MenuItem, ToolTip, Tray};
 use tokio::sync::watch;
 
-use super::resolve::{featured_id, resolve_for, visible};
+use super::resolve::{resolve_for, visible};
 use crate::appearance::ColorScheme;
 use crate::config::Config;
 use crate::domain::{
-    BootTime, DeviceId, PrimaryStatus, TrayMode, TrayState, absent_line, device_line,
-    device_status, freedesktop_icon_name,
+    BootTime, DeviceId, DeviceState, PrimaryStatus, Roster, TrayMode, TrayState, absent_line,
+    device_line, device_status, freedesktop_icon_name,
 };
 use crate::i18n::{Lang, fl, loader};
 use crate::icon::{IconKey, Theme};
 use crate::launch::spawn as launch;
 use crate::refresh::RefreshSignal;
-
-// ---------------------------------------------------------------------------
-// sni_id: a stable, unique SNI item id per device
-// ---------------------------------------------------------------------------
 
 /// Builds the SNI item id for a per-device icon.
 ///
@@ -51,10 +47,6 @@ fn id_hash(id: &DeviceId) -> u32 {
     }
     hash
 }
-
-// ---------------------------------------------------------------------------
-// RigbatTray — unified SNI item for both aggregate and per-device icons
-// ---------------------------------------------------------------------------
 
 /// Writes `config.json`; a parameter so tests never touch the real file.
 pub type SaveConfig = fn(&Config) -> anyhow::Result<()>;
@@ -104,15 +96,16 @@ impl View {
     ) -> Self {
         let lang = cfg.lang();
         let l = loader(lang);
+        let roster = visible(state, cfg, now);
         // `None` when the icon has nothing to show: no devices, or the keyed one is gone or hidden.
-        let resolved = resolve_for(key, state, cfg, now);
+        let resolved = resolve_for(key, &roster, cfg);
         let title = match (key, &resolved) {
             (Some(k), _) => k.name.clone(),
-            (None, Some(r)) => r.state.info.name.clone(),
+            (None, Some(r)) => r.device.info.name.clone(),
             (None, None) => "rigbat".to_owned(),
         };
         let tool_tip = match (&resolved, key) {
-            (Some(r), _) => device_line(&r.state, r.status, now, lang),
+            (Some(r), _) => device_line(&r.device, r.status, now, lang),
             (None, Some(id)) => absent_line(&id.name, lang),
             (None, None) => fl!(l, "tray-no-devices"),
         };
@@ -120,44 +113,60 @@ impl View {
             status: resolved
                 .as_ref()
                 .map_or(PrimaryStatus::Offline, |r| r.status),
-            kind: resolved.as_ref().map(|r| r.state.info.kind),
+            kind: resolved.as_ref().map(|r| r.device.info.kind),
             theme: Theme::new(cfg.palette, scheme),
             mode: cfg.display_mode,
             stale: resolved.as_ref().is_some_and(|r| r.stale),
         };
-        let pinned = featured_id(state, cfg, now)
-            .filter(|id| cfg.primary_device.as_deref() == Some(id.name.as_str()));
-        let mut any_low = false;
-        let rows = visible(state, cfg, now)
+        let shown: Vec<(&DeviceState, PrimaryStatus)> = roster
             .devices()
             .iter()
-            .map(|d| {
+            .map(|&d| {
                 let (status, _) = device_status(d, cfg.effective_low_threshold(&d.info.name));
-                any_low |= matches!(status, PrimaryStatus::Low { .. });
-                MenuRow {
-                    name: d.info.name.clone(),
-                    label: mnemonic_escape(&device_line(d, status, now, lang)),
-                    icon_name: freedesktop_icon_name(d.info.kind).to_owned(),
-                    pinned: pinned.as_ref() == Some(&d.info.id()),
-                }
+                (d, status)
             })
             .collect();
         // A per-device icon speaks for its own device; the single icon for every shown one.
         let attention = match key {
-            Some(_) => matches!(icon.status, PrimaryStatus::Low { .. }),
-            None => any_low,
+            Some(_) => is_low(icon.status),
+            None => shown.iter().any(|&(_, status)| is_low(status)),
         };
         Self {
             attention,
             title,
             icon,
             tool_tip,
-            rows,
+            rows: menu_rows(&shown, &roster, cfg, now),
             mode: cfg.tray_mode,
             automatic: cfg.primary_device.is_none(),
             lang,
         }
     }
+}
+
+fn is_low(status: PrimaryStatus) -> bool {
+    matches!(status, PrimaryStatus::Low { .. })
+}
+
+fn menu_rows(
+    shown: &[(&DeviceState, PrimaryStatus)],
+    roster: &Roster<'_>,
+    cfg: &Config,
+    now: BootTime,
+) -> Vec<MenuRow> {
+    let pinned = roster
+        .featured(cfg.primary_device.as_deref())
+        .filter(|d| cfg.primary_device.as_deref() == Some(d.info.name.as_str()))
+        .map(|d| d.info.id());
+    shown
+        .iter()
+        .map(|&(d, status)| MenuRow {
+            name: d.info.name.clone(),
+            label: mnemonic_escape(&device_line(d, status, now, cfg.lang())),
+            icon_name: freedesktop_icon_name(d.info.kind).to_owned(),
+            pinned: pinned.as_ref() == Some(&d.info.id()),
+        })
+        .collect()
 }
 
 impl RigbatTray {
@@ -233,100 +242,79 @@ impl Tray for RigbatTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let View {
-            rows,
-            mode,
-            automatic,
-            lang,
-            ..
-        } = self.view.clone();
-        let l = loader(lang);
-
-        let mut items: Vec<MenuItem<Self>> = Vec::new();
-        if rows.is_empty() {
-            items.push(
-                StandardItem {
-                    label: fl!(l, "tray-no-devices"),
-                    enabled: false,
-                    ..StandardItem::default()
-                }
-                .into(),
-            );
-        } else if mode == TrayMode::PrimaryOnly {
-            items.push(
-                CheckmarkItem {
-                    label: fl!(l, "tray-automatic"),
-                    checked: automatic,
-                    activate: Box::new(|tray: &mut Self| tray.pin(None)),
-                    ..CheckmarkItem::default()
-                }
-                .into(),
-            );
-            for row in rows {
-                let name = row.name;
-                items.push(
-                    CheckmarkItem {
-                        label: row.label,
-                        icon_name: row.icon_name,
-                        checked: row.pinned,
-                        activate: Box::new(move |tray: &mut Self| tray.pin(Some(name.clone()))),
-                        ..CheckmarkItem::default()
-                    }
-                    .into(),
-                );
-            }
-        } else {
-            for row in rows {
-                items.push(
-                    StandardItem {
-                        label: row.label,
-                        icon_name: row.icon_name,
-                        activate: Box::new(|_: &mut Self| launch("dashboard")),
-                        ..StandardItem::default()
-                    }
-                    .into(),
-                );
-            }
-        }
-
-        items.push(MenuItem::Separator);
-        items.push(
-            StandardItem {
-                label: fl!(l, "tray-dashboard"),
-                activate: Box::new(|_: &mut Self| launch("dashboard")),
-                ..StandardItem::default()
-            }
-            .into(),
-        );
-        items.push(
-            StandardItem {
-                label: fl!(l, "tray-refresh"),
-                activate: Box::new(|tray: &mut Self| tray.refresh.trigger()),
-                ..StandardItem::default()
-            }
-            .into(),
-        );
-        items.push(
-            StandardItem {
-                label: fl!(l, "tray-settings"),
-                activate: Box::new(|_: &mut Self| launch("settings")),
-                ..StandardItem::default()
-            }
-            .into(),
-        );
-        items.push(MenuItem::Separator);
-        items.push(
-            StandardItem {
-                label: fl!(l, "tray-quit"),
-                activate: Box::new(|_| std::process::exit(0)),
-                ..StandardItem::default()
-            }
-            .into(),
-        );
+        let l = loader(self.view.lang);
+        let mut items = device_items(&self.view);
+        items.extend([
+            MenuItem::Separator,
+            action(fl!(l, "tray-dashboard"), |_| launch("dashboard")),
+            action(fl!(l, "tray-refresh"), |tray| tray.refresh.trigger()),
+            action(fl!(l, "tray-settings"), |_| launch("settings")),
+            MenuItem::Separator,
+            action(fl!(l, "tray-quit"), |_| std::process::exit(0)),
+        ]);
         items
     }
 }
 
+fn action(
+    label: String,
+    activate: impl Fn(&mut RigbatTray) + Send + 'static,
+) -> MenuItem<RigbatTray> {
+    StandardItem {
+        label,
+        activate: Box::new(activate),
+        ..StandardItem::default()
+    }
+    .into()
+}
+
+fn device_items(view: &View) -> Vec<MenuItem<RigbatTray>> {
+    let l = loader(view.lang);
+    if view.rows.is_empty() {
+        return vec![
+            StandardItem {
+                label: fl!(l, "tray-no-devices"),
+                enabled: false,
+                ..StandardItem::default()
+            }
+            .into(),
+        ];
+    }
+    if view.mode == TrayMode::PerDevice {
+        return view
+            .rows
+            .iter()
+            .map(|row| {
+                StandardItem {
+                    label: row.label.clone(),
+                    icon_name: row.icon_name.clone(),
+                    activate: Box::new(|_: &mut RigbatTray| launch("dashboard")),
+                    ..StandardItem::default()
+                }
+                .into()
+            })
+            .collect();
+    }
+    let automatic = CheckmarkItem {
+        label: fl!(l, "tray-automatic"),
+        checked: view.automatic,
+        activate: Box::new(|tray: &mut RigbatTray| tray.pin(None)),
+        ..CheckmarkItem::default()
+    };
+    std::iter::once(automatic.into())
+        .chain(view.rows.iter().map(|row| {
+            let name = row.name.clone();
+            CheckmarkItem {
+                label: row.label.clone(),
+                icon_name: row.icon_name.clone(),
+                checked: row.pinned,
+                activate: Box::new(move |tray: &mut RigbatTray| tray.pin(Some(name.clone()))),
+                ..CheckmarkItem::default()
+            }
+            .into()
+        }))
+        .collect()
+}
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -340,7 +328,7 @@ mod tests {
     };
     use crate::refresh::RefreshSignal;
     use crate::tray::fixtures::{
-        cfg_with_primary, id, key, make_info, make_reading, make_state, no_access, retained,
+        cfg_with_primary, id, key, make_reading, make_state, no_access, retained,
         same_name_two_transports, saved,
     };
 
@@ -437,23 +425,17 @@ mod tests {
         reading: BatteryReading,
         estimate: crate::domain::Estimate,
     ) -> DeviceState {
-        DeviceState {
-            info: DeviceInfo {
-                kind,
-                ..make_info(name)
-            },
-            last_reading: Some(reading),
-            last_seen: Some(crate::clock::now()),
-            presence: Presence::Online,
-            estimate,
-        }
+        DeviceState::test(name)
+            .kind(kind)
+            .reading(reading)
+            .seen(crate::clock::now())
+            .estimate(estimate)
     }
 
     /// One device per shape a row takes.
     fn every_row_shape() -> TrayState {
         use crate::domain::Estimate;
-        let mut keyboard = retained("NuPhy", 88, Duration::from_secs(3600));
-        keyboard.info.kind = DeviceKind::Keyboard;
+        let keyboard = retained("NuPhy", 88, Duration::from_secs(3600)).kind(DeviceKind::Keyboard);
         TrayState {
             devices: vec![
                 device(
@@ -722,17 +704,15 @@ mod tests {
         );
     }
 
-    /// Unchanged state still renders new text once an age crosses a unit;
-    /// a live reading's line does not age.
     /// Low and not charging asks the host for attention: the single icon for
     /// any shown device, a per-device icon for its own.
     #[test]
     fn a_low_device_that_is_not_charging_needs_attention() {
         let charging_low = BatteryReading::new(10, ChargeState::Charging);
         let state = make_state(vec![
-            (make_info("mouse"), Some(make_reading(62))),
-            (make_info("keyboard"), Some(make_reading(15))),
-            (make_info("headset"), Some(charging_low)),
+            (DeviceInfo::test("mouse"), Some(make_reading(62))),
+            (DeviceInfo::test("keyboard"), Some(make_reading(15))),
+            (DeviceInfo::test("headset"), Some(charging_low)),
         ]);
         let status = |key: Option<DeviceId>| tray_for(key, state.clone()).status();
         assert_eq!(status(None), ksni::Status::NeedsAttention);
@@ -741,8 +721,8 @@ mod tests {
         assert_eq!(status(Some(key("headset"))), ksni::Status::Active);
 
         let fine = make_state(vec![
-            (make_info("mouse"), Some(make_reading(62))),
-            (make_info("headset"), Some(charging_low)),
+            (DeviceInfo::test("mouse"), Some(make_reading(62))),
+            (DeviceInfo::test("headset"), Some(charging_low)),
         ]);
         assert_eq!(tray_for(None, fine).status(), ksni::Status::Active);
 
@@ -757,6 +737,8 @@ mod tests {
         );
     }
 
+    /// Unchanged state still renders new text once an age crosses a unit;
+    /// a live reading's line does not age.
     #[test]
     fn a_view_changes_with_time_only_where_text_ages() {
         let state = TrayState {

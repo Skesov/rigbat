@@ -1,20 +1,18 @@
 //! Serves the tray's device state to `rigbat dashboard` as `org.rigbat.Tray1`.
 
 use tokio::sync::watch;
-use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use zbus::object_server::SignalEmitter;
 
-use super::resolve::featured_id;
+use super::resolve::visible;
 use crate::config::Config;
-use crate::domain::{
-    AGE_STEP, BootTime, DeviceState, Estimate, TrayMode, TrayState, device_status, is_visible,
-};
+use crate::domain::{BootTime, DeviceState, TrayMode, TrayState, device_status};
 use crate::ipc::{DeviceCard, Snapshot, TRAY_PATH};
 use crate::refresh::RefreshSignal;
 
 /// Every device, classified exactly as its tray icon is; hidden ones apart.
 pub fn snapshot(state: &TrayState, cfg: &Config, now: BootTime) -> Snapshot {
-    let featured = featured_id(state, cfg, now);
+    let roster = visible(state, cfg, now);
+    let featured = roster.featured(cfg.primary_device.as_deref());
     let card = |d: &DeviceState, in_tray: bool| {
         let (status, stale) = device_status(d, cfg.effective_low_threshold(&d.info.name));
         DeviceCard {
@@ -30,10 +28,7 @@ pub fn snapshot(state: &TrayState, cfg: &Config, now: BootTime) -> Snapshot {
             seen_secs_ago: d
                 .last_seen
                 .map(|seen| now.saturating_duration_since(seen).as_secs()),
-            remaining_secs: match d.estimate {
-                Estimate::Remaining(left) => Some(left.as_secs()),
-                Estimate::Unknown => None,
-            },
+            remaining_secs: d.estimate.remaining().map(|left| left.as_secs()),
             in_tray,
         }
     };
@@ -45,10 +40,8 @@ pub fn snapshot(state: &TrayState, cfg: &Config, now: BootTime) -> Snapshot {
         .into_iter()
         .map(|d| {
             let in_tray = match cfg.tray_mode {
-                TrayMode::PerDevice => {
-                    is_visible(d, |name| cfg.is_shown(name), now, cfg.hide_offline_after())
-                }
-                TrayMode::PrimaryOnly => featured.as_ref() == Some(&d.info.id()),
+                TrayMode::PerDevice => roster.devices().iter().any(|v| std::ptr::eq(*v, d)),
+                TrayMode::PrimaryOnly => featured.is_some_and(|f| f.info.id() == d.info.id()),
             };
             card(d, in_tray)
         })
@@ -134,8 +127,7 @@ pub async fn serve(
     };
     let mut last = current(&mut rx, &mut config);
     // `in_tray` follows the offline shelf life, which moves with time alone.
-    let mut age_tick = interval_at(Instant::now() + AGE_STEP, AGE_STEP);
-    age_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut age_tick = crate::clock::age_ticker();
     loop {
         tokio::select! {
             r = rx.changed() => if r.is_err() { break; },
@@ -158,24 +150,13 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::domain::{
-        BatteryReading, ChargeState, DeviceInfo, DeviceKind, DeviceState, Presence, PrimaryStatus,
-        Transport,
-    };
+    use crate::domain::{DeviceState, Estimate, Presence, PrimaryStatus, Transport};
 
     fn device(name: &str, presence: Presence, percent: u8, seen: BootTime) -> DeviceState {
-        DeviceState {
-            info: DeviceInfo {
-                name: name.to_owned(),
-                kind: DeviceKind::Mouse,
-                transport: Transport::Sysfs,
-                locator: None,
-            },
-            last_reading: Some(BatteryReading::new(percent, ChargeState::Discharging)),
-            last_seen: Some(seen),
-            presence,
-            estimate: Estimate::Remaining(Duration::from_secs(3600)),
-        }
+        DeviceState::test(name)
+            .presence(presence)
+            .read(percent, seen)
+            .estimate(Estimate::Remaining(Duration::from_secs(3600)))
     }
 
     #[test]
@@ -249,8 +230,7 @@ mod tests {
     #[test]
     fn in_tray_marks_one_of_two_same_named_devices() {
         let now = crate::clock::now();
-        let mut bluetooth = device("mouse", Presence::Online, 40, now);
-        bluetooth.info.transport = Transport::Bluetooth;
+        let bluetooth = device("mouse", Presence::Online, 40, now).transport(Transport::Bluetooth);
         let state = TrayState {
             devices: vec![device("mouse", Presence::Unreachable, 80, now), bluetooth],
         };
@@ -274,26 +254,14 @@ mod bus_tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::bus_test::{eventually, isolated};
-    use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind, DeviceState};
-    use crate::domain::{Presence, Transport};
-    use crate::ipc::{TRAY_NAME, Tray1Proxy};
+    use crate::bus_test::{claim_tray_name, eventually, isolated};
+    use crate::domain::DeviceState;
+    use crate::ipc::Tray1Proxy;
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 
     fn device(name: &str, percent: u8) -> DeviceState {
-        DeviceState {
-            info: DeviceInfo {
-                name: name.to_owned(),
-                kind: DeviceKind::Mouse,
-                transport: Transport::Sysfs,
-                locator: None,
-            },
-            last_reading: Some(BatteryReading::new(percent, ChargeState::Discharging)),
-            last_seen: Some(crate::clock::now()),
-            presence: Presence::Online,
-            estimate: Estimate::Unknown,
-        }
+        DeviceState::test(name).read(percent, crate::clock::now())
     }
 
     fn cards(json: &str) -> Vec<(String, Option<u8>)> {
@@ -316,13 +284,7 @@ mod bus_tests {
         let (config_tx, config_rx) = watch::channel(Config::default());
         let refresh = RefreshSignal::new();
         let mut refreshed = refresh.waiter();
-        let conn = zbus::connection::Builder::session()
-            .expect("private bus")
-            .name(TRAY_NAME)
-            .expect("name")
-            .build()
-            .await
-            .expect("claiming the tray name");
+        let conn = claim_tray_name().await;
         tokio::spawn(serve(conn, state_rx, config_rx, refresh));
 
         let client = zbus::Connection::session().await.expect("private bus");
@@ -371,13 +333,7 @@ mod bus_tests {
             devices: vec![mouse.clone()],
         });
         let (config_tx, config_rx) = watch::channel(Config::default());
-        let conn = zbus::connection::Builder::session()
-            .expect("private bus")
-            .name(TRAY_NAME)
-            .expect("name")
-            .build()
-            .await
-            .expect("claiming the tray name");
+        let conn = claim_tray_name().await;
         tokio::spawn(serve(conn, state_rx, config_rx, RefreshSignal::new()));
 
         let client = zbus::Connection::session().await.expect("private bus");
