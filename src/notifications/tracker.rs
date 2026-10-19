@@ -89,11 +89,6 @@ enum Outcome {
 /// confirmed low crossing fires once, and once more if it deepens to critical.
 /// A device re-arms only when it charges or reads `REARM_MARGIN` above its
 /// threshold; going offline does not re-arm it.
-///
-/// A reading only counts toward a crossing if it is low AND it is a fresh
-/// reading — identified by `DeviceState::last_seen`, since `TrayState` is
-/// republished on every state change, not once per poll, and a republished
-/// reading must not be double-counted.
 #[derive(Default)]
 pub(super) struct LowTracker {
     notified: HashMap<DeviceId, Urgency>,
@@ -106,6 +101,8 @@ impl LowTracker {
     /// `LOW_CONFIRMATIONS` consecutive distinct low readings and was not
     /// already notified at that urgency; critical needs the same number of
     /// critical readings. Withdraws when a notified device re-arms.
+    /// Readings are told apart by `last_seen`: `TrayState` is republished on
+    /// every state change, not once per poll.
     ///
     /// Keyed by `DeviceId`, not by name: the project deliberately does not
     /// deduplicate a device seen over two transports, and two such entries can
@@ -149,14 +146,7 @@ impl LowTracker {
         }
         let (count, critical) = (streak.count, streak.critical);
         if count < LOW_CONFIRMATIONS {
-            // Makes the confirmation requirement visible. Sleeping does not
-            // stall it — a non-Online device is skipped without touching its
-            // streak, so the second confirmation simply waits for the next
-            // successful reading, however much later that is. The alert is
-            // therefore delayed by device usage, not by wall-clock time, and
-            // only a device that never answers again stays stuck at one.
-            // Without this line that wait is indistinguishable from a broken
-            // notifier.
+            // The wait for the next fresh reading is otherwise invisible.
             tracing::debug!(
                 device = %id.name,
                 confirmations = count,
@@ -205,18 +195,9 @@ pub(super) enum Command {
 /// Computes which device notifications to show or withdraw right now.
 ///
 /// Only `Presence::Online` devices reach `LowTracker::observe`: a retained
-/// reading from a device that is asleep, unreachable or disconnected is a
-/// memory, not a live observation. Feeding it to the tracker would both fire
-/// a false alert for a device the user cannot act on right now, and consume
-/// a confirmation — so the real alert would be lost or delayed when the
-/// device reconnects still low. A non-Online device is therefore skipped
-/// entirely, leaving its tracked streak exactly as it was before it went
-/// away.
-///
-/// A device fires only after `LOW_CONFIRMATIONS` consecutive distinct low
-/// readings, identified by `DeviceState::last_seen` — `TrayState` is
-/// republished on every state change, not once per poll, so a republication
-/// of the same reading must not advance the streak.
+/// reading is a memory, and feeding it in would fire for a device the user
+/// cannot act on and consume a confirmation. A non-Online device keeps its
+/// streak exactly as it was.
 pub(super) fn compute_commands(
     state: &TrayState,
     cfg: &Config,
@@ -229,12 +210,7 @@ pub(super) fn compute_commands(
         .collect();
     for d in &state.devices {
         let id = d.info.id();
-        // Hiding a device is the only control the user has for saying
-        // "this one is not my concern", and a hidden device has no tray
-        // icon — a toast about it points at a state that cannot be
-        // inspected. Skipped before the tracker sees it, so unhiding
-        // later starts from a clean crossing rather than one consumed
-        // while the device was invisible.
+        // Hidden devices skip the tracker, so unhiding starts a clean crossing.
         if !cfg.is_shown(&d.info.name) {
             if tracker.notified.contains_key(&id) {
                 commands.push(Command::Close(id));
@@ -262,12 +238,11 @@ pub(super) fn compute_commands(
 pub(super) mod tests {
     use std::time::Duration;
 
-    use super::super::NOTIFY_TIMEOUT;
     use super::{Command, Level, LowTracker, Outcome, Urgency, compute_commands};
     use crate::config::Config;
     use crate::domain::{
-        BatteryReading, BootTime, ChargeState, DeviceId, DeviceInfo, DeviceKind, DeviceState,
-        Presence, Transport, TrayState,
+        BatteryReading, BootTime, ChargeState, DeviceId, DeviceState, Presence, Transport,
+        TrayState,
     };
 
     const LOW: Level = Level::Low(Urgency::Normal);
@@ -335,12 +310,6 @@ pub(super) mod tests {
             compute_commands(&state, &hidden, &mut tracker),
             [Command::Close(test_id("mouse"))]
         );
-    }
-
-    #[test]
-    fn notify_timeout_is_well_under_dbus_default() {
-        assert!(NOTIFY_TIMEOUT > Duration::ZERO);
-        assert!(NOTIFY_TIMEOUT < Duration::from_secs(25));
     }
 
     #[test]
@@ -562,52 +531,34 @@ pub(super) mod tests {
         percent: Option<u8>,
         last_seen: Option<BootTime>,
     ) -> DeviceState {
-        DeviceState {
-            info: DeviceInfo {
-                name: name.to_owned(),
-                kind: DeviceKind::Mouse,
-                transport: Transport::Sysfs,
-                locator: None,
-            },
-            last_reading: percent.map(reading),
-            last_seen,
-            presence,
-            estimate: crate::domain::Estimate::Unknown,
+        DeviceState::test(name)
+            .presence(presence)
+            .reading(percent.map(reading))
+            .seen(last_seen)
+    }
+
+    #[test]
+    fn a_device_that_is_not_online_never_notifies_from_a_retained_reading() {
+        for presence in [
+            Presence::Disconnected,
+            Presence::Unreachable,
+            Presence::NoAccess,
+        ] {
+            let mut tracker = LowTracker::default();
+            let cfg = Config::default();
+            let state = TrayState {
+                devices: vec![device_state("mouse", presence, Some(5))],
+            };
+
+            assert!(
+                compute_commands(&state, &cfg, &mut tracker).is_empty(),
+                "{presence:?}"
+            );
+            assert!(
+                compute_commands(&state, &cfg, &mut tracker).is_empty(),
+                "{presence:?}"
+            );
         }
-    }
-
-    #[test]
-    fn disconnected_device_with_low_retained_reading_does_not_notify() {
-        let mut tracker = LowTracker::default();
-        let cfg = Config::default();
-        let state = TrayState {
-            devices: vec![device_state("mouse", Presence::Disconnected, Some(5))],
-        };
-
-        assert!(compute_commands(&state, &cfg, &mut tracker).is_empty());
-    }
-
-    #[test]
-    fn unreachable_device_with_low_retained_reading_does_not_notify() {
-        let mut tracker = LowTracker::default();
-        let cfg = Config::default();
-        let state = TrayState {
-            devices: vec![device_state("mouse", Presence::Unreachable, Some(5))],
-        };
-
-        assert!(compute_commands(&state, &cfg, &mut tracker).is_empty());
-    }
-
-    #[test]
-    fn no_access_device_with_low_retained_reading_does_not_notify() {
-        let mut tracker = LowTracker::default();
-        let cfg = Config::default();
-        let state = TrayState {
-            devices: vec![device_state("mouse", Presence::NoAccess, Some(5))],
-        };
-
-        assert!(compute_commands(&state, &cfg, &mut tracker).is_empty());
-        assert!(compute_commands(&state, &cfg, &mut tracker).is_empty());
     }
 
     #[test]

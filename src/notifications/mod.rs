@@ -92,33 +92,15 @@ impl Toasts<'_> {
             hints,
             -1,
         );
-        match tokio::time::timeout(NOTIFY_TIMEOUT, send).await {
-            Ok(Err(e)) => {
-                tracing::warn!(device = %device.name, "low battery alert not delivered: {e}");
-            }
-            Err(_) => {
-                // LowTracker already marked this crossing as notified; it stays
-                // that way. Re-arming would retry against a daemon that is still
-                // wedged, turning one missed toast into a retry storm at the poll
-                // interval, and the tray icon already shows the low colour.
-                tracing::warn!(
-                    device = %device.name,
-                    "low battery alert not delivered: timed out after {NOTIFY_TIMEOUT:?}"
-                );
-            }
-            // The toast is the feature's whole output and it
-            // vanishes when dismissed. Without this line there is no
-            // way to tell "never fired" from "fired and was missed"
-            // from "the daemon swallowed it" after the fact.
-            Ok(Ok(id)) => {
-                self.ids.insert(device.clone(), id);
-                tracing::info!(
-                    device = %device.name,
-                    percent,
-                    ?urgency,
-                    "low battery alert delivered"
-                );
-            }
+        // A lost toast stays notified: re-arming would retry a wedged daemon every poll.
+        if let Some(id) = bounded(device, "delivered", send).await {
+            self.ids.insert(device.clone(), id);
+            tracing::info!(
+                device = %device.name,
+                percent,
+                ?urgency,
+                "low battery alert delivered"
+            );
         }
     }
 
@@ -127,15 +109,8 @@ impl Toasts<'_> {
             return;
         };
         let close = self.proxy.close_notification(id);
-        match tokio::time::timeout(NOTIFY_TIMEOUT, close).await {
-            Ok(Ok(())) => tracing::debug!(device = %device.name, "low battery alert withdrawn"),
-            Ok(Err(e)) => {
-                tracing::warn!(device = %device.name, "low battery alert not withdrawn: {e}");
-            }
-            Err(_) => tracing::warn!(
-                device = %device.name,
-                "low battery alert not withdrawn: timed out after {NOTIFY_TIMEOUT:?}"
-            ),
+        if bounded(device, "withdrawn", close).await.is_some() {
+            tracing::debug!(device = %device.name, "low battery alert withdrawn");
         }
     }
 
@@ -147,6 +122,28 @@ impl Toasts<'_> {
     /// longer be replaced or withdrawn.
     fn forget(&mut self, id: u32) {
         self.ids.retain(|_, shown| *shown != id);
+    }
+}
+
+/// `call` bounded by `NOTIFY_TIMEOUT`; a failure logs "low battery alert not {what}".
+async fn bounded<T>(
+    device: &DeviceId,
+    what: &str,
+    call: impl Future<Output = zbus::Result<T>>,
+) -> Option<T> {
+    match tokio::time::timeout(NOTIFY_TIMEOUT, call).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(e)) => {
+            tracing::warn!(device = %device.name, "low battery alert not {what}: {e}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                device = %device.name,
+                "low battery alert not {what}: timed out after {NOTIFY_TIMEOUT:?}"
+            );
+            None
+        }
     }
 }
 
@@ -181,20 +178,12 @@ pub fn spawn(
 
 /// Launching the dashboard toggles it, so a click must not launch it while it is open.
 async fn dashboard_open(dbus: &zbus::fdo::DBusProxy<'_>) -> bool {
-    let name = match zbus::names::BusName::try_from(crate::ipc::DASHBOARD_NAME) {
-        Ok(name) => name,
-        Err(e) => {
-            tracing::warn!("invalid dashboard bus name: {e}");
-            return false;
-        }
-    };
-    match dbus.name_has_owner(name).await {
-        Ok(owned) => owned,
-        Err(e) => {
-            tracing::warn!("cannot tell whether the dashboard is open: {e}");
-            false
-        }
-    }
+    let name = zbus::names::BusName::try_from(crate::ipc::DASHBOARD_NAME);
+    let owned = async { anyhow::Ok(dbus.name_has_owner(name?).await?) };
+    owned.await.unwrap_or_else(|e| {
+        tracing::warn!("cannot tell whether the dashboard is open: {e:#}");
+        false
+    })
 }
 
 /// The notifier loop on `conn`, until the state channel closes.
@@ -219,58 +208,63 @@ async fn run(
         ids: HashMap::new(),
     };
     let mut tracker = LowTracker::default();
+    // A click or a close needs no new commands; a state or config change does.
+    let mut changed = true;
 
     loop {
-        // Collect commands and read config while holding borrows, then drop
-        // all refs before any .await so no watch::Ref crosses an await point.
-        let (commands, enabled, lang) = {
-            let state = rx.borrow_and_update();
-            let cfg = config_rx.borrow_and_update();
-            let commands = compute_commands(&state, &cfg, &mut tracker);
-            (commands, cfg.notifications_enabled, cfg.lang())
-        };
-        for command in commands {
-            match command {
-                Command::Show {
-                    device,
-                    percent,
-                    urgency,
-                } if enabled => toasts.show(&device, percent, urgency, lang).await,
-                Command::Show { .. } => {}
-                Command::Close(device) => toasts.close(&device).await,
+        if changed {
+            // No watch::Ref may cross an await.
+            let (commands, lang) = {
+                let state = rx.borrow_and_update();
+                let cfg = config_rx.borrow_and_update();
+                let commands: Vec<Command> = compute_commands(&state, &cfg, &mut tracker)
+                    .into_iter()
+                    .filter(|c| cfg.notifications_enabled || matches!(c, Command::Close(_)))
+                    .collect();
+                (commands, cfg.lang())
+            };
+            for command in commands {
+                match command {
+                    Command::Show {
+                        device,
+                        percent,
+                        urgency,
+                    } => toasts.show(&device, percent, urgency, lang).await,
+                    Command::Close(device) => toasts.close(&device).await,
+                }
             }
         }
 
-        loop {
-            tokio::select! {
-                changed = rx.changed() => {
-                    if changed.is_err() {
-                        return Ok(());
-                    }
-                    break;
+        changed = tokio::select! {
+            r = rx.changed() => {
+                if r.is_err() {
+                    return Ok(());
                 }
-                changed = config_rx.changed() => {
-                    if changed.is_err() {
-                        return Ok(());
-                    }
-                    break;
-                }
-                Some(signal) = invoked.next() => {
-                    if let Ok(args) = signal.args()
-                        && args.action_key == DEFAULT_ACTION
-                        && toasts.is_ours(args.id)
-                        && !dashboard_open(&dbus).await
-                    {
-                        open_dashboard();
-                    }
-                }
-                Some(signal) = closed.next() => {
-                    if let Ok(args) = signal.args() {
-                        toasts.forget(args.id);
-                    }
-                }
+                true
             }
-        }
+            r = config_rx.changed() => {
+                if r.is_err() {
+                    return Ok(());
+                }
+                true
+            }
+            Some(signal) = invoked.next() => {
+                if let Ok(args) = signal.args()
+                    && args.action_key == DEFAULT_ACTION
+                    && toasts.is_ours(args.id)
+                    && !dashboard_open(&dbus).await
+                {
+                    open_dashboard();
+                }
+                false
+            }
+            Some(signal) = closed.next() => {
+                if let Ok(args) = signal.args() {
+                    toasts.forget(args.id);
+                }
+                false
+            }
+        };
     }
 }
 
