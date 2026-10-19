@@ -308,6 +308,15 @@ mod tests {
 
         let err = read_reading(&dir, "Xbox Wireless Controller").unwrap_err();
         assert!(err.to_string().contains("Xbox Wireless Controller"));
+        assert!(
+            !err.is::<crate::sources::AccessDenied>(),
+            "a pad without a report yet is not a permission problem"
+        );
+
+        std::fs::write(dir.join("capacity_level"), "Normal\n").unwrap();
+        let reading = read_reading(&dir, "Xbox Wireless Controller").unwrap();
+        assert_eq!(reading.percent, 60);
+        assert!(reading.coarse);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
