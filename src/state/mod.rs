@@ -256,20 +256,7 @@ pub fn now_unix() -> i64 {
 mod tests {
     use super::*;
     use crate::domain::{ChargeState, Transport};
-
-    fn scratch_db_path(test_name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "rigbat-state-actor-test-{test_name}-{}.db",
-            std::process::id()
-        ))
-    }
-
-    fn cleanup(path: &std::path::Path) {
-        let _ = std::fs::remove_file(path);
-        for suffix in ["-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-        }
-    }
+    use crate::test_support::ScratchDir;
 
     fn mouse() -> DeviceId {
         DeviceId {
@@ -283,7 +270,8 @@ mod tests {
     /// `busy_timeout`; the single runtime thread here must keep running meanwhile.
     #[tokio::test]
     async fn a_locked_database_does_not_stall_the_runtime() {
-        let path = scratch_db_path("locked");
+        let scratch = ScratchDir::new("locked");
+        let path = scratch.join("state.db");
         let store = Store::start(SqliteStore::open(&path).unwrap()).unwrap();
         let other_process = rusqlite::Connection::open(&path).unwrap();
         other_process.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -304,14 +292,13 @@ mod tests {
 
         other_process.execute_batch("COMMIT").unwrap();
         assert_eq!(write.await.unwrap().unwrap(), [Seen::Inserted]);
-
-        cleanup(&path);
     }
 
     /// A queued reading is visible to the next request: one thread, one queue.
     #[tokio::test]
     async fn requests_run_in_the_order_they_were_sent() {
-        let path = scratch_db_path("ordered");
+        let scratch = ScratchDir::new("ordered");
+        let path = scratch.join("state.db");
         let store = Store::start(SqliteStore::open(&path).unwrap()).unwrap();
         store
             .record_seen(vec![(mouse(), DeviceKind::Mouse)], 1000)
@@ -325,8 +312,6 @@ mod tests {
 
         let history = store.recent_readings(&mouse(), 10).await.unwrap();
         assert_eq!(history, [(1000, 80)]);
-
-        cleanup(&path);
     }
 
     #[tokio::test]
@@ -335,7 +320,8 @@ mod tests {
         fn explode(_: &mut SqliteStore) -> anyhow::Result<()> {
             panic!("simulated store bug")
         }
-        let path = scratch_db_path("panic");
+        let scratch = ScratchDir::new("panic");
+        let path = scratch.join("state.db");
         let store = Store::start(SqliteStore::open(&path).unwrap()).unwrap();
 
         assert!(store.call(explode).await.is_err());
@@ -343,8 +329,6 @@ mod tests {
             .record_seen(vec![(mouse(), DeviceKind::Mouse)], 1000)
             .await;
         assert_eq!(seen.unwrap(), [Seen::Inserted]);
-
-        cleanup(&path);
     }
 
     #[test]

@@ -452,8 +452,8 @@ pub async fn run() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ScratchDir;
     use std::io::{Error, ErrorKind};
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     fn statuses(checks: &[Check]) -> Vec<Status> {
         checks.iter().map(|c| c.status).collect()
@@ -466,15 +466,6 @@ mod tests {
             dev_path: PathBuf::from("/dev/hidraw5"),
             open,
         }
-    }
-
-    fn scratch_dir(test_name: &str) -> PathBuf {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "rigbat-doctor-test-{test_name}-{}-{n}",
-            std::process::id()
-        ))
     }
 
     #[test]
@@ -691,7 +682,8 @@ mod tests {
 
     #[test]
     fn find_udev_rule_searches_every_dir() {
-        let root = scratch_dir("udev");
+        let scratch = ScratchDir::new("udev");
+        let root = scratch.path();
         let etc = root.join("etc");
         let lib = root.join("lib");
         std::fs::create_dir_all(&etc).unwrap();
@@ -699,7 +691,6 @@ mod tests {
         assert_eq!(find_udev_rule(&[&etc, &lib]), None);
         std::fs::write(lib.join(UDEV_RULE), "").unwrap();
         assert_eq!(find_udev_rule(&[&etc, &lib]), Some(lib.join(UDEV_RULE)));
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

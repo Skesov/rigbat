@@ -169,8 +169,7 @@ mod tests {
         desktop_entry, disable_at, enable_at, escape_exec_arg, is_enabled_at,
         systemd_service_enabled_at,
     };
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use crate::test_support::ScratchDir;
 
     #[test]
     fn desktop_entry_contains_required_fields() {
@@ -225,123 +224,106 @@ mod tests {
         );
     }
 
-    /// Unique scratch directory under the OS temp dir for one test.
-    /// Removed at the end of the test regardless of outcome.
-    fn scratch_dir(test_name: &str) -> PathBuf {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "rigbat-autostart-test-{test_name}-{}-{n}",
-            std::process::id()
-        ))
-    }
-
     #[test]
     fn enable_at_creates_missing_parent_and_writes_entry() {
-        let dir = scratch_dir("creates-parent");
+        let scratch = ScratchDir::new("creates-parent");
+        let dir = scratch.path();
         let path = dir.join("autostart").join("rigbat.desktop");
 
         enable_at(&path).unwrap();
         let exec = std::env::current_exe().unwrap();
         let expected = desktop_entry(exec.to_str().unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn is_enabled_at_reflects_file_presence() {
-        let dir = scratch_dir("reflects-presence");
+        let scratch = ScratchDir::new("reflects-presence");
+        let dir = scratch.path();
         let path = dir.join("rigbat.desktop");
 
         assert!(!is_enabled_at(&path));
         enable_at(&path).unwrap();
         assert!(is_enabled_at(&path));
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn disable_at_removes_entry() {
-        let dir = scratch_dir("removes-entry");
+        let scratch = ScratchDir::new("removes-entry");
+        let dir = scratch.path();
         let path = dir.join("rigbat.desktop");
 
         enable_at(&path).unwrap();
         assert!(is_enabled_at(&path));
         disable_at(&path).unwrap();
         assert!(!is_enabled_at(&path));
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn disable_at_on_absent_file_succeeds() {
-        let dir = scratch_dir("absent-file");
+        let scratch = ScratchDir::new("absent-file");
+        let dir = scratch.path();
         let path = dir.join("rigbat.desktop");
 
         assert!(!path.exists());
         disable_at(&path).unwrap();
-
-        // dir itself was never created by disable_at; nothing to clean up.
     }
 
     #[test]
     fn enable_at_overwrites_existing_file() {
-        let dir = scratch_dir("overwrites");
+        let scratch = ScratchDir::new("overwrites");
+        let dir = scratch.path();
         let path = dir.join("rigbat.desktop");
 
-        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&path, "stale contents").unwrap();
 
         enable_at(&path).unwrap();
         let exec = std::env::current_exe().unwrap();
         let expected = desktop_entry(exec.to_str().unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn systemd_service_enabled_at_false_when_dir_absent() {
-        let dir = scratch_dir("dir-absent");
-        assert!(!systemd_service_enabled_at(&dir));
+        let scratch = ScratchDir::new("dir-absent");
+        assert!(!systemd_service_enabled_at(&scratch.join("absent")));
     }
 
     #[test]
     fn systemd_service_enabled_at_false_when_no_symlink() {
-        let dir = scratch_dir("no-symlink");
+        let scratch = ScratchDir::new("no-symlink");
+        let dir = scratch.path();
         std::fs::create_dir_all(dir.join("default.target.wants")).unwrap();
-        assert!(!systemd_service_enabled_at(&dir));
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!systemd_service_enabled_at(dir));
     }
 
     #[test]
     fn systemd_service_enabled_at_true_for_default_target_wants() {
-        let dir = scratch_dir("default-target");
+        let scratch = ScratchDir::new("default-target");
+        let dir = scratch.path();
         let wants = dir.join("default.target.wants");
         std::fs::create_dir_all(&wants).unwrap();
         std::fs::write(wants.join("rigbat.service"), "").unwrap();
-        assert!(systemd_service_enabled_at(&dir));
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(systemd_service_enabled_at(dir));
     }
 
     #[test]
     fn systemd_service_enabled_at_true_for_graphical_session_target_wants() {
-        let dir = scratch_dir("graphical-session-target");
+        let scratch = ScratchDir::new("graphical-session-target");
+        let dir = scratch.path();
         let wants = dir.join("graphical-session.target.wants");
         std::fs::create_dir_all(&wants).unwrap();
         std::fs::write(wants.join("rigbat.service"), "").unwrap();
-        assert!(systemd_service_enabled_at(&dir));
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(systemd_service_enabled_at(dir));
     }
 
     #[test]
     fn systemd_service_enabled_at_ignores_other_unit_names() {
-        let dir = scratch_dir("other-unit");
+        let scratch = ScratchDir::new("other-unit");
+        let dir = scratch.path();
         let wants = dir.join("default.target.wants");
         std::fs::create_dir_all(&wants).unwrap();
         std::fs::write(wants.join("other.service"), "").unwrap();
-        assert!(!systemd_service_enabled_at(&dir));
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!systemd_service_enabled_at(dir));
     }
 }

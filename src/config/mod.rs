@@ -403,6 +403,9 @@ fn reload(path: &Path, tx: &tokio::sync::watch::Sender<Config>, broken: &mut boo
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::test_support::ScratchDir;
+
     #[test]
     fn rename_device_moves_every_per_device_setting() {
         let mut cfg = Config {
@@ -472,8 +475,6 @@ mod tests {
         assert!(rename_device(&mut cfg, "old", "new"));
         assert_eq!(cfg.hidden_devices, vec!["new".to_string()]);
     }
-
-    use super::*;
 
     #[test]
     fn default_config() {
@@ -585,22 +586,15 @@ mod tests {
 
     // --- load_from / save_to round trip ---------------------------------------
 
-    /// Unique scratch config file path under the OS temp dir for one test.
-    /// Never the real `config_path()` — these tests must not touch
-    /// `~/.config/rigbat/config.json`.
-    fn scratch_config_path(test_name: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "rigbat-config-test-{test_name}-{}-{n}.json",
-            std::process::id()
-        ))
+    fn scratch_config(test_name: &str) -> (ScratchDir, PathBuf) {
+        let scratch = ScratchDir::new(test_name);
+        let path = scratch.join("config.json");
+        (scratch, path)
     }
 
     #[test]
     fn save_then_load_preserves_hidden_devices() {
-        let path = scratch_config_path("round-trip");
+        let (_scratch, path) = scratch_config("round-trip");
         let cfg = Config {
             hidden_devices: vec!["mouse".to_string(), "headset".to_string()],
             ..Config::default()
@@ -608,18 +602,17 @@ mod tests {
         save_to(&path, &cfg).unwrap();
         let restored = load_from(&path);
         assert_eq!(restored.hidden_devices, cfg.hidden_devices);
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
     fn load_from_missing_file_returns_default() {
-        let path = scratch_config_path("missing");
+        let (_scratch, path) = scratch_config("missing");
         assert_eq!(load_from(&path), Config::default());
     }
 
     #[test]
     fn read_tells_missing_from_broken() {
-        let path = scratch_config_path("read");
+        let (_scratch, path) = scratch_config("read");
         assert!(read(&path).unwrap().is_none());
         std::fs::write(&path, "{ not json").unwrap();
         let err = format!("{:#}", read(&path).unwrap_err());
@@ -628,23 +621,21 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         save_to(&path, &Config::default()).unwrap();
         assert_eq!(read(&path).unwrap(), Some(Config::default()));
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
     fn save_to_refuses_to_write_over_a_file_that_does_not_parse() {
-        let path = scratch_config_path("broken-save");
+        let (_scratch, path) = scratch_config("broken-save");
         let broken = "{ \"low_threshold\": 30, typo }";
         std::fs::write(&path, broken).unwrap();
         let err = save_to(&path, &Config::default()).unwrap_err();
         assert!(err.is::<Unreadable>(), "{err:#}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
     fn reload_keeps_the_live_config_while_the_file_does_not_parse() {
-        let path = scratch_config_path("broken-reload");
+        let (_scratch, path) = scratch_config("broken-reload");
         let live = Config {
             hidden_devices: vec!["mouse".to_string()],
             low_threshold: 35,
@@ -666,7 +657,6 @@ mod tests {
         reload(&path, &tx, &mut broken);
         assert_eq!(*rx.borrow(), fixed);
         assert!(!broken);
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -681,38 +671,25 @@ mod tests {
         assert_ne!(unique_tmp_path(&path, 111), unique_tmp_path(&path, 111));
     }
 
-    /// Unique scratch directory (not file) under the OS temp dir, for tests
-    /// that need to inspect the directory's contents rather than one path.
-    fn scratch_config_dir(test_name: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "rigbat-config-test-dir-{test_name}-{}-{n}",
-            std::process::id()
-        ))
-    }
-
     /// Forces `save_to` to fail after the temp file is written: `path` is
     /// made an existing directory, so `rename(tmp_path, path)` fails with
     /// EISDIR. Regression test for C5's cleanup requirement — the earlier
     /// version left the temp file behind on any failure.
     #[test]
     fn save_to_cleans_up_temp_file_on_rename_failure() {
-        let dir = scratch_config_dir("save-failure");
+        let scratch = ScratchDir::new("save-failure");
+        let dir = scratch.path();
         let path = dir.join("config.json");
         std::fs::create_dir_all(&path).unwrap();
 
         assert!(save_to(&path, &Config::default()).is_err());
 
-        let leftover: Vec<_> = std::fs::read_dir(&dir)
+        let leftover: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name() != "config.json")
             .collect();
         assert!(leftover.is_empty(), "temp file left behind: {leftover:?}");
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `load_from` must not convert a legacy `shown_devices` whitelist — it
@@ -720,12 +697,11 @@ mod tests {
     /// that conversion, once, after its first discovery sweep.
     #[test]
     fn load_from_does_not_migrate_legacy_shown_devices() {
-        let path = scratch_config_path("no-migration-on-load");
+        let (_scratch, path) = scratch_config("no-migration-on-load");
         std::fs::write(&path, r#"{"shown_devices": ["mouse"]}"#).unwrap();
         let cfg = load_from(&path);
         assert_eq!(cfg.shown_devices, vec!["mouse".to_string()]);
         assert!(cfg.hidden_devices.is_empty());
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -959,14 +935,13 @@ mod tests {
 
     #[test]
     fn hide_offline_after_survives_a_round_trip() {
-        let path = scratch_config_path("hide-offline-after");
+        let (_scratch, path) = scratch_config("hide-offline-after");
         let cfg = Config {
             hide_offline_after_mins: 360,
             ..Config::default()
         };
         save_to(&path, &cfg).unwrap();
         assert_eq!(load_from(&path), cfg);
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

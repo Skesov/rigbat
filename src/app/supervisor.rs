@@ -1018,6 +1018,7 @@ mod tests {
     use crate::config::Config;
     use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind, Transport};
     use crate::sources::BatterySource;
+    use crate::test_support::ScratchDir;
     use tokio::time::timeout;
 
     /// Keeps the sender alive for the test's lifetime so `config_rx.changed()`
@@ -2271,34 +2272,17 @@ mod tests {
     // `Supervisor::spawn_with(..., None)` call sites above), so nothing
     // outside this section can touch a database file at all.
 
-    /// Unique scratch database path under the OS temp dir for one test.
-    /// Mirrors `state::store::tests::scratch_db_path`.
-    fn scratch_store_path(test_name: &str) -> std::path::PathBuf {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "rigbat-supervisor-state-test-{test_name}-{}-{n}.db",
-            std::process::id()
-        ))
-    }
-
-    fn cleanup_store(path: &std::path::Path) {
-        let _ = std::fs::remove_file(path);
-        for suffix in ["-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-        }
-    }
-
-    fn open_scratch_store(test_name: &str) -> (state::Store, std::path::PathBuf) {
-        let path = scratch_store_path(test_name);
-        let db = state::SqliteStore::open(&path).expect("opening scratch state store");
+    fn open_scratch_store(test_name: &str) -> (state::Store, ScratchDir) {
+        let scratch = ScratchDir::new(test_name);
+        let db = state::SqliteStore::open(&scratch.join("state.db"))
+            .expect("opening scratch state store");
         let store = state::Store::start(db).expect("starting the store thread");
-        (store, path)
+        (store, scratch)
     }
 
     #[tokio::test]
     async fn reconcile_upserts_devices_row_when_store_present() {
-        let (store, path) = open_scratch_store("reconcile-upsert");
+        let (store, _scratch) = open_scratch_store("reconcile-upsert");
         let (_tx, config_rx) = config_channel(Config::default());
         let ctx = source_ctx(config_rx);
         let mut registry = DeviceRegistry::new(Some(store.clone()));
@@ -2320,8 +2304,6 @@ mod tests {
         let devices = store.list_devices().await.expect("listing devices");
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].device, a.id());
-
-        cleanup_store(&path);
     }
 
     /// A device that keeps its transport and locator but comes back under a
@@ -2330,7 +2312,7 @@ mod tests {
     /// entries can follow it.
     #[tokio::test]
     async fn reconcile_reports_a_rename_instead_of_adding_a_row() {
-        let (store, path) = open_scratch_store("reconcile-rename");
+        let (store, _scratch) = open_scratch_store("reconcile-rename");
         let (_tx, config_rx) = config_channel(Config::default());
         let ctx = source_ctx(config_rx);
         let mut registry = DeviceRegistry::new(Some(store.clone()));
@@ -2386,8 +2368,6 @@ mod tests {
         let roster = registry.snapshot();
         assert_eq!(roster.len(), 1);
         assert_eq!(roster[0].info.name, "Work mouse");
-
-        cleanup_store(&path);
     }
 
     /// The config half of the same story: the settings keyed by the old name
@@ -2426,7 +2406,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_writes_reading_to_store_when_present() {
-        let (store, path) = open_scratch_store("record-reading");
+        let (store, _scratch) = open_scratch_store("record-reading");
         let (_tx, config_rx) = config_channel(Config::default());
         let ctx = source_ctx(config_rx);
         let mut registry = DeviceRegistry::new(Some(store.clone()));
@@ -2452,8 +2432,6 @@ mod tests {
             .expect("reading history");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].1, 80);
-
-        cleanup_store(&path);
     }
 
     /// The end-to-end reason the store exists (see T34's "Why"): a device
@@ -2463,7 +2441,7 @@ mod tests {
     /// restart.
     #[tokio::test]
     async fn newly_discovered_device_seeds_history_from_store() {
-        let (store, path) = open_scratch_store("seed-on-discovery");
+        let (store, _scratch) = open_scratch_store("seed-on-discovery");
         let a = device("a");
         let id = a.id();
 
@@ -2497,8 +2475,6 @@ mod tests {
         let entry = registry.entries.get(&id).expect("device entry present");
         let percents: Vec<u8> = entry.battery_history.iter().map(|&(_, p)| p).collect();
         assert_eq!(percents, vec![80, 79, 78]);
-
-        cleanup_store(&path);
     }
 
     const HOUR: i64 = 60 * 60;
@@ -2510,15 +2486,15 @@ mod tests {
         info: &DeviceInfo,
         percent: u8,
         age_secs: i64,
-    ) -> (state::Store, std::path::PathBuf) {
-        let (store, path) = open_scratch_store(test_name);
+    ) -> (state::Store, ScratchDir) {
+        let (store, scratch) = open_scratch_store(test_name);
         let at = state::now_unix() - age_secs;
         store
             .record_seen(vec![(info.id(), info.kind)], at)
             .await
             .expect("record_seen");
         store.record_reading(&info.id(), reading_discharging(percent), at);
-        (store, path)
+        (store, scratch)
     }
 
     fn age_of(device: &DeviceState) -> Duration {
@@ -2531,7 +2507,7 @@ mod tests {
     #[tokio::test]
     async fn a_restart_restores_a_recent_reading_of_an_undiscovered_device() {
         let keyboard = device("keyboard");
-        let (store, path) = store_with_reading("restore-recent", &keyboard, 64, 2 * HOUR).await;
+        let (store, _scratch) = store_with_reading("restore-recent", &keyboard, 64, 2 * HOUR).await;
 
         let (tx, _config_rx) = config_channel(Config::default());
         let (mut rx, _refresh) = Supervisor::spawn_with(
@@ -2558,14 +2534,12 @@ mod tests {
             crate::clock::now(),
             crate::domain::OFFLINE_SHELF_LIFE_MAX,
         ));
-
-        cleanup_store(&path);
     }
 
     #[tokio::test]
     async fn a_restart_does_not_restore_a_reading_past_the_retention() {
         let keyboard = device("keyboard");
-        let (store, path) = store_with_reading("restore-old", &keyboard, 64, 25 * HOUR).await;
+        let (store, _scratch) = store_with_reading("restore-old", &keyboard, 64, 25 * HOUR).await;
         let (_tx, config_rx) = config_channel(Config::default());
         let ctx = source_ctx(config_rx);
         let mut registry = DeviceRegistry::new(Some(store));
@@ -2576,14 +2550,12 @@ mod tests {
         registry.restore_retained().await;
 
         assert_eq!(registry.snapshot(), []);
-
-        cleanup_store(&path);
     }
 
     #[tokio::test]
     async fn a_discovered_device_shows_its_stored_reading_until_its_first_poll() {
         let mouse = device("mouse");
-        let (store, path) = store_with_reading("restore-discovered", &mouse, 70, HOUR).await;
+        let (store, _scratch) = store_with_reading("restore-discovered", &mouse, 70, HOUR).await;
         let (_tx, config_rx) = config_channel(Config::default());
         let ctx = source_ctx(config_rx);
         let mut registry = DeviceRegistry::new(Some(store));
@@ -2603,8 +2575,6 @@ mod tests {
         assert_eq!(after.presence, Presence::Online);
         assert_eq!(after.last_reading, Some(reading_discharging(65)));
         assert!(age_of(after) < Duration::from_secs(60));
-
-        cleanup_store(&path);
     }
 
     /// A restored entry has no task; the sweep that finds the device gives it
@@ -2612,7 +2582,7 @@ mod tests {
     #[tokio::test]
     async fn a_restored_device_is_polled_once_a_sweep_finds_it() {
         let mouse = device("mouse");
-        let (store, path) = store_with_reading("restore-handover", &mouse, 70, HOUR).await;
+        let (store, _scratch) = store_with_reading("restore-handover", &mouse, 70, HOUR).await;
         let (_tx, config_rx) = config_channel(Config::default());
         let ctx = source_ctx(config_rx);
         let mut registry = DeviceRegistry::new(Some(store));
@@ -2643,8 +2613,6 @@ mod tests {
             .await;
         assert!(!registry.tasks.contains_key(&mouse.id()));
         assert_eq!(registry.snapshot()[0].presence, Presence::Disconnected);
-
-        cleanup_store(&path);
     }
 
     #[test]

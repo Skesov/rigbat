@@ -24,6 +24,8 @@ mod session;
 mod settings;
 mod sources;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod tray;
 
 const USAGE: &str = "\
