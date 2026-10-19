@@ -1,13 +1,7 @@
 //! Broadcast "re-poll and re-discover now" signal.
 //!
-//! Backed by a `watch` channel carrying a generation counter rather than
-//! `tokio::sync::Notify`: `Notify::notify_waiters()` wakes only the waiters
-//! registered at that exact instant and stores no permit, so a trigger fired
-//! while a task was mid-poll (a D-Bus round trip, hidraw I/O) was silently
-//! lost — the roster then stayed stale until the next periodic sweep.
-//! `watch` retains the value and tracks each receiver's "seen" state, so a
-//! bump that happens while a receiver is busy is still observed on that
-//! receiver's next `wait()`.
+//! A `watch` generation counter, not `Notify`: `notify_waiters()` stores no
+//! permit, so a trigger fired while a task is mid-poll would be lost.
 
 use tokio::sync::watch;
 
@@ -72,9 +66,6 @@ impl RefreshWaiter {
     /// Never resolves if every sender is gone, so it is safe as a
     /// `tokio::select!` arm that must not spin.
     pub async fn wait(&mut self) {
-        // `changed()` returns `Err` once every `Sender` is dropped. Looping
-        // on that `Err` would spin the select arm forever, so park on a
-        // future that never resolves instead.
         if self.rx.changed().await.is_err() {
             std::future::pending::<()>().await;
         }

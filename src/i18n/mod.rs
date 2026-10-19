@@ -1,4 +1,4 @@
-//! UI language for the tray, settings window and notifications (R60).
+//! UI language for the tray, settings window and notifications.
 //! The language is passed as a parameter, not held globally: it changes at
 //! runtime and tests run in parallel. CLI output is never translated.
 

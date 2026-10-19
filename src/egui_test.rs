@@ -17,8 +17,7 @@ pub struct Painted {
 }
 
 /// Every string `contents` painted at least `MIN_READABLE_WIDTH` wide after
-/// its clip rectangle. A test that only collected galley strings passed
-/// against R45's broken build: the text was there, the clip hid it.
+/// its clip rectangle: collecting galley strings alone misses text the clip hides.
 pub fn painted_text_at(size: [f32; 2], contents: impl FnMut(&mut egui::Ui)) -> Vec<String> {
     text_at(size, contents, |_drawn, visible| {
         visible.width() >= MIN_READABLE_WIDTH && visible.height() > 0.0

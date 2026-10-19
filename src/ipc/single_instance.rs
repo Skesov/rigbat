@@ -54,8 +54,6 @@ pub async fn acquire_named(name: &str) -> SingleInstance {
     // It also reports "someone else owns it" as `Err(zbus::Error::NameTaken)`
     // rather than the protocol's own `RequestNameReply::Exists`, which puts the
     // one case this module cares about into the same channel as a broken bus.
-    // Verified live: an earlier version treated every error as "no guard" and
-    // the second tray started and published its icons anyway.
     let dbus = match DBusProxy::new(&conn).await {
         Ok(proxy) => proxy,
         Err(e) => {
