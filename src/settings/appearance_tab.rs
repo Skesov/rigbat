@@ -3,6 +3,7 @@ use eframe::egui;
 use super::{SettingsApp, widgets};
 use crate::appearance::ColorScheme;
 use crate::domain::{DeviceKind, DisplayMode, Palette, PrimaryStatus, WindowTheme};
+use crate::gui;
 use crate::i18n::{fl, loader};
 use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
 use crate::palette::{self, Rgb, Swatches};
@@ -25,7 +26,7 @@ const STYLE_PREVIEW_STATUS: PrimaryStatus = PrimaryStatus::Ok { percent: 72 };
 
 /// The icon-style tiles' pictures, rendered once per scheme, palette and pixel density.
 pub(super) struct StylePreviews {
-    dark: bool,
+    scheme: ColorScheme,
     palette: Palette,
     pixels: u32,
     textures: Vec<(DisplayMode, egui::TextureHandle)>,
@@ -33,7 +34,7 @@ pub(super) struct StylePreviews {
 
 /// The palette tiles' pictures, rendered once per scheme.
 pub(super) struct PaletteSwatches {
-    dark: bool,
+    scheme: ColorScheme,
     textures: Vec<(Palette, egui::TextureHandle)>,
 }
 
@@ -90,22 +91,11 @@ impl SettingsApp {
     fn render_style_tiles(&mut self, ui: &mut egui::Ui) {
         let lang = self.config.lang();
         let current = self.config.display_mode;
-        let previews = self.style_previews(ui.ctx(), ui.visuals().dark_mode);
-        let width = widgets::tile_width(ui.available_width(), previews.len());
-        let mut chosen = None;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = widgets::TILE_GAP;
-            for (mode, texture) in &previews {
-                let caption = mode.label(lang);
-                let selected = *mode == current;
-                if widgets::tile(ui, width, selected, texture, STYLE_PREVIEW_SIZE, &caption)
-                    .clicked()
-                {
-                    chosen = Some(*mode);
-                }
-            }
+        let previews = self.style_previews(ui.ctx(), gui::scheme(ui.visuals()));
+        let chosen = tile_row(ui, previews, current, STYLE_PREVIEW_SIZE, |mode| {
+            mode.label(lang)
         });
-        if let Some(mode) = chosen.filter(|&mode| mode != current) {
+        if let Some(mode) = chosen {
             // The tray watches the file and re-renders.
             self.persist(move |target| target.display_mode = mode);
         }
@@ -114,49 +104,35 @@ impl SettingsApp {
     fn style_previews(
         &mut self,
         ctx: &egui::Context,
-        dark: bool,
-    ) -> Vec<(DisplayMode, egui::TextureHandle)> {
+        scheme: ColorScheme,
+    ) -> &[(DisplayMode, egui::TextureHandle)] {
         let pixels = ((STYLE_PREVIEW_SIZE * ctx.pixels_per_point()).round() as u32)
             .min(STYLE_PREVIEW_MAX_PIXELS);
         let palette = self.config.palette;
-        let fresh = self
+        let cached = self
             .style_previews
-            .as_ref()
-            .is_some_and(|p| p.dark == dark && p.palette == palette && p.pixels == pixels);
-        if !fresh {
-            self.style_previews = Some(StylePreviews {
-                dark,
+            .take()
+            .filter(|p| p.scheme == scheme && p.palette == palette && p.pixels == pixels);
+        let previews = self
+            .style_previews
+            .insert(cached.unwrap_or_else(|| StylePreviews {
+                scheme,
                 palette,
                 pixels,
-                textures: render_style_previews(ctx, scheme(dark), palette, pixels),
-            });
-        }
-        self.style_previews
-            .as_ref()
-            .map(|p| p.textures.clone())
-            .unwrap_or_default()
+                textures: render_style_previews(ctx, scheme, palette, pixels),
+            }));
+        &previews.textures
     }
 
     /// One tile per `Palette`, each showing its colours on its own background.
     fn render_palette_tiles(&mut self, ui: &mut egui::Ui) {
         let lang = self.config.lang();
         let current = self.config.palette;
-        let swatches = self.palette_swatches(ui.ctx(), ui.visuals().dark_mode);
-        let width = widgets::tile_width(ui.available_width(), swatches.len());
-        let mut chosen = None;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = widgets::TILE_GAP;
-            for (palette, texture) in &swatches {
-                let caption = palette.label(lang);
-                let selected = *palette == current;
-                if widgets::tile(ui, width, selected, texture, SWATCH_PREVIEW_SIZE, &caption)
-                    .clicked()
-                {
-                    chosen = Some(*palette);
-                }
-            }
+        let swatches = self.palette_swatches(ui.ctx(), gui::scheme(ui.visuals()));
+        let chosen = tile_row(ui, swatches, current, SWATCH_PREVIEW_SIZE, |palette| {
+            palette.label(lang)
         });
-        if let Some(palette) = chosen.filter(|&palette| palette != current) {
+        if let Some(palette) = chosen {
             self.persist(move |target| target.palette = palette);
         }
     }
@@ -164,31 +140,39 @@ impl SettingsApp {
     fn palette_swatches(
         &mut self,
         ctx: &egui::Context,
-        dark: bool,
-    ) -> Vec<(Palette, egui::TextureHandle)> {
-        if self
+        scheme: ColorScheme,
+    ) -> &[(Palette, egui::TextureHandle)] {
+        let cached = self.palette_swatches.take().filter(|p| p.scheme == scheme);
+        let swatches = self
             .palette_swatches
-            .as_ref()
-            .is_none_or(|p| p.dark != dark)
-        {
-            self.palette_swatches = Some(PaletteSwatches {
-                dark,
-                textures: render_palette_swatches(ctx, scheme(dark)),
-            });
-        }
-        self.palette_swatches
-            .as_ref()
-            .map(|p| p.textures.clone())
-            .unwrap_or_default()
+            .insert(cached.unwrap_or_else(|| PaletteSwatches {
+                scheme,
+                textures: render_palette_swatches(ctx, scheme),
+            }));
+        &swatches.textures
     }
 }
 
-fn scheme(dark: bool) -> ColorScheme {
-    if dark {
-        ColorScheme::Dark
-    } else {
-        ColorScheme::Light
-    }
+/// A row of equal tiles, one per item; the item clicked this frame, unless it is `current`.
+fn tile_row<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    items: &[(T, egui::TextureHandle)],
+    current: T,
+    image_size: f32,
+    caption: impl Fn(T) -> String,
+) -> Option<T> {
+    let width = widgets::tile_width(ui.available_width(), items.len());
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = widgets::TILE_GAP;
+        for (item, texture) in items {
+            let selected = *item == current;
+            if widgets::tile(ui, width, selected, texture, image_size, &caption(*item)).clicked() {
+                chosen = Some(*item);
+            }
+        }
+    });
+    chosen.filter(|&item| item != current)
 }
 
 /// Tray icons for `STYLE_PREVIEW_STATUS` in every `DisplayMode`, in the
