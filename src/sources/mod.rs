@@ -7,6 +7,7 @@ pub mod context;
 pub mod eightbitdo;
 pub mod headsets;
 pub mod hidraw;
+pub mod kysona;
 pub mod steelseries;
 pub mod supervise;
 pub mod sysfs;

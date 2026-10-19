@@ -1,8 +1,9 @@
 //! Shared discovery for the backends that talk to `/dev/hidraw*`.
 //!
-//! A hidraw backend declares a [`HidrawFamily`] — vendor, model table, battery
-//! interface — and this module walks `/sys/class/hidraw`, matches each node's
-//! `device/uevent` against it, and hands back the matched nodes. The same
+//! A hidraw backend declares a [`HidrawFamily`] — model table keyed by USB
+//! vendor and product id, battery interface — and this module walks
+//! `/sys/class/hidraw`, matches each node's `device/uevent` against it, and
+//! hands back the matched nodes. The same
 //! family drives `rigbat doctor`'s permission check and the udev rule drift
 //! test, so a model exists in exactly one table. The sysfs backend reuses
 //! `stable_locator` against the same file, reached through
@@ -30,9 +31,10 @@ pub struct HidrawDevice {
     pub identity: NodeIdentity,
 }
 
-/// One supported model: its USB product id and how rigbat names it.
+/// One supported model: its USB vendor and product id and how rigbat names it.
 /// `name` is part of the device's identity and of config keys — never rename one.
 pub struct HidrawModel {
+    pub vendor: u16,
     pub product: u16,
     pub name: &'static str,
     pub kind: DeviceKind,
@@ -40,7 +42,6 @@ pub struct HidrawModel {
 
 /// The devices one hidraw backend supports.
 pub struct HidrawFamily {
-    pub vendor: u16,
     pub models: &'static [HidrawModel],
     /// The USB interface that carries battery data; `None` accepts any, for a
     /// device with a single HID interface.
@@ -51,7 +52,9 @@ impl HidrawFamily {
     /// `(vendor, product)` of every model, as the udev rule must list them.
     #[cfg(test)]
     pub fn usb_ids(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
-        self.models.iter().map(|model| (self.vendor, model.product))
+        self.models
+            .iter()
+            .map(|model| (model.vendor, model.product))
     }
 
     /// Every node under `sysfs_root` that is one of this family's devices.
@@ -88,13 +91,17 @@ impl HidrawFamily {
         let identity = NodeIdentity::from_uevent(&uevent, node_name)
             .with_context(|| format!("no parsable HID_ID in {}", uevent_path.display()))?;
 
-        if identity.vendor != self.vendor {
-            anyhow::bail!("vendor 0x{:04X} != 0x{:04X}", identity.vendor, self.vendor);
+        if !self
+            .models
+            .iter()
+            .any(|model| model.vendor == identity.vendor)
+        {
+            anyhow::bail!("vendor 0x{:04X} not in device table", identity.vendor);
         }
         let model = self
             .models
             .iter()
-            .find(|model| model.product == identity.product)
+            .find(|model| model.vendor == identity.vendor && model.product == identity.product)
             .with_context(|| format!("product 0x{:04X} not in device table", identity.product))?;
 
         if let Some(wanted) = self.interface {

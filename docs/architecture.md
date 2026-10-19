@@ -44,7 +44,7 @@ layers, never the reverse.
    clock / palette / launch
           │
         sources           BatterySource / BatteryBackend traits + Context + supervise +
-          ▲               sysfs/bluez/steelseries/eightbitdo/headsets impls
+          ▲               sysfs/bluez/steelseries/eightbitdo/headsets/kysona impls
         discovery         registry of backends + discover_all()
           ▲
           app             poll_once (list/--json) and Supervisor (tray, --waybar): orchestration
@@ -97,7 +97,7 @@ anyhow::Result<Vec<Box<dyn BatterySource>>>`. Finds devices and constructs sourc
   its sweep the same way, and every call on the shared system bus times out after 5 s
   (`context::BUS_CALL_TIMEOUT`; zbus and the bus daemons set none), so a wedged `bluetoothd`
   neither stalls the other backends nor keeps the first tray icon from appearing. A hidraw backend also returns its `HidrawFamily`
-  (vendor, models, battery interface) from `hidraw_family()`: the shared discovery in
+  (models keyed by vendor and product id, battery interface) from `hidraw_family()`: the shared discovery in
   `sources::hidraw`, `rigbat doctor` and the udev rule test all read that one table. Backends are
   listed in `discovery::registry::backends()`; what a backend must guarantee is the
   [backend contract](../CONTRIBUTING.md#backend-contract), and the steps to add one are its

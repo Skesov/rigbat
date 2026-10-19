@@ -52,6 +52,10 @@ The rest speak a vendor protocol over `/dev/hidraw`, and those need the device t
   Corsair Void / Void Pro / Void Elite Wireless, Logitech G533. Where the kernel already reports
   the headset's battery, the sysfs backend shows it instead. Protocol notes and the models left
   out: [docs/headsets.md](docs/headsets.md).
+- **Kysona-protocol mice** — untested, reports welcome: Pulsar X2 V2 / X2H / X2A / Xlite V3
+  (shown as "Pulsar Mouse"), ATK VXE R1 SE+, Kysona M600, VXE Dragonfly R1 Pro. Where the kernel
+  already reports the mouse's battery, the sysfs backend shows it instead. Protocol notes:
+  [docs/kysona.md](docs/kysona.md).
 
 Adding a device to either table is a small, well-scoped change: see
 [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/adding-a-device.md](docs/adding-a-device.md).

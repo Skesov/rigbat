@@ -55,8 +55,8 @@ const POLL_TIMEOUT: Duration = Duration::from_millis(200);
 // ── Device table ─────────────────────────────────────────────────────────────
 
 pub static FAMILY: hidraw::HidrawFamily = hidraw::HidrawFamily {
-    vendor: 0x2DC8,
     models: &[hidraw::HidrawModel {
+        vendor: 0x2DC8,
         product: 0x6012,
         name: "8BitDo Ultimate 2 Wireless",
         kind: DeviceKind::Controller,

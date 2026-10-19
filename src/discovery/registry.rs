@@ -1,6 +1,7 @@
 use crate::sources::{
     BatteryBackend, bluez::BluezBackend, eightbitdo::EightBitDoBackend, headsets,
-    hidraw::HidrawFamily, steelseries::SteelSeriesBackend, sysfs::SysfsBackend,
+    hidraw::HidrawFamily, kysona::KysonaBackend, steelseries::SteelSeriesBackend,
+    sysfs::SysfsBackend,
 };
 
 /// Returns all registered backends in priority order.
@@ -15,6 +16,7 @@ pub fn backends() -> Vec<Box<dyn BatteryBackend>> {
         Box::new(headsets::ARCTIS_NOVA),
         Box::new(headsets::CORSAIR_VOID),
         Box::new(headsets::LOGITECH_G533),
+        Box::new(KysonaBackend),
     ]
 }
 
@@ -45,14 +47,33 @@ mod tests {
                 "steelseries-arctis-nova",
                 "corsair-void",
                 "logitech-g533",
+                "kysona",
             ]
         );
     }
 
     #[test]
     fn hidraw_families_come_from_the_hidraw_backends() {
-        let vendors: Vec<u16> = hidraw_families().iter().map(|f| f.vendor).collect();
-        assert_eq!(vendors, [0x1038, 0x2DC8, 0x1038, 0x1038, 0x1B1C, 0x046D]);
+        let vendors: Vec<Vec<u16>> = hidraw_families()
+            .iter()
+            .map(|f| {
+                let vendors: std::collections::BTreeSet<u16> =
+                    f.usb_ids().map(|(vendor, _)| vendor).collect();
+                vendors.into_iter().collect()
+            })
+            .collect();
+        assert_eq!(
+            vendors,
+            [
+                vec![0x1038],
+                vec![0x2DC8],
+                vec![0x1038],
+                vec![0x1038],
+                vec![0x1B1C],
+                vec![0x046D],
+                vec![0x3554, 0x373B],
+            ]
+        );
     }
 
     #[test]

@@ -38,8 +38,13 @@ const HEADSET_OFF: &str =
 
 // ── Device tables ────────────────────────────────────────────────────────────
 
-const fn headset(product: u16, name: &'static str) -> HidrawModel {
+const STEELSERIES: u16 = 0x1038;
+const CORSAIR: u16 = 0x1B1C;
+const LOGITECH: u16 = 0x046D;
+
+const fn headset(vendor: u16, product: u16, name: &'static str) -> HidrawModel {
     HidrawModel {
+        vendor,
         product,
         name,
         kind: DeviceKind::Headset,
@@ -47,12 +52,11 @@ const fn headset(product: u16, name: &'static str) -> HidrawModel {
 }
 
 pub static ARCTIS_1_FAMILY: HidrawFamily = HidrawFamily {
-    vendor: 0x1038,
     models: &[
-        headset(0x12B3, "SteelSeries Arctis 1 Wireless"),
-        headset(0x12B6, "SteelSeries Arctis 1 Wireless Xbox"),
-        headset(0x12D7, "SteelSeries Arctis 7X"),
-        headset(0x12D5, "SteelSeries Arctis 7P"),
+        headset(STEELSERIES, 0x12B3, "SteelSeries Arctis 1 Wireless"),
+        headset(STEELSERIES, 0x12B6, "SteelSeries Arctis 1 Wireless Xbox"),
+        headset(STEELSERIES, 0x12D7, "SteelSeries Arctis 7X"),
+        headset(STEELSERIES, 0x12D5, "SteelSeries Arctis 7P"),
     ],
     interface: Some(3),
 };
@@ -60,23 +64,22 @@ pub static ARCTIS_1_FAMILY: HidrawFamily = HidrawFamily {
 /// A firmware update moves a headset from a steps id to a percent id; both keep
 /// one name so the device keeps its identity.
 pub static ARCTIS_NOVA_FAMILY: HidrawFamily = HidrawFamily {
-    vendor: 0x1038,
     models: &[
-        headset(0x2202, "SteelSeries Arctis Nova 7"),
-        headset(0x22A1, "SteelSeries Arctis Nova 7"),
-        headset(0x227E, "SteelSeries Arctis Nova 7 Gen 2"),
-        headset(0x2206, "SteelSeries Arctis Nova 7X"),
-        headset(0x22A4, "SteelSeries Arctis Nova 7X"),
-        headset(0x22A5, "SteelSeries Arctis Nova 7X"),
-        headset(0x2258, "SteelSeries Arctis Nova 7X Gen 2"),
-        headset(0x229E, "SteelSeries Arctis Nova 7X Gen 2"),
-        headset(0x22AD, "SteelSeries Arctis Nova 7X Gen 2"),
-        headset(0x223A, "SteelSeries Arctis Nova 7 Diablo IV"),
-        headset(0x22A9, "SteelSeries Arctis Nova 7 Diablo IV"),
-        headset(0x227A, "SteelSeries Arctis Nova 7 WoW Edition"),
-        headset(0x220A, "SteelSeries Arctis Nova 7P"),
-        headset(0x22A7, "SteelSeries Arctis Nova 7P"),
-        headset(0x2298, "SteelSeries Arctis Nova 7P"),
+        headset(STEELSERIES, 0x2202, "SteelSeries Arctis Nova 7"),
+        headset(STEELSERIES, 0x22A1, "SteelSeries Arctis Nova 7"),
+        headset(STEELSERIES, 0x227E, "SteelSeries Arctis Nova 7 Gen 2"),
+        headset(STEELSERIES, 0x2206, "SteelSeries Arctis Nova 7X"),
+        headset(STEELSERIES, 0x22A4, "SteelSeries Arctis Nova 7X"),
+        headset(STEELSERIES, 0x22A5, "SteelSeries Arctis Nova 7X"),
+        headset(STEELSERIES, 0x2258, "SteelSeries Arctis Nova 7X Gen 2"),
+        headset(STEELSERIES, 0x229E, "SteelSeries Arctis Nova 7X Gen 2"),
+        headset(STEELSERIES, 0x22AD, "SteelSeries Arctis Nova 7X Gen 2"),
+        headset(STEELSERIES, 0x223A, "SteelSeries Arctis Nova 7 Diablo IV"),
+        headset(STEELSERIES, 0x22A9, "SteelSeries Arctis Nova 7 Diablo IV"),
+        headset(STEELSERIES, 0x227A, "SteelSeries Arctis Nova 7 WoW Edition"),
+        headset(STEELSERIES, 0x220A, "SteelSeries Arctis Nova 7P"),
+        headset(STEELSERIES, 0x22A7, "SteelSeries Arctis Nova 7P"),
+        headset(STEELSERIES, 0x2298, "SteelSeries Arctis Nova 7P"),
     ],
     interface: Some(3),
 };
@@ -85,26 +88,24 @@ pub static ARCTIS_NOVA_FAMILY: HidrawFamily = HidrawFamily {
 const NOVA_STEP_PRODUCTS: &[u16] = &[0x2202, 0x2206, 0x220A, 0x223A, 0x227A, 0x22A4];
 
 pub static CORSAIR_VOID_FAMILY: HidrawFamily = HidrawFamily {
-    vendor: 0x1B1C,
     models: &[
-        headset(0x0A0C, "Corsair Void Wireless"),
-        headset(0x0A2B, "Corsair Void Wireless"),
-        headset(0x1B23, "Corsair Void Wireless"),
-        headset(0x1B25, "Corsair Void Wireless"),
-        headset(0x1B27, "Corsair Void Wireless"),
-        headset(0x0A14, "Corsair Void Pro Wireless"),
-        headset(0x0A16, "Corsair Void Pro Wireless"),
-        headset(0x0A1A, "Corsair Void Pro Wireless"),
-        headset(0x0A51, "Corsair Void Elite Wireless"),
-        headset(0x0A55, "Corsair Void Elite Wireless"),
-        headset(0x0A75, "Corsair Void Elite Wireless"),
+        headset(CORSAIR, 0x0A0C, "Corsair Void Wireless"),
+        headset(CORSAIR, 0x0A2B, "Corsair Void Wireless"),
+        headset(CORSAIR, 0x1B23, "Corsair Void Wireless"),
+        headset(CORSAIR, 0x1B25, "Corsair Void Wireless"),
+        headset(CORSAIR, 0x1B27, "Corsair Void Wireless"),
+        headset(CORSAIR, 0x0A14, "Corsair Void Pro Wireless"),
+        headset(CORSAIR, 0x0A16, "Corsair Void Pro Wireless"),
+        headset(CORSAIR, 0x0A1A, "Corsair Void Pro Wireless"),
+        headset(CORSAIR, 0x0A51, "Corsair Void Elite Wireless"),
+        headset(CORSAIR, 0x0A55, "Corsair Void Elite Wireless"),
+        headset(CORSAIR, 0x0A75, "Corsair Void Elite Wireless"),
     ],
     interface: Some(3),
 };
 
 pub static LOGITECH_G533_FAMILY: HidrawFamily = HidrawFamily {
-    vendor: 0x046D,
-    models: &[headset(0x0A66, "Logitech G533 Wireless")],
+    models: &[headset(LOGITECH, 0x0A66, "Logitech G533 Wireless")],
     interface: Some(3),
 };
 
@@ -623,14 +624,14 @@ mod tests {
             sysfs.add(
                 &format!("hidraw{}", 2 * i),
                 3,
-                backend.family.vendor,
+                backend.family.models[0].vendor,
                 product,
                 "",
             );
             sysfs.add(
                 &format!("hidraw{}", 2 * i + 1),
                 0,
-                backend.family.vendor,
+                backend.family.models[0].vendor,
                 product,
                 "",
             );

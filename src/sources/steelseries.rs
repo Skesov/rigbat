@@ -52,8 +52,8 @@ const POLL_TIMEOUT_MS: u16 = 1000;
 /// interface declares another report length needs a shorter write. Check the
 /// model's report descriptor before assuming one line is enough.
 pub static FAMILY: hidraw::HidrawFamily = hidraw::HidrawFamily {
-    vendor: 0x1038,
     models: &[hidraw::HidrawModel {
+        vendor: 0x1038,
         product: 0x1852,
         name: "SteelSeries Aerox 5 Wireless",
         kind: DeviceKind::Mouse,
@@ -311,7 +311,7 @@ mod tests {
             },
             dev_path: PathBuf::from("/dev/hidraw0"),
             identity: hidraw::NodeIdentity {
-                vendor: FAMILY.vendor,
+                vendor: FAMILY.models[0].vendor,
                 product: 0x1852,
                 locator: "hidraw0".to_owned(),
             },

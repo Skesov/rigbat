@@ -37,15 +37,15 @@ udev rule test read the hidraw device tables through `registry::hidraw_families(
 
 ### 1. New device, vendor already supported
 
-A hidraw backend declares its devices as a `HidrawFamily` (`src/sources/hidraw.rs`): vendor id,
-battery interface, and a `models` table. A new model of the same protocol is one row:
+A hidraw backend declares its devices as a `HidrawFamily` (`src/sources/hidraw.rs`): the
+battery interface and a `models` table keyed by USB vendor and product id. A new model of the
+same protocol is one row:
 
 ```rust
 pub static FAMILY: hidraw::HidrawFamily = hidraw::HidrawFamily {
-    vendor: 0x1038,
     models: &[
-        hidraw::HidrawModel { product: 0x1852, name: "SteelSeries Aerox 5 Wireless", kind: DeviceKind::Mouse },
-        hidraw::HidrawModel { product: 0x____, name: "Your device",                 kind: DeviceKind::Mouse }, // ← add
+        hidraw::HidrawModel { vendor: 0x1038, product: 0x1852, name: "SteelSeries Aerox 5 Wireless", kind: DeviceKind::Mouse },
+        hidraw::HidrawModel { vendor: 0x1038, product: 0x____, name: "Your device",                 kind: DeviceKind::Mouse }, // ← add
     ],
     interface: Some(3),
 };

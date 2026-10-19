@@ -67,8 +67,8 @@ Options, easiest first:
 Start from `src/sources/steelseries.rs` (request/response) or `src/sources/eightbitdo.rs`
 (stream-only), whichever matches how the device talks. Either shows the full shape:
 
-- a `pub static FAMILY: hidraw::HidrawFamily` — vendor id, a `models` table keyed by USB
-  product id, and the battery interface (`None` for a single-interface device),
+- a `pub static FAMILY: hidraw::HidrawFamily` — a `models` table keyed by USB vendor
+  and product id, and the battery interface (`None` for a single-interface device),
 - `hidraw_family()` returning it, and `discover()` calling `hidraw::discover(&FAMILY)`, which
   walks `/sys/class/hidraw` off the async runtime and matches vendor/product/interface,
 - `poll()` that opens the node through `hidraw::open_verified` with `O_NONBLOCK`, waits with

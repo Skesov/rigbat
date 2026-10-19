@@ -83,3 +83,22 @@ SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1b1c", ATTRS{idProduct}=="0a75", TAG+="ua
 
 # Logitech G533 Wireless (vendor 0x046d)
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a66", TAG+="uaccess"
+
+# Kysona-protocol mice, see docs/kysona.md
+
+# Pulsar Mouse: cable, 1 kHz dongle, 4 kHz dongle (vendor 0x3554)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f507", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f508", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f509", TAG+="uaccess"
+
+# Kysona M600: dongle, cable (vendor 0x3554)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f57c", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f57d", TAG+="uaccess"
+
+# VXE Dragonfly R1 Pro: dongle, cable (vendor 0x3554)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f58a", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f58c", TAG+="uaccess"
+
+# ATK VXE R1 SE+: cable (vendor 0x3554), dongle (vendor 0x373b)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", ATTRS{idProduct}=="f58f", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="1085", TAG+="uaccess"
