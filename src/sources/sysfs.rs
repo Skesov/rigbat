@@ -201,36 +201,16 @@ impl BatteryBackend for SysfsBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ScratchDir;
 
-    /// A stand-in `/sys/class/power_supply/<name>` directory under the OS temp
-    /// dir, so the test never depends on what this machine has plugged in.
-    /// Removed on drop, also when an assertion fails.
-    struct ScratchDir(PathBuf);
-
-    impl std::ops::Deref for ScratchDir {
-        type Target = Path;
-
-        fn deref(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for ScratchDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
+    /// A stand-in `/sys/class/power_supply/<name>` directory, so the test never
+    /// depends on what this machine has plugged in.
     fn scratch_dir(test_name: &str, files: &[(&str, &str)]) -> ScratchDir {
-        let dir = std::env::temp_dir().join(format!(
-            "rigbat-sysfs-test-{test_name}-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = ScratchDir::new(test_name);
         for (file, content) in files {
             std::fs::write(dir.join(file), content).unwrap();
         }
-        ScratchDir(dir)
+        dir
     }
 
     fn scratch_supply(test_name: &str, capacity: &str, status: &str) -> ScratchDir {
@@ -252,7 +232,7 @@ mod tests {
     fn read_reading_maps_capacity_level_to_a_coarse_reading() {
         let dir = scratch_dir("level-normal", &xpadneo_files("Normal\n"));
 
-        let reading = read_reading(&dir, "pad").unwrap();
+        let reading = read_reading(dir.path(), "pad").unwrap();
         assert_eq!(reading.percent, 60);
         assert_eq!(reading.state, ChargeState::Discharging);
         assert!(reading.coarse);
@@ -269,7 +249,7 @@ mod tests {
             ],
         );
 
-        let reading = read_reading(&dir, "mouse").unwrap();
+        let reading = read_reading(dir.path(), "mouse").unwrap();
         assert_eq!(reading.percent, 73);
         assert!(!reading.coarse);
     }
@@ -278,7 +258,7 @@ mod tests {
     fn read_reading_unknown_level_is_no_reading() {
         let dir = scratch_dir("level-unknown", &xpadneo_files("Unknown\n"));
 
-        let err = read_reading(&dir, "Xbox Wireless Controller").unwrap_err();
+        let err = read_reading(dir.path(), "Xbox Wireless Controller").unwrap_err();
         assert!(err.to_string().contains("Xbox Wireless Controller"));
         assert!(
             !err.is::<crate::sources::AccessDenied>(),
@@ -286,7 +266,7 @@ mod tests {
         );
 
         std::fs::write(dir.join("capacity_level"), "Normal\n").unwrap();
-        let reading = read_reading(&dir, "Xbox Wireless Controller").unwrap();
+        let reading = read_reading(dir.path(), "Xbox Wireless Controller").unwrap();
         assert_eq!(reading.percent, 60);
         assert!(reading.coarse);
     }
@@ -326,7 +306,7 @@ mod tests {
         no_charge.retain(|(f, _)| *f != "capacity_level");
         make("no_charge", &no_charge);
 
-        let sources = SysfsSource::enumerate_in(&root).unwrap();
+        let sources = SysfsSource::enumerate_in(root.path()).unwrap();
         let names: Vec<&str> = sources.iter().map(|s| s.info.name.as_str()).collect();
         assert_eq!(names, ["Xbox Wireless Controller"]);
         assert_eq!(sources[0].info.kind, crate::domain::DeviceKind::Controller);
@@ -348,7 +328,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(stable_locator(&dir, "hidpp_battery_6"), "00:00:5e:00:53:01");
+        assert_eq!(
+            stable_locator(dir.path(), "hidpp_battery_6"),
+            "00:00:5e:00:53:01"
+        );
     }
 
     /// A supply with no HID parent — anything that is not a HID device — keeps
@@ -357,14 +340,14 @@ mod tests {
     fn stable_locator_falls_back_to_the_directory_name() {
         let dir = scratch_supply("locator-plain", "50\n", "Discharging\n");
 
-        assert_eq!(stable_locator(&dir, "some_battery"), "some_battery");
+        assert_eq!(stable_locator(dir.path(), "some_battery"), "some_battery");
     }
 
     #[test]
     fn read_reading_parses_capacity_and_status() {
         let dir = scratch_supply("ok", "77\n", "Charging\n");
 
-        let reading = read_reading(&dir, "test").unwrap();
+        let reading = read_reading(dir.path(), "test").unwrap();
         assert_eq!(reading.percent, 77);
         assert_eq!(reading.state, ChargeState::Charging);
     }
@@ -373,7 +356,7 @@ mod tests {
     fn read_reading_reports_which_device_failed() {
         let dir = scratch_supply("garbage", "not-a-number\n", "Discharging\n");
 
-        let err = read_reading(&dir, "Wireless Mouse").unwrap_err();
+        let err = read_reading(dir.path(), "Wireless Mouse").unwrap_err();
         assert!(err.to_string().contains("Wireless Mouse"));
     }
 
