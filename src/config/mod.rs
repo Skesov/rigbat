@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
@@ -26,25 +27,14 @@ pub struct DeviceSettings {
 #[serde(default)]
 pub struct Config {
     pub display_mode: DisplayMode,
-    /// Device names to hide from the tray and menu. Empty list = show all.
-    /// A name this list never mentions is shown, including one for a device
-    /// that is not currently discovered — the field only ever grows or
-    /// shrinks by exactly the name a checkbox toggle names, never by
-    /// rebuilding from whatever devices happen to be visible right now.
+    /// Device names to hide from the tray and menu; any other name is shown.
+    /// Edited one name at a time, never rebuilt from the devices visible now.
     pub hidden_devices: Vec<String>,
-    /// Deprecated pre-T33 whitelist ("who to show"). Editing it through a
-    /// partial device view could silently erase entries for devices absent
-    /// from that view — the field it was replaced by, `hidden_devices`
-    /// ("who to hide"), cannot have that failure mode because toggling one
-    /// device never touches any other entry. Converted into `hidden_devices`
-    /// once, by `app::supervisor` right after its first discovery sweep —
-    /// not here: `config::load` has no device roster to convert against.
-    /// This version never writes to it again once converted. Kept only so
-    /// an old config file still deserializes.
+    /// Deprecated whitelist ("who to show"), kept so an old file loads.
+    /// `app::supervisor` converts it into `hidden_devices` once, after its
+    /// first discovery sweep: loading has no device roster to convert against.
     pub shown_devices: Vec<String>,
     /// Whether to send desktop notifications for low-battery crossings.
-    /// Defaults to true; old config files without this key load as true
-    /// because `#[serde(default)]` on the struct fills missing fields from Default.
     pub notifications_enabled: bool,
     /// Whether to show one tray icon per visible device or one aggregate icon.
     pub tray_mode: TrayMode,
@@ -69,14 +59,9 @@ pub struct Config {
 }
 
 /// Moves every per-device setting from `from` to `to`, returning whether any
-/// existed. Called when the inventory sees a device keep its transport and
-/// locator — its hardware identity — while its name changes, which is what a
-/// BlueZ alias edit or a firmware-supplied name change looks like from here.
-///
-/// Config is keyed by display name (the standing decision behind
-/// `dedup-adr.md`), so without this a rename silently resets the device to
-/// defaults: it reappears in the tray after being hidden, loses its threshold
-/// and interval overrides, and stops being the aggregate icon's device.
+/// existed. Called when the inventory sees a device keep its hardware
+/// identity under a new name (a BlueZ alias edit). Config is keyed by display
+/// name, so without this a rename would reset the device to defaults.
 pub fn rename_device(cfg: &mut Config, from: &str, to: &str) -> bool {
     let mut changed = false;
 
@@ -86,9 +71,7 @@ pub fn rename_device(cfg: &mut Config, from: &str, to: &str) -> bool {
             changed = true;
         }
     }
-    // Keep the first entry for `to` and drop any later one. `Vec::dedup` is
-    // wrong here: it only collapses *adjacent* duplicates, so renaming with
-    // `["old", "other", "new"]` left `["new", "other", "new"]`.
+    // Keeps the first entry for `to`. Not `Vec::dedup`: it only collapses adjacent duplicates.
     let mut seen_to = false;
     cfg.hidden_devices
         .retain(|entry| entry != to || !std::mem::replace(&mut seen_to, true));
@@ -146,14 +129,8 @@ impl Config {
     }
 
     /// Effective low-battery threshold for `name`: device override → global →
-    /// clamp to the percent domain.
-    ///
-    /// The clamp is not decoration: `serde` accepts any `u8`, and the settings
-    /// window's 5-50 range does not constrain a hand-edited `config.json`. A
-    /// stored `250` would make `percent <= threshold` true for every
-    /// discharging device, painting a full battery red and reporting `low` to
-    /// waybar forever. Clamping keeps a nonsensical value inside the domain
-    /// `BatteryReading::percent` already guarantees.
+    /// clamp to the percent domain, since a hand-edited `config.json` can hold
+    /// any `u8` and above 100 every discharging device would read low.
     pub fn effective_low_threshold(&self, name: &str) -> u8 {
         self.device_overrides
             .get(name)
@@ -171,20 +148,19 @@ impl Config {
     }
 }
 
+/// ~/.config/rigbat (XDG). None if home directory is not available.
+fn config_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "rigbat").map(|dirs| dirs.config_dir().to_path_buf())
+}
+
 /// ~/.config/rigbat/config.json (XDG). None if home directory is not available.
 pub fn config_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "rigbat")
-        .map(|dirs| dirs.config_dir().join("config.json"))
+    config_dir().map(|dir| dir.join("config.json"))
 }
 
 /// Reads config. File missing or invalid → Config::default() in memory only: an
 /// invalid file is logged and kept, since `save_to` refuses to write over it.
-/// Never panics.
-///
-/// Never converts a legacy `shown_devices` whitelist into `hidden_devices`:
-/// that conversion needs a discovered device roster, which no caller of
-/// `load()` has at hand (the tray does not have one yet either, this early).
-/// `app::supervisor` performs it once, after its first discovery sweep.
+/// Never converts `shown_devices`, which needs a device roster.
 pub fn load() -> Config {
     match config_path() {
         Some(path) => load_from(&path),
@@ -192,10 +168,7 @@ pub fn load() -> Config {
     }
 }
 
-/// Reads the config at `path`, exactly as stored. Split out of `load()` so
-/// tests can exercise it against a temporary file instead of the real
-/// `config_path()`. `pub(crate)` so `settings::save_edit`'s own tests can use
-/// the same seam.
+/// `load` for an explicit `path`, so tests never touch the real file.
 pub(crate) fn load_from(path: &Path) -> Config {
     match read(path) {
         Ok(cfg) => cfg.unwrap_or_default(),
@@ -209,7 +182,6 @@ pub(crate) fn load_from(path: &Path) -> Config {
 /// Reads and parses the config at `path`: `Ok(None)` if there is no file,
 /// `Err` if it cannot be read or does not parse.
 pub fn read(path: &Path) -> anyhow::Result<Option<Config>> {
-    use anyhow::Context as _;
     let data = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -222,28 +194,18 @@ pub fn read(path: &Path) -> anyhow::Result<Option<Config>> {
 
 /// Saves atomically: create directory, write to temp file, rename.
 pub fn save(config: &Config) -> anyhow::Result<()> {
-    use anyhow::Context as _;
     let path = config_path().context("cannot determine config directory")?;
     save_to(&path, config)
 }
 
-/// Writes `config` atomically to `path`. Split out of `save()` so tests can
-/// exercise a save/load round trip against a temporary file instead of the
-/// real `config_path()`. `pub(crate)` so `settings::save_edit`'s own tests
-/// can use the same seam.
-///
-/// The temp file is named after this process's pid and a per-process
-/// counter (`unique_tmp_path`), not a fixed `config.json.tmp`: the tray and
-/// a settings window can both save around the same moment, and a fixed name
-/// let whichever process's `rename` won take a file the other was still
-/// writing. On any failure the temp file is removed rather than left behind.
+/// Writes `config` atomically to `path`. The temp file is unique per process
+/// and call (`unique_tmp_path`): the tray and a settings window can save at
+/// the same moment. It is removed on any failure.
 ///
 /// Refuses with [`Unreadable`] while the file at `path` exists but does not
-/// read or parse — every writer goes through here, so none can replace a
-/// user's broken-but-recoverable file with defaults plus one change.
+/// read or parse, so no writer replaces a broken-but-recoverable file with
+/// defaults plus one change.
 pub(crate) fn save_to(path: &Path, config: &Config) -> anyhow::Result<()> {
-    use anyhow::Context as _;
-
     read(path).map_err(|e| e.context(Unreadable))?;
 
     let dir = path
@@ -278,10 +240,8 @@ impl std::fmt::Display for Unreadable {
     }
 }
 
-/// Builds the atomic-save temp path for `path`, unique to `pid` and to this
-/// call within that process (`config.json` → `config.json.<pid>-<n>.tmp`).
-/// `pid` is a parameter, not `std::process::id()` read internally, so tests
-/// can simulate two different processes without spawning real ones.
+/// `config.json` → `config.json.<pid>-<n>.tmp`, unique to `pid` and to this
+/// call. `pid` is a parameter so tests can simulate two processes.
 fn unique_tmp_path(path: &Path, pid: u32) -> PathBuf {
     static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -316,18 +276,13 @@ fn is_content_change(kind: &notify::EventKind) -> bool {
 /// `tx` whenever the file changes on disk. Quietly does nothing if the path or
 /// the watcher is unavailable (config watching is best-effort, never fatal).
 pub fn watch_file(tx: tokio::sync::watch::Sender<Config>) {
-    let Some(path) = config_path() else {
+    let Some(dir) = config_dir() else {
         tracing::warn!(
             "no config directory available; settings changes will not apply until restart"
         );
         return;
     };
-    let Some(dir) = path.parent().map(|p| p.to_path_buf()) else {
-        tracing::warn!(
-            "config path {path:?} has no parent directory; settings changes will not apply until restart"
-        );
-        return;
-    };
+    let path = dir.join("config.json");
 
     // Ensure the directory exists before watching. Best-effort.
     let _ = std::fs::create_dir_all(&dir);
@@ -477,13 +432,6 @@ mod tests {
     }
 
     #[test]
-    fn default_config() {
-        let cfg = Config::default();
-        assert_eq!(cfg.display_mode, DisplayMode::IconOnly);
-        assert!(cfg.hidden_devices.is_empty());
-    }
-
-    #[test]
     fn serde_round_trip() {
         let cfg = Config {
             display_mode: DisplayMode::DeviceAndBattery,
@@ -500,24 +448,6 @@ mod tests {
         assert!(json.contains(r#""theme":"light""#), "{json}");
         let restored: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg, restored);
-    }
-
-    #[test]
-    fn empty_json_tray_mode_defaults_primary_only() {
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.tray_mode, TrayMode::PrimaryOnly);
-    }
-
-    #[test]
-    fn empty_json_notifications_enabled_defaults_true() {
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.notifications_enabled);
-    }
-
-    #[test]
-    fn empty_json_primary_device_defaults_none() {
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.primary_device, None);
     }
 
     #[test]
@@ -557,6 +487,14 @@ mod tests {
     fn partial_json_uses_defaults() {
         let cfg: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg, Config::default());
+        assert_eq!(cfg.display_mode, DisplayMode::IconOnly);
+        assert!(cfg.hidden_devices.is_empty());
+        assert_eq!(cfg.tray_mode, TrayMode::PrimaryOnly);
+        assert!(cfg.notifications_enabled);
+        assert_eq!(cfg.primary_device, None);
+        assert_eq!(cfg.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
+        assert_eq!(cfg.low_threshold, DEFAULT_LOW_THRESHOLD);
+        assert!(cfg.device_overrides.is_empty());
     }
 
     #[test]
@@ -570,11 +508,7 @@ mod tests {
     #[test]
     fn is_shown_hides_only_the_named_device() {
         let cfg = Config {
-            display_mode: DisplayMode::IconOnly,
             hidden_devices: vec!["mouse".to_string()],
-            notifications_enabled: true,
-            tray_mode: TrayMode::PrimaryOnly,
-            primary_device: None,
             ..Config::default()
         };
         assert!(!cfg.is_shown("mouse"));
@@ -583,8 +517,6 @@ mod tests {
         // name that is not currently discovered.
         assert!(cfg.is_shown("headset"));
     }
-
-    // --- load_from / save_to round trip ---------------------------------------
 
     fn scratch_config(test_name: &str) -> (ScratchDir, PathBuf) {
         let scratch = ScratchDir::new(test_name);
@@ -671,10 +603,8 @@ mod tests {
         assert_ne!(unique_tmp_path(&path, 111), unique_tmp_path(&path, 111));
     }
 
-    /// Forces `save_to` to fail after the temp file is written: `path` is
-    /// made an existing directory, so `rename(tmp_path, path)` fails with
-    /// EISDIR. Regression test for C5's cleanup requirement — the earlier
-    /// version left the temp file behind on any failure.
+    /// `path` is an existing directory, so the rename after the temp file is
+    /// written fails with EISDIR.
     #[test]
     fn save_to_cleans_up_temp_file_on_rename_failure() {
         let scratch = ScratchDir::new("save-failure");
@@ -717,86 +647,55 @@ mod tests {
     }
 
     #[test]
-    fn is_content_change_access_read_is_false() {
-        let kind = notify::EventKind::Access(notify::event::AccessKind::Read);
-        assert!(!is_content_change(&kind));
+    fn is_content_change_keeps_only_content_events() {
+        use notify::EventKind;
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RenameMode,
+        };
+        let cases = [
+            (EventKind::Access(AccessKind::Read), false),
+            (EventKind::Access(AccessKind::Open(AccessMode::Any)), false),
+            (EventKind::Modify(ModifyKind::Data(DataChange::Any)), true),
+            (EventKind::Modify(ModifyKind::Name(RenameMode::To)), true),
+            (EventKind::Create(CreateKind::File), true),
+            (
+                EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)),
+                false,
+            ),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(is_content_change(&kind), expected, "{kind:?}");
+        }
     }
 
     #[test]
-    fn is_content_change_access_open_is_false() {
-        let kind = notify::EventKind::Access(notify::event::AccessKind::Open(
-            notify::event::AccessMode::Any,
-        ));
-        assert!(!is_content_change(&kind));
-    }
-
-    #[test]
-    fn is_content_change_modify_data_is_true() {
-        let kind = notify::EventKind::Modify(notify::event::ModifyKind::Data(
-            notify::event::DataChange::Any,
-        ));
-        assert!(is_content_change(&kind));
-    }
-
-    #[test]
-    fn is_content_change_modify_name_to_is_true() {
-        let kind = notify::EventKind::Modify(notify::event::ModifyKind::Name(
-            notify::event::RenameMode::To,
-        ));
-        assert!(is_content_change(&kind));
-    }
-
-    #[test]
-    fn is_content_change_create_file_is_true() {
-        let kind = notify::EventKind::Create(notify::event::CreateKind::File);
-        assert!(is_content_change(&kind));
-    }
-
-    #[test]
-    fn is_content_change_modify_metadata_is_false() {
-        let kind = notify::EventKind::Modify(notify::event::ModifyKind::Metadata(
-            notify::event::MetadataKind::AccessTime,
-        ));
-        assert!(!is_content_change(&kind));
-    }
-
-    #[test]
-    fn event_touches_matching_filename() {
-        use std::path::PathBuf;
+    fn event_touches_only_the_config_file() {
         let target = PathBuf::from("/home/user/.config/rigbat/config.json");
-        let event = notify::Event {
+        let event_at = |path: &str| notify::Event {
             kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
-            paths: vec![PathBuf::from("/home/user/.config/rigbat/config.json")],
+            paths: vec![PathBuf::from(path)],
             attrs: Default::default(),
         };
-        assert!(event_touches(&event, &target));
+        for (path, expected) in [
+            ("/home/user/.config/rigbat/config.json", true),
+            ("/home/user/.config/rigbat/other.json", false),
+            ("/home/user/.config/rigbat/config.json.tmp", false),
+        ] {
+            assert_eq!(event_touches(&event_at(path), &target), expected, "{path}");
+        }
     }
 
-    #[test]
-    fn event_touches_non_matching_filename() {
-        use std::path::PathBuf;
-        let target = PathBuf::from("/home/user/.config/rigbat/config.json");
-        let event = notify::Event {
-            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
-            paths: vec![PathBuf::from("/home/user/.config/rigbat/other.json")],
-            attrs: Default::default(),
-        };
-        assert!(!event_touches(&event, &target));
+    fn mouse_override(poll_interval_secs: Option<u64>, low_threshold: Option<u8>) -> Config {
+        let mut cfg = Config::default();
+        cfg.device_overrides.insert(
+            "mouse".to_string(),
+            DeviceSettings {
+                poll_interval_secs,
+                low_threshold,
+            },
+        );
+        cfg
     }
-
-    #[test]
-    fn event_touches_tmp_file_excluded() {
-        use std::path::PathBuf;
-        let target = PathBuf::from("/home/user/.config/rigbat/config.json");
-        let event = notify::Event {
-            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
-            paths: vec![PathBuf::from("/home/user/.config/rigbat/config.json.tmp")],
-            attrs: Default::default(),
-        };
-        assert!(!event_touches(&event, &target));
-    }
-
-    // --- effective_poll_interval_secs ---------------------------------------
 
     #[test]
     fn effective_poll_interval_secs_global_default_when_no_override() {
@@ -809,14 +708,7 @@ mod tests {
 
     #[test]
     fn effective_poll_interval_secs_override_wins() {
-        let mut cfg = Config::default();
-        cfg.device_overrides.insert(
-            "mouse".to_string(),
-            DeviceSettings {
-                poll_interval_secs: Some(30),
-                low_threshold: None,
-            },
-        );
+        let cfg = mouse_override(Some(30), None);
         assert_eq!(cfg.effective_poll_interval_secs("mouse"), 30);
         // Other devices still use global.
         assert_eq!(
@@ -827,14 +719,7 @@ mod tests {
 
     #[test]
     fn effective_poll_interval_secs_zero_clamped_to_one() {
-        let mut cfg = Config::default();
-        cfg.device_overrides.insert(
-            "mouse".to_string(),
-            DeviceSettings {
-                poll_interval_secs: Some(0),
-                low_threshold: None,
-            },
-        );
+        let cfg = mouse_override(Some(0), None);
         assert_eq!(cfg.effective_poll_interval_secs("mouse"), 1);
     }
 
@@ -847,8 +732,6 @@ mod tests {
         assert_eq!(cfg.effective_poll_interval_secs("mouse"), 1);
     }
 
-    // --- effective_low_threshold --------------------------------------------
-
     #[test]
     fn effective_low_threshold_global_default_when_no_override() {
         let cfg = Config::default();
@@ -857,14 +740,7 @@ mod tests {
 
     #[test]
     fn effective_low_threshold_override_wins() {
-        let mut cfg = Config::default();
-        cfg.device_overrides.insert(
-            "mouse".to_string(),
-            DeviceSettings {
-                poll_interval_secs: None,
-                low_threshold: Some(10),
-            },
-        );
+        let cfg = mouse_override(None, Some(10));
         assert_eq!(cfg.effective_low_threshold("mouse"), 10);
         assert_eq!(
             cfg.effective_low_threshold("keyboard"),
@@ -876,53 +752,25 @@ mod tests {
     /// discharging device would classify as low forever.
     #[test]
     fn effective_low_threshold_clamps_above_full_charge() {
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "mouse".to_string(),
-            DeviceSettings {
-                poll_interval_secs: None,
-                low_threshold: Some(255),
-            },
-        );
         let cfg = Config {
             low_threshold: 250,
-            device_overrides: overrides,
-            ..Config::default()
+            ..mouse_override(None, Some(255))
         };
         assert_eq!(cfg.effective_low_threshold("mouse"), 100);
         assert_eq!(cfg.effective_low_threshold("keyboard"), 100);
     }
 
-    // --- serde with device_overrides ----------------------------------------
-
     #[test]
     fn serde_round_trip_with_device_overrides() {
-        let mut cfg = Config {
+        let cfg = Config {
             poll_interval_secs: 30,
             low_threshold: 15,
-            ..Config::default()
+            ..mouse_override(Some(10), Some(5))
         };
-        cfg.device_overrides.insert(
-            "mouse".to_string(),
-            DeviceSettings {
-                poll_interval_secs: Some(10),
-                low_threshold: Some(5),
-            },
-        );
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg, restored);
     }
-
-    #[test]
-    fn empty_json_poll_interval_and_threshold_default() {
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
-        assert_eq!(cfg.low_threshold, DEFAULT_LOW_THRESHOLD);
-        assert!(cfg.device_overrides.is_empty());
-    }
-
-    // --- hide_offline_after ---------------------------------------------------
 
     #[test]
     fn an_offline_device_hides_after_two_hours_by_default() {
