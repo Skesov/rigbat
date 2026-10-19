@@ -165,7 +165,7 @@ pub async fn discover_unclaimed(
 }
 
 /// Whether a kernel driver already registered a battery on the HID device behind `dev_path`.
-pub fn kernel_reports_battery(sysfs_root: &Path, dev_path: &Path) -> bool {
+fn kernel_reports_battery(sysfs_root: &Path, dev_path: &Path) -> bool {
     let Some(node) = dev_path.file_name() else {
         return false;
     };
