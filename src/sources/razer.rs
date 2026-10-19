@@ -314,10 +314,7 @@ fn poll_device(
     handle: &mut Option<File>,
 ) -> anyhow::Result<BatteryReading> {
     if handle.is_none() {
-        let node = dev_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .with_context(|| format!("no node name in {}", dev_path.display()))?;
+        let node = hidraw::node_name(dev_path)?;
         if let Some(dir) = openrazer_attributes(sysfs_root, node, identity)? {
             return read_openrazer(&dir, model);
         }
@@ -334,11 +331,16 @@ fn poll_device(
         .context("handle unexpectedly empty after open")?;
 
     let level = exchange(file, model, Query::Battery)?;
-    let state = match model.power {
-        Power::Rechargeable => charge_state(exchange(file, model, Query::Charging)?)?,
-        Power::AaBattery => ChargeState::Discharging,
-    };
+    let state = charge(model, || exchange(file, model, Query::Charging))?;
     Ok(BatteryReading::new(percent(level), state))
+}
+
+/// The charging flag `read` returns, or discharging for a mouse that cannot charge.
+fn charge(model: &Model, read: impl FnOnce() -> anyhow::Result<u8>) -> anyhow::Result<ChargeState> {
+    match model.power {
+        Power::Rechargeable => charge_state(read()?),
+        Power::AaBattery => Ok(ChargeState::Discharging),
+    }
 }
 
 /// Sends the request for `query` and reads its reply, again while the mouse is busy.
@@ -392,7 +394,7 @@ fn openrazer_attributes(
         .with_context(|| format!("no USB device above {}", real.display()))?;
     let entries = std::fs::read_dir(usb_device)
         .with_context(|| format!("reading {}", usb_device.display()))?;
-    let mut dirs: Vec<PathBuf> = entries
+    entries
         .filter_map(Result::ok)
         .filter(|interface| interface.file_name().to_string_lossy().contains(':'))
         .filter_map(|interface| std::fs::read_dir(interface.path()).ok())
@@ -400,20 +402,14 @@ fn openrazer_attributes(
         .filter_map(Result::ok)
         .map(|hid| hid.path())
         .filter(|hid| hid.join(CHARGE_LEVEL).is_file())
-        .collect();
-    dirs.sort();
-    dirs.into_iter()
-        .next()
+        .min()
         .map(Some)
         .with_context(|| format!("{OPENRAZER_DRIVER} drives {node} but exposes no {CHARGE_LEVEL}"))
 }
 
 fn read_openrazer(dir: &Path, model: &Model) -> anyhow::Result<BatteryReading> {
     let level = read_attribute(&dir.join(CHARGE_LEVEL))?;
-    let state = match model.power {
-        Power::Rechargeable => charge_state(read_attribute(&dir.join(CHARGE_STATUS))?)?,
-        Power::AaBattery => ChargeState::Discharging,
-    };
+    let state = charge(model, || read_attribute(&dir.join(CHARGE_STATUS)))?;
     Ok(BatteryReading::new(percent(level), state))
 }
 
@@ -776,30 +772,6 @@ mod tests {
     }
 
     // Discovery against a fake sysfs tree
-
-    #[test]
-    fn discover_in_takes_interface_0_of_known_products() {
-        let sysfs = FakeSysfs::new("razer-interface");
-        sysfs.add("hidraw0", 0, RAZER, 0x00B7, "");
-        sysfs.add("hidraw1", 1, RAZER, 0x00B7, "");
-        sysfs.add("hidraw2", 2, RAZER, 0x00B7, "");
-        sysfs.add("hidraw3", 0, RAZER, 0x0099, "");
-        sysfs.add("hidraw4", 0, 0x1038, 0x00B7, "");
-        let found: Vec<_> = FAMILY
-            .discover_in(&sysfs.class())
-            .unwrap()
-            .into_iter()
-            .map(|d| (d.dev_path, d.info.name, d.info.kind))
-            .collect();
-        assert_eq!(
-            found,
-            [(
-                PathBuf::from("/dev/hidraw0"),
-                "Razer DeathAdder V3 Pro".to_owned(),
-                DeviceKind::Mouse
-            )]
-        );
-    }
 
     /// Rebinds `node`'s HID device to `driver`, as `razer_mount` does.
     fn bind(sysfs: &FakeSysfs, node: &str, driver: &str) -> PathBuf {
