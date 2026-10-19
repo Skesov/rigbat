@@ -115,7 +115,8 @@ src/
 ├── tray/          # manager.rs (icon set + run loop), item.rs (SNI item + menu),
 │                 # resolve.rs (device per icon), state service for the dashboard
 ├── icon/          # IconRenderer (tiny-skia), status marks, kind silhouettes, digits (skrifa)
-├── gui/           # shared egui theme for dashboard and settings
+├── gui/           # shared egui theme for dashboard and settings; window_command.rs: the pending
+│                 # second-launch window command (raise / close) both windows share
 ├── palette.rs     # colour tables per Palette + WCAG readable(): shared by icon/gui/settings
 ├── launch.rs      # own binary for window processes and autostart (survives an upgrade)
 ├── dashboard/     # eframe device overview (separate process, left click)
@@ -125,6 +126,7 @@ src/
 ├── session/       # logind PrepareForSleep → resume re-poll
 ├── settings/      # eframe/egui settings window (separate process): mod.rs shell,
 │                 # general_tab.rs, appearance_tab.rs, devices_tab.rs, devices.rs (row state), widgets.rs,
+│                 # about.rs (General tab footer: version, commit hash, link),
 │                 # scan.rs (tray roster, or a local poll when no tray runs), open_uri.rs (links via the portal)
 ├── autostart/     # ~/.config/autostart/rigbat.desktop + systemd user unit state
 ├── doctor/        # `rigbat doctor`: setup checks with a fix per problem
