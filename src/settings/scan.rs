@@ -284,9 +284,17 @@ mod bus_tests {
         vec![(device("local"), PollOutcome::Failed)]
     }
 
+    /// Carries a locator, which must survive the tray's snapshot.
+    fn serial(name: &str) -> DeviceInfo {
+        DeviceInfo {
+            locator: Some(format!("{name}-serial")),
+            ..device(name)
+        }
+    }
+
     fn online(name: &str) -> DeviceState {
         DeviceState {
-            info: device(name),
+            info: serial(name),
             last_reading: Some(BatteryReading::new(70, ChargeState::Discharging)),
             last_seen: Some(crate::clock::now()),
             presence: Presence::Online,
@@ -340,7 +348,7 @@ mod bus_tests {
         assert!(!polled.get(), "polled the devices next to a running tray");
         let mut ids: Vec<_> = rows.into_iter().map(|row| row.info).collect();
         ids.sort_by(|a, b| a.name.cmp(&b.name));
-        assert_eq!(ids, [device("keyboard"), device("mouse")]);
+        assert_eq!(ids, [serial("keyboard"), serial("mouse")]);
     }
 
     #[tokio::test]
