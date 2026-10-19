@@ -10,12 +10,7 @@ pub fn desktop_path() -> Option<PathBuf> {
 
 /// Returns `true` if the autostart entry exists on disk.
 pub fn is_enabled() -> bool {
-    desktop_path().map(|p| is_enabled_at(&p)).unwrap_or(false)
-}
-
-/// Returns `true` if a file exists at `path`.
-fn is_enabled_at(path: &std::path::Path) -> bool {
-    path.exists()
+    desktop_path().is_some_and(|p| p.exists())
 }
 
 /// Escapes `"`, `` ` ``, `$` and `\` with a preceding backslash, per the
@@ -34,12 +29,8 @@ fn escape_exec_arg(s: &str) -> String {
     out
 }
 
-/// Builds the `.desktop` file body. `exec` is the absolute path to the binary.
-///
-/// The `Exec` value is double-quoted so paths containing spaces remain valid
-/// per the Desktop Entry Specification (section "Exec key").
-///
-/// Pure function — no I/O, fully unit-testable.
+/// Builds the `.desktop` file body. `exec` is the absolute path to the binary,
+/// double-quoted so a path with spaces stays valid.
 fn desktop_entry(exec: &str) -> String {
     let exec = escape_exec_arg(exec);
     format!(
@@ -53,24 +44,20 @@ fn desktop_entry(exec: &str) -> String {
     )
 }
 
-/// Writes the autostart entry pointing at the current executable
-/// (`launch::executable`: never a ` (deleted)` path left by an upgrade).
-///
-/// Known limitation: if the binary is later moved the stale `Exec` path breaks
-/// autostart. Toggling Startup off then on rewrites it with the new path.
-pub fn enable() -> anyhow::Result<()> {
+/// Writes or removes the autostart entry. The entry points at the current
+/// executable (`launch::executable`: never a ` (deleted)` path left by an
+/// upgrade); if the binary later moves, toggling it off and on rewrites it.
+pub fn set_enabled(on: bool) -> anyhow::Result<()> {
     let path = desktop_path().context("could not determine config directory")?;
-    enable_at(&path)
-}
-
-/// Removes the autostart entry. A missing file is treated as success.
-pub fn disable() -> anyhow::Result<()> {
-    let path = desktop_path().context("could not determine config directory")?;
-    disable_at(&path)
+    if on {
+        enable_at(&path)
+    } else {
+        disable_at(&path)
+    }
 }
 
 /// Writes the autostart entry at `path`, creating the parent directory if needed.
-fn enable_at(path: &std::path::Path) -> anyhow::Result<()> {
+fn enable_at(path: &Path) -> anyhow::Result<()> {
     let exec = crate::launch::executable();
     let exec_str = exec
         .to_str()
@@ -86,8 +73,8 @@ fn enable_at(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Removes the file at `path`. A missing file is treated as success.
-fn disable_at(path: &std::path::Path) -> anyhow::Result<()> {
+/// A missing file is treated as success.
+fn disable_at(path: &Path) -> anyhow::Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -118,15 +105,8 @@ pub fn start_tray() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Enables or disables autostart depending on `on`.
-pub fn set_enabled(on: bool) -> anyhow::Result<()> {
-    if on { enable() } else { disable() }
-}
-
-/// systemd targets `systemctl --user enable` links a unit into. Checked in
-/// this order but either one enabling `rigbat.service` counts: which target
-/// applies depends on the unit's own `WantedBy=`, not on anything rigbat
-/// controls.
+/// systemd targets `systemctl --user enable` links a unit into; which one
+/// depends on the unit's `WantedBy=`, so either counts.
 const SYSTEMD_WANTS_TARGETS: [&str; 2] = ["default.target.wants", "graphical-session.target.wants"];
 
 /// The unit name `make service` installs and `systemctl --user enable`
@@ -138,18 +118,15 @@ fn systemd_user_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|b| b.config_dir().join("systemd").join("user"))
 }
 
-/// Returns `true` if `rigbat.service` is enabled for the systemd user manager
-/// rooted at `unit_dir` — i.e. `systemctl --user enable` linked it into
-/// `default.target.wants/` or `graphical-session.target.wants/`. A pure
-/// filesystem check: no systemd dependency, no shelling out.
+/// Whether `systemctl --user enable` linked `rigbat.service` into a target
+/// under `unit_dir`: a filesystem check, no systemd dependency.
 fn systemd_service_enabled_at(unit_dir: &Path) -> bool {
     SYSTEMD_WANTS_TARGETS
         .iter()
         .any(|target| unit_dir.join(target).join(SYSTEMD_UNIT_NAME).exists())
 }
 
-/// Returns `true` if `rigbat.service` is enabled, or `false` if the config
-/// directory cannot be determined (no home directory in the environment).
+/// `false` if the config directory cannot be determined.
 pub fn systemd_service_enabled() -> bool {
     systemd_user_dir()
         .map(|dir| systemd_service_enabled_at(&dir))
@@ -166,69 +143,40 @@ pub fn systemd_unit_installed() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        desktop_entry, disable_at, enable_at, escape_exec_arg, is_enabled_at,
-        systemd_service_enabled_at,
+        desktop_entry, disable_at, enable_at, escape_exec_arg, systemd_service_enabled_at,
     };
     use crate::test_support::ScratchDir;
 
     #[test]
-    fn desktop_entry_contains_required_fields() {
+    fn desktop_entry_has_the_required_fields_and_a_quoted_exec() {
         let entry = desktop_entry("/usr/bin/rigbat");
         assert!(entry.contains("Type=Application"));
         assert!(entry.contains("Name=rigbat"));
         assert!(entry.contains("X-GNOME-Autostart-enabled=true"));
-    }
-
-    #[test]
-    fn desktop_entry_exec_is_double_quoted() {
-        let entry = desktop_entry("/usr/bin/rigbat");
         assert!(entry.contains("Exec=\"/usr/bin/rigbat\" tray"));
-    }
 
-    #[test]
-    fn desktop_entry_path_with_spaces_is_double_quoted() {
         let entry = desktop_entry("/home/user/my apps/rigbat");
         assert!(entry.contains("Exec=\"/home/user/my apps/rigbat\" tray"));
     }
 
     #[test]
-    fn escape_exec_arg_escapes_double_quote() {
-        assert_eq!(escape_exec_arg("a\"b"), "a\\\"b");
-    }
-
-    #[test]
-    fn escape_exec_arg_escapes_backtick() {
-        assert_eq!(escape_exec_arg("a`b"), "a\\`b");
-    }
-
-    #[test]
-    fn escape_exec_arg_escapes_dollar_sign() {
-        assert_eq!(escape_exec_arg("a$b"), "a\\$b");
-    }
-
-    #[test]
-    fn escape_exec_arg_escapes_backslash() {
-        assert_eq!(escape_exec_arg("a\\b"), "a\\\\b");
-    }
-
-    #[test]
-    fn escape_exec_arg_passes_through_unaffected_chars() {
-        assert_eq!(escape_exec_arg("/usr/bin/rigbat"), "/usr/bin/rigbat");
-    }
-
-    #[test]
-    fn escape_exec_arg_leaves_spaces_unescaped() {
-        assert_eq!(
-            escape_exec_arg("/home/user/my apps/rigbat"),
-            "/home/user/my apps/rigbat"
-        );
+    fn escape_exec_arg_escapes_only_the_reserved_characters() {
+        for (raw, escaped) in [
+            ("a\"b", "a\\\"b"),
+            ("a`b", "a\\`b"),
+            ("a$b", "a\\$b"),
+            ("a\\b", "a\\\\b"),
+            ("/usr/bin/rigbat", "/usr/bin/rigbat"),
+            ("/home/user/my apps/rigbat", "/home/user/my apps/rigbat"),
+        ] {
+            assert_eq!(escape_exec_arg(raw), escaped, "{raw}");
+        }
     }
 
     #[test]
     fn enable_at_creates_missing_parent_and_writes_entry() {
         let scratch = ScratchDir::new("creates-parent");
-        let dir = scratch.path();
-        let path = dir.join("autostart").join("rigbat.desktop");
+        let path = scratch.join("autostart").join("rigbat.desktop");
 
         enable_at(&path).unwrap();
         let exec = std::env::current_exe().unwrap();
@@ -237,33 +185,21 @@ mod tests {
     }
 
     #[test]
-    fn is_enabled_at_reflects_file_presence() {
-        let scratch = ScratchDir::new("reflects-presence");
-        let dir = scratch.path();
-        let path = dir.join("rigbat.desktop");
+    fn enable_and_disable_toggle_the_entry() {
+        let scratch = ScratchDir::new("toggles");
+        let path = scratch.join("rigbat.desktop");
 
-        assert!(!is_enabled_at(&path));
+        assert!(!path.exists());
         enable_at(&path).unwrap();
-        assert!(is_enabled_at(&path));
-    }
-
-    #[test]
-    fn disable_at_removes_entry() {
-        let scratch = ScratchDir::new("removes-entry");
-        let dir = scratch.path();
-        let path = dir.join("rigbat.desktop");
-
-        enable_at(&path).unwrap();
-        assert!(is_enabled_at(&path));
+        assert!(path.exists());
         disable_at(&path).unwrap();
-        assert!(!is_enabled_at(&path));
+        assert!(!path.exists());
     }
 
     #[test]
     fn disable_at_on_absent_file_succeeds() {
         let scratch = ScratchDir::new("absent-file");
-        let dir = scratch.path();
-        let path = dir.join("rigbat.desktop");
+        let path = scratch.join("rigbat.desktop");
 
         assert!(!path.exists());
         disable_at(&path).unwrap();
@@ -272,9 +208,7 @@ mod tests {
     #[test]
     fn enable_at_overwrites_existing_file() {
         let scratch = ScratchDir::new("overwrites");
-        let dir = scratch.path();
-        let path = dir.join("rigbat.desktop");
-
+        let path = scratch.join("rigbat.desktop");
         std::fs::write(&path, "stale contents").unwrap();
 
         enable_at(&path).unwrap();
@@ -284,46 +218,26 @@ mod tests {
     }
 
     #[test]
-    fn systemd_service_enabled_at_false_when_dir_absent() {
-        let scratch = ScratchDir::new("dir-absent");
+    fn systemd_service_enabled_at_false_without_the_link() {
+        let scratch = ScratchDir::new("not-enabled");
         assert!(!systemd_service_enabled_at(&scratch.join("absent")));
-    }
 
-    #[test]
-    fn systemd_service_enabled_at_false_when_no_symlink() {
-        let scratch = ScratchDir::new("no-symlink");
-        let dir = scratch.path();
-        std::fs::create_dir_all(dir.join("default.target.wants")).unwrap();
-        assert!(!systemd_service_enabled_at(dir));
-    }
-
-    #[test]
-    fn systemd_service_enabled_at_true_for_default_target_wants() {
-        let scratch = ScratchDir::new("default-target");
-        let dir = scratch.path();
-        let wants = dir.join("default.target.wants");
+        let wants = scratch.join("default.target.wants");
         std::fs::create_dir_all(&wants).unwrap();
-        std::fs::write(wants.join("rigbat.service"), "").unwrap();
-        assert!(systemd_service_enabled_at(dir));
-    }
+        assert!(!systemd_service_enabled_at(scratch.path()));
 
-    #[test]
-    fn systemd_service_enabled_at_true_for_graphical_session_target_wants() {
-        let scratch = ScratchDir::new("graphical-session-target");
-        let dir = scratch.path();
-        let wants = dir.join("graphical-session.target.wants");
-        std::fs::create_dir_all(&wants).unwrap();
-        std::fs::write(wants.join("rigbat.service"), "").unwrap();
-        assert!(systemd_service_enabled_at(dir));
-    }
-
-    #[test]
-    fn systemd_service_enabled_at_ignores_other_unit_names() {
-        let scratch = ScratchDir::new("other-unit");
-        let dir = scratch.path();
-        let wants = dir.join("default.target.wants");
-        std::fs::create_dir_all(&wants).unwrap();
         std::fs::write(wants.join("other.service"), "").unwrap();
-        assert!(!systemd_service_enabled_at(dir));
+        assert!(!systemd_service_enabled_at(scratch.path()));
+    }
+
+    #[test]
+    fn systemd_service_enabled_at_true_for_either_target() {
+        for target in ["default.target.wants", "graphical-session.target.wants"] {
+            let scratch = ScratchDir::new(target);
+            let wants = scratch.join(target);
+            std::fs::create_dir_all(&wants).unwrap();
+            std::fs::write(wants.join("rigbat.service"), "").unwrap();
+            assert!(systemd_service_enabled_at(scratch.path()), "{target}");
+        }
     }
 }
