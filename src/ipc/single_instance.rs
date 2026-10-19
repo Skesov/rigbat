@@ -93,6 +93,36 @@ pub async fn acquire_named(name: &str) -> SingleInstance {
     }
 }
 
+/// Claims `name` for a window process and serves `object` at `path`, where a
+/// second launch reaches the window. `object_server()` spawns zbus's dispatch
+/// task, so this must run inside the runtime.
+pub async fn acquire_serving(
+    name: &str,
+    path: &str,
+    object: impl zbus::object_server::Interface,
+) -> SingleInstance {
+    let instance = acquire_named(name).await;
+    if let SingleInstance::Acquired(conn) = &instance
+        && let Err(e) = conn.object_server().at(path, object).await
+    {
+        tracing::warn!("a second launch will not reach this window ({path}): {e}");
+    }
+    instance
+}
+
+/// A second launch's request to the window that holds the name; a failure is
+/// only logged, as `could not {what}`.
+pub async fn call_running<F, Fut>(what: &str, call: F)
+where
+    F: FnOnce(zbus::Connection) -> Fut,
+    Fut: Future<Output = zbus::Result<()>>,
+{
+    let result = async { call(zbus::Connection::session().await?).await }.await;
+    if let Err(e) = result {
+        tracing::warn!("could not {what}: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SingleInstance, acquire_named};

@@ -3,9 +3,7 @@
 //! device itself, so it opens instantly and classifies each device exactly as
 //! its tray icon does.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
@@ -18,11 +16,12 @@ use crate::domain::{
     BootTime, Palette, Presence, PrimaryStatus, WindowTheme, charge_value, roster_order,
     status_note,
 };
+use crate::gui::window_command::Pending;
 use crate::gui::{
     self, GLYPH_COLUMN, GLYPH_SIZE, ROW_HEIGHT, StatusColors, kind_glyph, secondary_text,
 };
 use crate::i18n::{Lang, fl, loader};
-use crate::ipc::single_instance::{SingleInstance, acquire_named};
+use crate::ipc::single_instance::{SingleInstance, acquire_serving, call_running};
 use crate::ipc::{DASHBOARD_NAME, DASHBOARD_PATH, DeviceCard, Snapshot, TRAY_NAME};
 use crate::ipc::{Dashboard1Proxy, Tray1Proxy};
 use crate::palette::DIM;
@@ -68,7 +67,7 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 #[expect(clippy::large_enum_variant)]
 enum Startup {
     /// Another dashboard holds the name: this launch is the second click.
-    SecondClick,
+    AlreadyRunning,
     Started {
         /// Holds the name and serves `Closer` for as long as it lives.
         bus: Option<zbus::Connection>,
@@ -78,8 +77,8 @@ enum Startup {
 
 /// The bus setup `run` does from its own thread, which is not a runtime thread.
 fn start(rt: &tokio::runtime::Runtime, closer: Closer) -> Startup {
-    let conn = match rt.block_on(acquire_named(DASHBOARD_NAME)) {
-        SingleInstance::AlreadyRunning => return Startup::SecondClick,
+    let conn = match rt.block_on(acquire_serving(DASHBOARD_NAME, DASHBOARD_PATH, closer)) {
+        SingleInstance::AlreadyRunning => return Startup::AlreadyRunning,
         SingleInstance::Acquired(conn) => conn,
         SingleInstance::Unavailable => {
             return Startup::Started {
@@ -88,10 +87,6 @@ fn start(rt: &tokio::runtime::Runtime, closer: Closer) -> Startup {
             };
         }
     };
-    // `object_server()` spawns zbus's dispatch task, so it must run inside the runtime.
-    if let Err(e) = rt.block_on(async { conn.object_server().at(DASHBOARD_PATH, closer).await }) {
-        tracing::warn!("a second click will not close this window: {e}");
-    }
     // Subscribed before the first read, so a change in between is not lost.
     let live = rt.block_on(subscribe(&conn));
     Startup::Started {
@@ -102,14 +97,9 @@ fn start(rt: &tokio::runtime::Runtime, closer: Closer) -> Startup {
 
 pub fn run() -> anyhow::Result<()> {
     let rt = runtime()?;
-    let window: Arc<OnceLock<egui::Context>> = Arc::default();
-    let close_pending = Arc::new(AtomicBool::new(false));
-    let closer = Closer {
-        window: window.clone(),
-        pending: close_pending.clone(),
-    };
-    let (_bus, live) = match start(&rt, closer) {
-        Startup::SecondClick => {
+    let close = Pending::new(close_window);
+    let (_bus, live) = match start(&rt, Closer(close.clone())) {
+        Startup::AlreadyRunning => {
             rt.block_on(close_running());
             return Ok(());
         }
@@ -147,10 +137,7 @@ pub fn run() -> anyhow::Result<()> {
         options,
         Box::new(move |cc| {
             follow_appearance(&handle, &cc.egui_ctx, appearance, theme);
-            let _ = window.set(cc.egui_ctx.clone());
-            if close_pending.load(Ordering::SeqCst) {
-                cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+            close.attach(&cc.egui_ctx);
             let (tx, updates) = mpsc::channel();
             if let Some((tray, changes, owners)) = live {
                 handle.spawn(follow(tray, changes, owners, tx, cc.egui_ctx.clone()));
@@ -183,14 +170,10 @@ fn follow_appearance(
 }
 
 async fn close_running() {
-    let result = async {
-        let conn = zbus::Connection::session().await?;
+    call_running("close the open dashboard", |conn| async move {
         Dashboard1Proxy::new(&conn).await?.close().await
-    }
+    })
     .await;
-    if let Err(e) = result {
-        tracing::warn!("could not close the open dashboard: {e}");
-    }
 }
 
 async fn fetch(tray: &Tray1Proxy<'_>) -> Option<Snapshot> {
@@ -281,23 +264,19 @@ async fn fetch_restarted(tray: &Tray1Proxy<'_>) -> Option<Snapshot> {
     None
 }
 
-struct Closer {
-    window: Arc<OnceLock<egui::Context>>,
-    /// Set when `Close` arrives before the window exists.
-    pending: Arc<AtomicBool>,
-}
+/// Serves `org.rigbat.Dashboard1`: a second click closes the open window.
+struct Closer(Pending);
 
 #[zbus::interface(name = "org.rigbat.Dashboard1")]
 impl Closer {
     fn close(&self) {
-        match self.window.get() {
-            Some(window) => {
-                window.send_viewport_cmd(egui::ViewportCommand::Close);
-                window.request_repaint();
-            }
-            None => self.pending.store(true, Ordering::SeqCst),
-        }
+        self.0.send();
     }
+}
+
+fn close_window(window: &egui::Context) {
+    window.send_viewport_cmd(egui::ViewportCommand::Close);
+    window.request_repaint();
 }
 
 const REFRESH: &str = "\u{21BB}";
@@ -1033,12 +1012,9 @@ mod tests {
 
     #[test]
     fn a_close_before_the_window_exists_is_kept_for_later() {
-        let closer = Closer {
-            window: Arc::default(),
-            pending: Arc::default(),
-        };
+        let closer = Closer(Pending::new(close_window));
         closer.close();
-        assert!(closer.pending.load(Ordering::SeqCst));
+        assert!(closer.0.is_pending());
     }
 
     #[test]
@@ -1410,13 +1386,6 @@ mod bus_tests {
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 
-    fn closer(pending: &Arc<AtomicBool>) -> Closer {
-        Closer {
-            window: Arc::default(),
-            pending: pending.clone(),
-        }
-    }
-
     /// Called from the test thread, which no runtime has entered — as `run` calls it.
     #[test]
     fn start_serves_close_from_a_plain_thread() {
@@ -1424,8 +1393,8 @@ mod bus_tests {
             return;
         }
         let rt = runtime().expect("runtime");
-        let pending = Arc::new(AtomicBool::new(false));
-        let started = start(&rt, closer(&pending));
+        let pending = Pending::new(close_window);
+        let started = start(&rt, Closer(pending.clone()));
         assert!(
             matches!(
                 started,
@@ -1437,13 +1406,10 @@ mod bus_tests {
             "the first launch owns the name and subscribes"
         );
 
-        let second = start(&rt, closer(&Arc::default()));
-        assert!(matches!(second, Startup::SecondClick));
+        let second = start(&rt, Closer(Pending::new(close_window)));
+        assert!(matches!(second, Startup::AlreadyRunning));
         rt.block_on(close_running());
-        assert!(
-            pending.load(Ordering::SeqCst),
-            "Close reached the first window"
-        );
+        assert!(pending.is_pending(), "Close reached the first window");
 
         let _entered = rt.enter();
         drop(started);

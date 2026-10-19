@@ -1,4 +1,7 @@
-//! Session appearance for the settings window and the dashboard.
+//! What the settings window and the dashboard share: session appearance,
+//! status colours, row metrics and the second-launch window command.
+
+pub mod window_command;
 
 use eframe::egui;
 use tokio::sync::watch;
