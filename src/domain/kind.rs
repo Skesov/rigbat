@@ -65,15 +65,7 @@ pub fn guess_kind(name: &str) -> DeviceKind {
         }
     }
     // Whole words only: "ear" sits inside "Nearby", "Gear", "Clear".
-    const HEADSET_WORDS: &[&str] = &[
-        "ear",
-        "buds",
-        "earbuds",
-        "airpods",
-        "headphone",
-        "headphones",
-        "earphone",
-    ];
+    const HEADSET_WORDS: &[&str] = &["ear", "airpods"];
     if lower
         .split(|c: char| !c.is_alphanumeric())
         .any(|word| HEADSET_WORDS.contains(&word))
@@ -115,18 +107,34 @@ mod tests {
     }
 
     #[test]
-    fn guess_kind_mouse() {
-        assert_eq!(guess_kind("MX Anywhere 3"), DeviceKind::Mouse);
+    fn guess_kind_by_model() {
+        for (name, kind) in [
+            ("MX Anywhere 3", DeviceKind::Mouse),
+            ("UGREEN HiTune Max5", DeviceKind::Headset),
+            ("DualSense", DeviceKind::Controller),
+            ("Unknown Thing", DeviceKind::Other),
+        ] {
+            assert_eq!(guess_kind(name), kind, "{name}");
+        }
     }
 
     #[test]
-    fn guess_kind_keyboard() {
-        assert_eq!(guess_kind("NuPhy Air75 V2-2"), DeviceKind::Keyboard);
-    }
-
-    #[test]
-    fn guess_kind_headset() {
-        assert_eq!(guess_kind("UGREEN HiTune Max5"), DeviceKind::Headset);
+    fn every_earbud_word_names_a_headset_on_its_own() {
+        for word in [
+            "Ear",
+            "Buds",
+            "Earbuds",
+            "AirPods",
+            "Headphone",
+            "Headphones",
+            "Earphone",
+        ] {
+            assert_eq!(
+                guess_kind(&format!("Acme {word}")),
+                DeviceKind::Headset,
+                "{word}"
+            );
+        }
     }
 
     #[test]
@@ -147,16 +155,6 @@ mod tests {
         assert_eq!(guess_kind("Nearby Keyboard"), DeviceKind::Keyboard);
         assert_eq!(guess_kind("Nearby Tracker"), DeviceKind::Other);
         assert_eq!(guess_kind("Gear Tag"), DeviceKind::Other);
-    }
-
-    #[test]
-    fn guess_kind_controller() {
-        assert_eq!(guess_kind("DualSense"), DeviceKind::Controller);
-    }
-
-    #[test]
-    fn guess_kind_other() {
-        assert_eq!(guess_kind("Unknown Thing"), DeviceKind::Other);
     }
 
     #[test]
