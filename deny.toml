@@ -8,12 +8,12 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 [advisories]
 # Unmaintained crates are reported for the whole graph; yanked ones fail.
 yanked = "deny"
-# quick-xml 0.39 reaches us only via accesskit -> atspi-common -> zbus-lockstep, which
-# atspi-common calls from #[cfg(test)] code alone; no XML is parsed at runtime. Drop these
-# once an eframe/accesskit update moves atspi-common off zbus-lockstep 0.5.
+# zvariant, zvariant_derive and zbus_names were folded into zbus 6; ksni 0.3 and
+# atspi-common (via accesskit) still pin zbus 5. Drop these once both move to zbus 6.
 ignore = [
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml via atspi-common test-only code, not reachable" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml via atspi-common test-only code, not reachable" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; ksni and atspi-common pin zbus 5" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; ksni and atspi-common pin zbus 5" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; ksni and atspi-common pin zbus 5" },
 ]
 
 [licenses]
