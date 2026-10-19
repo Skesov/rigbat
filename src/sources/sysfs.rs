@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Context as _;
 
@@ -20,7 +23,7 @@ fn parse_status(s: &str) -> ChargeState {
 }
 
 impl SysfsSource {
-    pub fn enumerate() -> anyhow::Result<Vec<SysfsSource>> {
+    fn enumerate() -> anyhow::Result<Vec<SysfsSource>> {
         Self::enumerate_in(Path::new("/sys/class/power_supply"))
     }
 
@@ -34,52 +37,30 @@ impl SysfsSource {
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
-                    // The hidraw backends log the same case; a directory entry
-                    // that cannot be read is worth one line, not silence.
                     tracing::warn!("skipping power_supply entry: {e}");
                     continue;
                 }
             };
             let entry_path = entry.path();
 
-            let kind = std::fs::read_to_string(entry_path.join("type"))
-                .ok()
-                .map(|s| s.trim().to_owned());
+            let kind = read_attr(&entry_path, "type");
             let has_charge =
                 entry_path.join("capacity").exists() || entry_path.join("capacity_level").exists();
-            let scope = std::fs::read_to_string(entry_path.join("scope"))
-                .ok()
-                .map(|s| s.trim().to_owned());
-
+            let scope = read_attr(&entry_path, "scope");
             if !should_include(kind.as_deref(), has_charge, scope.as_deref()) {
                 continue;
             }
 
-            // Name: from model_name if the file exists and is non-empty; otherwise use the directory name
-            let name = {
-                let model_path = entry_path.join("model_name");
-                let model = std::fs::read_to_string(&model_path)
-                    .map(|s| s.trim().to_owned())
-                    .unwrap_or_default();
-
-                if model.is_empty() {
-                    entry.file_name().to_string_lossy().into_owned()
-                } else {
-                    model
-                }
-            };
-
+            let name = display_name(&entry_path, &entry.file_name());
             let dir_name = entry.file_name().to_string_lossy().into_owned();
             let locator = stable_locator(&entry_path, &dir_name);
-            let info = DeviceInfo {
-                kind: guess_kind(&name),
-                name,
-                transport: Transport::Sysfs,
-                locator: Some(locator),
-            };
-
             sources.push(SysfsSource {
-                info,
+                info: DeviceInfo {
+                    kind: guess_kind(&name),
+                    name,
+                    transport: Transport::Sysfs,
+                    locator: Some(locator),
+                },
                 base: entry_path,
             });
         }
@@ -88,24 +69,24 @@ impl SysfsSource {
     }
 }
 
-/// Decides whether a `/sys/class/power_supply/<name>` entry is a gaming
-/// peripheral rigbat should track, from the three sysfs facts that settle it.
-/// Mains (AC adapters) and anything with neither a `capacity` nor a
-/// `capacity_level` file are excluded; `scope` now decides the harder case — a laptop's own battery,
-/// which otherwise passes both older checks (C3: it has `type == "Battery"`
-/// and a `capacity` file, so it used to be listed as if it were a
-/// peripheral).
-///
-/// Peripheral power supplies (`hid-logitech-hidpp` and friends) set `scope`
-/// to `Device` — verified directly against this project's own hardware: the
-/// maintainer's MX Anywhere 3, exposed as `hidpp_battery_5`, reads
-/// `scope: Device` on the machine this fix was written on. No ACPI-battery
-/// hardware was available there to confirm what the host's own battery
-/// reports when it omits `scope` entirely (a laptop with `BAT0`, not
-/// present on that machine), so a missing or unreadable `scope` defaults to
-/// **excluded**: a peripheral silently missing from the tray is a smaller
-/// problem than the host's own battery reappearing as one (the exact defect
-/// this filter exists to close).
+/// An attribute's trimmed text; `None` when it is missing or unreadable.
+fn read_attr(dir: &Path, name: &str) -> Option<String> {
+    std::fs::read_to_string(dir.join(name))
+        .ok()
+        .map(|s| s.trim().to_owned())
+}
+
+/// `model_name` when the driver sets a non-empty one, else the directory name.
+fn display_name(dir: &Path, dir_name: &OsStr) -> String {
+    read_attr(dir, "model_name")
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| dir_name.to_string_lossy().into_owned())
+}
+
+/// Whether a `/sys/class/power_supply/<name>` entry is a peripheral rigbat tracks.
+/// Peripheral supplies (`hid-logitech-hidpp` and friends) set `scope` to `Device`;
+/// a missing `scope` is excluded, because a peripheral missing from the tray costs
+/// less than the host's own battery appearing as one.
 fn should_include(kind: Option<&str>, has_charge: bool, scope: Option<&str>) -> bool {
     if kind == Some("Mains") {
         return false;
@@ -120,19 +101,14 @@ fn should_include(kind: Option<&str>, has_charge: bool, scope: Option<&str>) -> 
 ///
 /// The directory name is not identity. `hid-logitech-hidpp` builds it from a
 /// module-global counter — `n = atomic_inc_return(&battery_no) - 1;` then
-/// `sprintf(battery->name, "hidpp_battery_%ld", n)` — so the same mouse is
-/// `hidpp_battery_6` now and something else after the next reconnect or
-/// reboot. `DeviceId` treats the locator as identity, so using the directory
-/// name made one device look like a new one each time: retained reading
-/// dropped, inventory row duplicated with a fresh "first seen".
-///
-/// The kernel registers the supply with the HID device as its parent
+/// `sprintf(battery->name, "hidpp_battery_%ld", n)` — so the same mouse gets
+/// another name after a reconnect or reboot. The kernel registers the supply
+/// with the HID device as its parent
 /// (`devm_power_supply_register(&hidpp->hid_dev->dev, …)`), so
-/// `<supply>/device/uevent` is that device's uevent, and the same
-/// serial-then-USB-path preference the hidraw backends use applies here.
-/// A supply with no readable HID uevent — a non-HID power source — keeps the
-/// directory name, exactly as before.
-fn stable_locator(entry_path: &std::path::Path, dir_name: &str) -> String {
+/// `<supply>/device/uevent` is that device's uevent and
+/// [`hidraw::stable_locator`] applies. A supply with no readable HID uevent
+/// keeps the directory name.
+fn stable_locator(entry_path: &Path, dir_name: &str) -> String {
     match std::fs::read_to_string(entry_path.join("device/uevent")) {
         Ok(uevent) => hidraw::stable_locator(&uevent, dir_name),
         Err(_) => dir_name.to_owned(),
@@ -149,13 +125,7 @@ impl BatterySource for SysfsSource {
         let base = self.base.clone();
         let name = self.info.name.clone();
 
-        // Blocking I/O, like the hidraw backends. A power_supply attribute is
-        // served by its driver, and whether answering touches the hardware is
-        // the driver's decision, not rigbat's: hid-logitech-hidpp answers from
-        // a cache it refreshes on notifications, while an ACPI-backed supply
-        // evaluates a method per read. The read is usually sub-millisecond, but
-        // "usually" is not a property the runtime can rely on, and once per
-        // poll interval the extra task costs nothing measurable.
+        // The driver decides whether a read touches the hardware (ACPI evaluates a method per read).
         let reading = tokio::task::spawn_blocking(move || read_reading(&base, &name))
             .await
             .context("spawn_blocking")??;
@@ -218,10 +188,6 @@ impl BatteryBackend for SysfsBackend {
     }
 
     async fn discover(&self, _ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
-        // The walk is `std::fs` on a sysfs tree: fast, but still blocking,
-        // and it runs on the same runtime as every source task. Off-thread for
-        // the same reason `poll` is (R35): how long a sysfs read takes is the
-        // kernel's business, not rigbat's.
         let sources = tokio::task::spawn_blocking(SysfsSource::enumerate)
             .await
             .context("spawn_blocking")??;
@@ -238,18 +204,24 @@ mod tests {
 
     /// A stand-in `/sys/class/power_supply/<name>` directory under the OS temp
     /// dir, so the test never depends on what this machine has plugged in.
-    fn scratch_supply(test_name: &str, capacity: &str, status: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "rigbat-sysfs-test-{test_name}-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("capacity"), capacity).unwrap();
-        std::fs::write(dir.join("status"), status).unwrap();
-        dir
+    /// Removed on drop, also when an assertion fails.
+    struct ScratchDir(PathBuf);
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
     }
 
-    fn scratch_dir(test_name: &str, files: &[(&str, &str)]) -> PathBuf {
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch_dir(test_name: &str, files: &[(&str, &str)]) -> ScratchDir {
         let dir = std::env::temp_dir().join(format!(
             "rigbat-sysfs-test-{test_name}-{}",
             std::process::id()
@@ -258,7 +230,11 @@ mod tests {
         for (file, content) in files {
             std::fs::write(dir.join(file), content).unwrap();
         }
-        dir
+        ScratchDir(dir)
+    }
+
+    fn scratch_supply(test_name: &str, capacity: &str, status: &str) -> ScratchDir {
+        scratch_dir(test_name, &[("capacity", capacity), ("status", status)])
     }
 
     /// The attribute set `xpadneo` registers: no `capacity`, only `capacity_level`.
@@ -280,8 +256,6 @@ mod tests {
         assert_eq!(reading.percent, 60);
         assert_eq!(reading.state, ChargeState::Discharging);
         assert!(reading.coarse);
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -298,8 +272,6 @@ mod tests {
         let reading = read_reading(&dir, "mouse").unwrap();
         assert_eq!(reading.percent, 73);
         assert!(!reading.coarse);
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -317,8 +289,6 @@ mod tests {
         let reading = read_reading(&dir, "Xbox Wireless Controller").unwrap();
         assert_eq!(reading.percent, 60);
         assert!(reading.coarse);
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -364,8 +334,6 @@ mod tests {
             read_reading(&sources[0].base, "pad").unwrap(),
             BatteryReading::new_coarse(85, ChargeState::Discharging)
         );
-
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// A HID-backed supply keys on the device's own serial, so the locator is
@@ -381,8 +349,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(stable_locator(&dir, "hidpp_battery_6"), "00:00:5e:00:53:01");
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A supply with no HID parent — anything that is not a HID device — keeps
@@ -392,8 +358,6 @@ mod tests {
         let dir = scratch_supply("locator-plain", "50\n", "Discharging\n");
 
         assert_eq!(stable_locator(&dir, "some_battery"), "some_battery");
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -403,8 +367,6 @@ mod tests {
         let reading = read_reading(&dir, "test").unwrap();
         assert_eq!(reading.percent, 77);
         assert_eq!(reading.state, ChargeState::Charging);
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -413,8 +375,6 @@ mod tests {
 
         let err = read_reading(&dir, "Wireless Mouse").unwrap_err();
         assert!(err.to_string().contains("Wireless Mouse"));
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -453,13 +413,8 @@ mod tests {
         assert_eq!(parse_status("Full\n"), ChargeState::Full);
     }
 
-    // should_include (C3): a laptop's own battery must not be listed as a
-    // gaming peripheral.
-
     #[test]
     fn should_include_accepts_device_scoped_entry() {
-        // Matches the maintainer's MX Anywhere 3, verified live as
-        // `hidpp_battery_5`: type Battery, has capacity, scope Device.
         assert!(should_include(Some("Battery"), true, Some("Device")));
     }
 
@@ -471,9 +426,6 @@ mod tests {
 
     #[test]
     fn should_include_rejects_missing_scope() {
-        // Chosen default for hardware this project could not verify locally
-        // (no ACPI battery on the dev machine) — see `should_include`'s doc
-        // comment for the reasoning.
         assert!(!should_include(Some("Battery"), true, None));
     }
 
