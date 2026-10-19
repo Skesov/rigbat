@@ -128,12 +128,7 @@ fn dump_icons() {
             .save_png(dir.join(name))
             .expect("saving the sheet");
     }
-    for kind in [
-        DeviceKind::Keyboard,
-        DeviceKind::Headset,
-        DeviceKind::Controller,
-        DeviceKind::Other,
-    ] {
+    for kind in DeviceKind::ALL.into_iter().skip(1) {
         contact_sheet(&[ColorScheme::Dark], Some(kind))
             .save_png(dir.join(format!("rigbat-icons-{}.png", kind.as_str())))
             .expect("saving the sheet");
@@ -157,7 +152,7 @@ fn ascii(icon: &ksni::Icon) -> String {
 fn ascii_sheet() -> String {
     let mut cases = Vec::new();
     for mode in DisplayMode::ALL {
-        for kind in KINDS.into_iter().skip(1) {
+        for kind in DeviceKind::ALL.map(Some) {
             cases.push((mode, kind, PrimaryStatus::Ok { percent: 60 }, false));
         }
     }

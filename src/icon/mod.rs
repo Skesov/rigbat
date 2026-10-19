@@ -67,6 +67,10 @@ impl IconCache {
     }
 }
 
+const PUBLISHED_SIZES: [u32; 5] = [22, 24, 32, 44, 64];
+
+const DESIGN_SIZE: f32 = 22.0;
+
 pub struct TinySkiaRenderer {
     pub sizes: Vec<u32>,
 }
@@ -74,7 +78,7 @@ pub struct TinySkiaRenderer {
 impl Default for TinySkiaRenderer {
     fn default() -> Self {
         Self {
-            sizes: vec![22, 24, 32, 44, 64],
+            sizes: PUBLISHED_SIZES.to_vec(),
         }
     }
 }
@@ -112,7 +116,7 @@ impl IconRenderer for TinySkiaRenderer {
         };
         self.sizes
             .iter()
-            .filter_map(|&size| render_mode(size, layout, &look))
+            .filter_map(|&size| render_online(size, layout, &look))
             .collect()
     }
 }
@@ -134,10 +138,6 @@ fn color([r, g, b, a]: [u8; 4]) -> Color {
     Color::from_rgba8(r, g, b, a)
 }
 
-// ---------------------------------------------------------------------------
-// Per-mode dispatch
-// ---------------------------------------------------------------------------
-
 /// What an icon draws: `DeviceAndBattery` without a silhouette is `Battery`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layout {
@@ -157,17 +157,10 @@ impl Layout {
 }
 
 /// SNI hosts (e.g. COSMIC) fit the icon into a roughly square slot, so a wider
-/// pixmap does not gain width — it only shrinks. Keep the canvas square and fill it.
-const WIDE_ASPECT: f32 = 1.0;
-
-/// Canvas width for a given icon height.
-fn wide_width(height: u32) -> u32 {
-    ((height as f32) * WIDE_ASPECT).round() as u32
-}
-
+/// pixmap does not gain width — it only shrinks. The canvas is square.
 /// Returns `None` only if `Pixmap::new` fails (does not happen for sizes ≤ 64).
-fn render_mode(size: u32, layout: Layout, look: &Look) -> Option<ksni::Icon> {
-    let mut pixmap = Pixmap::new(wide_width(size), size)?;
+fn render_online(size: u32, layout: Layout, look: &Look) -> Option<ksni::Icon> {
+    let mut pixmap = Pixmap::new(size, size)?;
     let g = battery_geometry(pixmap.width() as f32, pixmap.height() as f32);
     match layout {
         Layout::Battery => {
@@ -195,12 +188,12 @@ fn render_mode(size: u32, layout: Layout, look: &Look) -> Option<ksni::Icon> {
 
 /// In the offline colour, which is already dimmed: the silhouette over a
 /// slashed empty bar, or else the crossed battery.
-fn render_offline(n: u32, rgba: [u8; 4], layout: Layout) -> Option<ksni::Icon> {
-    let mut pixmap = Pixmap::new(wide_width(n), n)?;
+fn render_offline(size: u32, rgba: [u8; 4], layout: Layout) -> Option<ksni::Icon> {
+    let mut pixmap = Pixmap::new(size, size)?;
     let c = color(rgba);
     if let Layout::Device(bitmap) = layout {
-        draw_bitmap(&mut pixmap, bitmap, silhouette_area(n), c);
-        let bar = DeviceBar::new(n);
+        draw_bitmap(&mut pixmap, bitmap, silhouette_area(size), c);
+        let bar = DeviceBar::new(size);
         bar.draw_frame(&mut pixmap, c, false);
         bar.draw_slash(&mut pixmap, c);
     } else {
@@ -224,7 +217,7 @@ fn solid_paint(color: Color) -> Paint<'static> {
 
 /// The gap between the canvas edge and a mark in a corner.
 fn corner_margin(size: u32) -> i32 {
-    ((size as f32 / 22.0).round() as i32).max(1)
+    ((size as f32 / DESIGN_SIZE).round() as i32).max(1)
 }
 
 /// The clear halo around a status mark, and its gap to the digits.
@@ -236,13 +229,13 @@ fn mark_ring(size: u32) -> i32 {
 /// `Device` in the top-right corner, over the silhouette; for `Digits`
 /// bottom-left, under the digits.
 fn mark_area(size: u32, layout: Layout, mark: Bitmap) -> Area {
-    let (w, h) = (wide_width(size) as f32, size as f32);
+    let (w, h) = (size as f32, size as f32);
     // Whole pixels per cell keep the mark crisp; the body has room for more.
-    let per_22 = match layout {
+    let per_design_px = match layout {
         Layout::Battery => 1.4,
         Layout::Device(_) | Layout::Digits => 1.0,
     };
-    let cell = (h * per_22 / 22.0).floor().max(1.0) as i32;
+    let cell = (h * per_design_px / DESIGN_SIZE).floor().max(1.0) as i32;
     let (width, height) = (mark.cols as i32 * cell, mark.row_count() as i32 * cell);
     let (x, y) = match layout {
         Layout::Battery => {
@@ -253,7 +246,7 @@ fn mark_area(size: u32, layout: Layout, mark: Bitmap) -> Area {
                 (g.by + (g.bh - height as f32) / 2.0).round() as i32,
             )
         }
-        Layout::Device(_) => (wide_width(size) as i32 - width, 0),
+        Layout::Device(_) => (size as i32 - width, 0),
         Layout::Digits => {
             let margin = corner_margin(size);
             (margin, size as i32 - margin - height)
@@ -276,10 +269,6 @@ fn draw_mark(pixmap: &mut Pixmap, mark: Bitmap, area: Area, color: Color) {
     draw_bitmap(pixmap, mark, area, color);
 }
 
-// ---------------------------------------------------------------------------
-// Percent / digit drawing
-// ---------------------------------------------------------------------------
-
 /// Where the digits may go, in pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Region {
@@ -291,7 +280,7 @@ struct Region {
 
 /// Most of the canvas, above a status mark.
 fn digit_region(size: u32, mark: Option<Bitmap>) -> Region {
-    let (w, h) = (wide_width(size) as f32, size as f32);
+    let (w, h) = (size as f32, size as f32);
     let region = Region {
         x: w * 0.05,
         y: h * 0.05,
@@ -309,10 +298,6 @@ fn digit_region(size: u32, mark: Option<Bitmap>) -> Region {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pixmap → ksni::Icon conversion
-// ---------------------------------------------------------------------------
-
 /// Converts tiny-skia premultiplied RGBA to ARGB32 network byte order (A,R,G,B).
 fn pixmap_to_icon(pixmap: Pixmap) -> ksni::Icon {
     let w = pixmap.width() as i32;
@@ -320,10 +305,7 @@ fn pixmap_to_icon(pixmap: Pixmap) -> ksni::Icon {
     let rgba_data = pixmap.data();
     let mut argb_data = Vec::with_capacity(rgba_data.len());
     for chunk in rgba_data.as_chunks::<4>().0.iter() {
-        argb_data.push(chunk[3]); // A
-        argb_data.push(chunk[0]); // R
-        argb_data.push(chunk[1]); // G
-        argb_data.push(chunk[2]); // B
+        argb_data.extend([chunk[3], chunk[0], chunk[1], chunk[2]]);
     }
     ksni::Icon {
         width: w,

@@ -1,18 +1,18 @@
 use tiny_skia::{Color, PathBuilder, Pixmap, Stroke, Transform};
 
 use super::bitmap::{Area, SILHOUETTE_CELLS, fill_area};
-use super::{solid_paint, wide_width};
+use super::{DESIGN_SIZE, solid_paint};
 
 /// `v` pixels of the 22 px design at `size`, rounded to a whole pixel.
 pub(super) fn at_scale(size: u32, v: i32) -> i32 {
-    (v as f32 * size as f32 / 22.0).round() as i32
+    (v as f32 * size as f32 / DESIGN_SIZE).round() as i32
 }
 
 /// The silhouette's square: horizontally centred, on the top edge.
 pub(super) fn silhouette_area(size: u32) -> Area {
     let side = at_scale(size, SILHOUETTE_CELLS as i32);
     Area {
-        x: (wide_width(size) as i32 - side) / 2,
+        x: (size as i32 - side) / 2,
         y: 0,
         w: side,
         h: side,
@@ -30,7 +30,7 @@ pub(super) struct DeviceBar {
 
 impl DeviceBar {
     pub(super) fn new(size: u32) -> Self {
-        let (w, h) = (wide_width(size) as i32, size as i32);
+        let (w, h) = (size as i32, size as i32);
         let top = at_scale(size, 16);
         let right = w - at_scale(size, 1);
         let (nub_top, nub_bottom) = (at_scale(size, 18), at_scale(size, 20));

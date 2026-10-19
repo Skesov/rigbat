@@ -6,6 +6,8 @@ use crate::domain::Palette;
 use crate::palette::{self, DIM, GRAPHIC_CONTRAST};
 use tiny_skia::{Rect, Transform};
 
+mod review;
+
 impl Theme {
     fn dark() -> Self {
         Self::new(Palette::default(), ColorScheme::Dark)
@@ -22,7 +24,7 @@ impl Theme {
 fn the_status_mark_does_not_erase_a_digit() {
     let theme = Theme::dark();
     let renderer = TinySkiaRenderer {
-        sizes: vec![22, 24, 32, 44, 48, 64],
+        sizes: PUBLISHED_SIZES.into_iter().chain([48]).collect(),
     };
     let statuses = [
         (PrimaryStatus::Ok { percent: 88 }, 88, theme.normal),
@@ -60,12 +62,10 @@ fn the_status_mark_does_not_erase_a_digit() {
     }
 }
 
-// --- digits ------------------------------------------------------------
-
 const WHITE: Color = Color::WHITE;
 
 fn digits(size: u32, value: u8, mark: Option<Bitmap>, dotted: bool) -> (Pixmap, Region) {
-    let mut pixmap = Pixmap::new(wide_width(size), size).expect("digit pixmap");
+    let mut pixmap = Pixmap::new(size, size).expect("digit pixmap");
     let region = digit_region(size, mark);
     draw_percent_in_region(&mut pixmap, region, value, WHITE, dotted);
     (pixmap, region)
@@ -150,161 +150,22 @@ fn dotted_digits_paint_less_but_stay_visible() {
     }
 }
 
-mod review;
-fn default_sizes() -> Vec<u32> {
-    TinySkiaRenderer::default().sizes.clone()
-}
-
-// --- mode: IconOnly --------------------------------------------------
-
-#[test]
-fn icon_only_renders_correct_count() {
-    let renderer = TinySkiaRenderer::default();
-    let icons = renderer.render(
-        PrimaryStatus::Ok { percent: 50 },
-        None,
-        &Theme::dark(),
-        DisplayMode::IconOnly,
-        false,
-    );
-    assert_eq!(icons.len(), default_sizes().len());
+fn icons(status: PrimaryStatus, mode: DisplayMode) -> Vec<ksni::Icon> {
+    TinySkiaRenderer::default().render(status, None, &Theme::dark(), mode, false)
 }
 
 #[test]
-fn icon_only_dimensions_and_data_len() {
-    let renderer = TinySkiaRenderer::default();
-    let sizes = renderer.sizes.clone();
-    let icons = renderer.render(
-        PrimaryStatus::Ok { percent: 50 },
-        None,
-        &Theme::dark(),
-        DisplayMode::IconOnly,
-        false,
-    );
-    for icon in &icons {
-        // Height matches a requested size; width is slightly wider.
-        assert!(sizes.contains(&(icon.height as u32)));
-        assert_eq!(icon.width as u32, wide_width(icon.height as u32));
-        assert!(icon.width >= icon.height);
-        assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
-    }
-}
-
-// --- mode: PercentOnly -----------------------------------------------
-
-#[test]
-fn percent_only_renders_correct_count() {
-    let renderer = TinySkiaRenderer::default();
-    let icons = renderer.render(
-        PrimaryStatus::Ok { percent: 50 },
-        None,
-        &Theme::dark(),
-        DisplayMode::PercentOnly,
-        false,
-    );
-    assert_eq!(icons.len(), default_sizes().len());
-}
-
-#[test]
-fn percent_only_data_len() {
-    let renderer = TinySkiaRenderer::default();
-    let icons = renderer.render(
-        PrimaryStatus::Ok { percent: 50 },
-        None,
-        &Theme::dark(),
-        DisplayMode::PercentOnly,
-        false,
-    );
-    for icon in &icons {
-        assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
-    }
-}
-
-// --- offline falls back to battery in every mode ---------------------
-
-#[test]
-fn offline_valid_in_percent_only() {
-    let renderer = TinySkiaRenderer::default();
-    let icons = renderer.render(
-        PrimaryStatus::Offline,
-        None,
-        &Theme::dark(),
-        DisplayMode::PercentOnly,
-        false,
-    );
-    assert_eq!(icons.len(), default_sizes().len());
-    for icon in &icons {
-        assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
-    }
-}
-
-#[test]
-fn offline_valid_in_all_modes() {
-    let renderer = TinySkiaRenderer::default();
+fn every_status_renders_one_square_icon_per_published_size() {
     for mode in DisplayMode::ALL {
-        let icons = renderer.render(PrimaryStatus::Offline, None, &Theme::dark(), mode, false);
-        assert_eq!(
-            icons.len(),
-            default_sizes().len(),
-            "offline failed for mode {mode:?}"
-        );
-        for icon in &icons {
-            assert_eq!(
-                icon.data.len(),
-                (icon.width * icon.height * 4) as usize,
-                "data.len mismatch for mode {mode:?}"
-            );
+        for status in STATUSES {
+            let icons = icons(status, mode);
+            let heights: Vec<u32> = icons.iter().map(|icon| icon.height as u32).collect();
+            assert_eq!(heights, PUBLISHED_SIZES, "{status:?} in {mode:?}");
+            for icon in &icons {
+                assert_eq!(icon.width, icon.height, "{status:?} in {mode:?}");
+                assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
+            }
         }
-    }
-}
-
-// --- legacy-compatible tests (themes, charging, low) -----------------
-
-#[test]
-fn offline_renders_valid_icons() {
-    let renderer = TinySkiaRenderer::default();
-    let icons = renderer.render(
-        PrimaryStatus::Offline,
-        None,
-        &Theme::dark(),
-        DisplayMode::IconOnly,
-        false,
-    );
-    assert_eq!(icons.len(), default_sizes().len());
-    for icon in &icons {
-        assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
-    }
-}
-
-#[test]
-fn charging_renders_valid_icons() {
-    let renderer = TinySkiaRenderer::default();
-    let icons = renderer.render(
-        PrimaryStatus::Charging { percent: 75 },
-        None,
-        &Theme::dark(),
-        DisplayMode::IconOnly,
-        false,
-    );
-    assert_eq!(icons.len(), default_sizes().len());
-    for icon in &icons {
-        assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
-    }
-}
-
-#[test]
-fn low_renders_valid_icons() {
-    let renderer = TinySkiaRenderer::default();
-    let icons = renderer.render(
-        PrimaryStatus::Low { percent: 10 },
-        None,
-        &Theme::dark(),
-        DisplayMode::IconOnly,
-        false,
-    );
-    assert_eq!(icons.len(), default_sizes().len());
-    for icon in &icons {
-        assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
     }
 }
 
@@ -469,8 +330,6 @@ fn the_palette_reaches_the_icon_colours() {
     assert_eq!(catppuccin.offline[3], 179);
 }
 
-// --- pixel helpers ------------------------------------------------------
-
 /// Helper: extract RGBA bytes from ksni::Icon (ARGB network order → RGBA).
 fn icon_to_rgba(icon: &ksni::Icon) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(icon.data.len());
@@ -480,7 +339,6 @@ fn icon_to_rgba(icon: &ksni::Icon) -> Vec<u8> {
     rgba
 }
 
-// --- structural invariants (T16): assert what the icon draws, not just its size ---
 //
 // Premultiplied-alpha handling: `Pixmap` stores premultiplied RGBA and
 // `icon_to_rgba` does not un-premultiply. For the fully opaque theme
@@ -706,7 +564,7 @@ fn ok_status_theme_reaches_the_pixels() {
 fn no_mode_panics_on_a_1px_or_2px_canvas() {
     let renderer = TinySkiaRenderer { sizes: vec![1, 2] };
     for mode in DisplayMode::ALL {
-        for kind in KINDS {
+        for kind in kinds() {
             for status in STATUSES {
                 let icons = renderer.render(status, kind, &Theme::dark(), mode, false);
                 assert_eq!(icons.len(), 2, "{mode:?} {kind:?} {status:?}");
@@ -714,10 +572,6 @@ fn no_mode_panics_on_a_1px_or_2px_canvas() {
         }
     }
 }
-
-// --- status without colour ----------------------------------------------
-
-const PUBLISHED_SIZES: [u32; 5] = [22, 24, 32, 44, 64];
 
 /// Every role in one colour: what remains is shape.
 fn monochrome() -> Theme {
@@ -848,21 +702,16 @@ fn the_status_mark_is_drawn_whole() {
     }
 }
 
-const SILHOUETTE_KINDS: [DeviceKind; 4] = [
-    DeviceKind::Mouse,
-    DeviceKind::Keyboard,
-    DeviceKind::Headset,
-    DeviceKind::Controller,
-];
+fn silhouette_kinds() -> Vec<DeviceKind> {
+    DeviceKind::ALL
+        .into_iter()
+        .filter(|&kind| kind != DeviceKind::Other)
+        .collect()
+}
 
-const KINDS: [Option<DeviceKind>; 6] = [
-    None,
-    Some(DeviceKind::Mouse),
-    Some(DeviceKind::Keyboard),
-    Some(DeviceKind::Headset),
-    Some(DeviceKind::Controller),
-    Some(DeviceKind::Other),
-];
+fn kinds() -> impl Iterator<Item = Option<DeviceKind>> {
+    std::iter::once(None).chain(DeviceKind::ALL.map(Some))
+}
 
 const STATUSES: [PrimaryStatus; 4] = [
     PrimaryStatus::Ok { percent: 60 },
@@ -889,14 +738,17 @@ fn pixels(icons: Vec<ksni::Icon>) -> Vec<Vec<u8>> {
 #[test]
 fn every_kind_has_its_own_device_and_battery_icon() {
     for status in STATUSES {
-        let icons = SILHOUETTE_KINDS
-            .map(|kind| icon_22(status, Some(kind), DisplayMode::DeviceAndBattery, false));
+        let kinds = silhouette_kinds();
+        let icons: Vec<_> = kinds
+            .iter()
+            .map(|&kind| icon_22(status, Some(kind), DisplayMode::DeviceAndBattery, false))
+            .collect();
         for (i, a) in icons.iter().enumerate() {
-            for (b, kind) in icons.iter().zip(SILHOUETTE_KINDS).skip(i + 1) {
+            for (b, kind) in icons.iter().zip(&kinds).skip(i + 1) {
                 assert_ne!(
                     a.data, b.data,
                     "{status:?}: {:?} looks like {kind:?}",
-                    SILHOUETTE_KINDS[i]
+                    kinds[i]
                 );
             }
         }
@@ -913,7 +765,7 @@ fn only_device_and_battery_draws_the_kind() {
         for stale in [false, true] {
             for mode in [DisplayMode::IconOnly, DisplayMode::PercentOnly] {
                 let plain = pixels(renderer.render(status, None, &theme, mode, stale));
-                for kind in KINDS {
+                for kind in kinds() {
                     let icons = pixels(renderer.render(status, kind, &theme, mode, stale));
                     assert!(icons == plain, "{mode:?} {status:?} {kind:?}");
                 }
@@ -938,7 +790,7 @@ fn only_device_and_battery_draws_the_kind() {
 /// 0–13; rows 14–15 stay clear and the bar takes rows 16–21.
 #[test]
 fn the_silhouette_and_the_bar_keep_to_their_rows() {
-    for kind in SILHOUETTE_KINDS {
+    for kind in silhouette_kinds() {
         for status in [PrimaryStatus::Ok { percent: 60 }, PrimaryStatus::Offline] {
             let icon = icon_22(status, Some(kind), DisplayMode::DeviceAndBattery, false);
             let bitmap = silhouette(kind).expect("a silhouette");
@@ -997,7 +849,7 @@ fn the_device_bar_fill_grows_with_percent() {
 fn no_mode_panics_at_any_published_size() {
     let renderer = TinySkiaRenderer::default();
     for mode in DisplayMode::ALL {
-        for kind in KINDS {
+        for kind in kinds() {
             for status in STATUSES {
                 for stale in [false, true] {
                     let icons = renderer.render(status, kind, &Theme::dark(), mode, stale);
