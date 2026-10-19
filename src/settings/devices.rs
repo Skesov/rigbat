@@ -133,13 +133,13 @@ pub enum EscapeAction {
 /// `search_active` are false on any tab but Devices, where dismissing them
 /// would act on something the user cannot see.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Dismissible {
+pub struct OpenThings {
     pub delete_armed: bool,
     pub expanded: bool,
     pub search_active: bool,
 }
 
-pub fn escape_action(open: Dismissible) -> EscapeAction {
+pub fn escape_action(open: OpenThings) -> EscapeAction {
     if open.delete_armed {
         EscapeAction::CancelDelete
     } else if open.expanded {
@@ -205,8 +205,8 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod escape_tests {
     use super::*;
 
-    fn open(delete_armed: bool, expanded: bool, search_active: bool) -> Dismissible {
-        Dismissible {
+    fn open(delete_armed: bool, expanded: bool, search_active: bool) -> OpenThings {
+        OpenThings {
             delete_armed,
             expanded,
             search_active,
@@ -471,13 +471,11 @@ mod tests {
     // --- delete confirmation + removal --------------------------------------
 
     #[test]
-    fn delete_state_defaults_idle() {
-        assert_eq!(DeleteState::default(), DeleteState::Idle);
-    }
-
-    #[test]
     fn first_click_only_arms_the_confirmation() {
-        assert_eq!(delete_cell(DeleteState::Idle, Some(7)), DeleteCell::Arm);
+        assert_eq!(
+            delete_cell(DeleteState::default(), Some(7)),
+            DeleteCell::Arm
+        );
     }
 
     #[test]
@@ -507,41 +505,23 @@ mod tests {
         );
     }
 
-    /// Confirming is what removes the row, and it removes exactly one.
+    /// Removing drops exactly the row with that id, across transports, and an
+    /// unknown id drops nothing.
     #[test]
-    fn confirming_removes_only_the_named_row() {
-        let mut rows = vec![
-            row("mouse", Transport::Sysfs, None),
-            row("keyboard", Transport::Bluetooth, None),
-        ];
-        rows[0].store_id = Some(7);
-        rows[1].store_id = Some(8);
+    fn remove_row_removes_only_the_named_row() {
+        for (removed, left) in [(7, &["keyboard"][..]), (999, &["mouse", "keyboard"][..])] {
+            let mut rows = vec![
+                row("mouse", Transport::Sysfs, None),
+                row("keyboard", Transport::Bluetooth, None),
+            ];
+            rows[0].store_id = Some(7);
+            rows[1].store_id = Some(8);
 
-        remove_row(&mut rows, 7);
+            remove_row(&mut rows, removed);
 
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].device.name, "keyboard");
-    }
-
-    #[test]
-    fn remove_row_leaves_other_rows_untouched() {
-        let mut rows = vec![
-            row("mouse", Transport::Sysfs, None),
-            row("keyboard", Transport::Sysfs, None),
-        ];
-        rows[0].store_id = Some(1);
-        rows[1].store_id = Some(2);
-        remove_row(&mut rows, 1);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].device.name, "keyboard");
-    }
-
-    #[test]
-    fn remove_row_ignores_unknown_id() {
-        let mut rows = vec![row("mouse", Transport::Sysfs, None)];
-        rows[0].store_id = Some(1);
-        remove_row(&mut rows, 999);
-        assert_eq!(rows.len(), 1);
+            let names: Vec<&str> = rows.iter().map(|r| r.device.name.as_str()).collect();
+            assert_eq!(names, left, "removing {removed}");
+        }
     }
 
     // --- relative_label / absolute_date_label -------------------------------

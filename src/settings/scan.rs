@@ -274,19 +274,11 @@ mod bus_tests {
     use super::*;
     use crate::bus_test::{eventually, isolated};
     use crate::config::Config;
-    use crate::domain::{ChargeState, DeviceKind, DeviceState, Estimate, Transport, TrayState};
+    use crate::domain::{ChargeState, DeviceState, Estimate, TrayState};
     use crate::refresh::RefreshSignal;
+    use crate::settings::tests::device;
 
     const TIMEOUT: Duration = Duration::from_secs(5);
-
-    fn device(name: &str) -> DeviceInfo {
-        DeviceInfo {
-            name: name.to_owned(),
-            kind: DeviceKind::Mouse,
-            transport: Transport::Hidraw,
-            locator: Some(format!("{name}-serial")),
-        }
-    }
 
     fn local_poll() -> Vec<(DeviceInfo, PollOutcome)> {
         vec![(device("local"), PollOutcome::Failed)]

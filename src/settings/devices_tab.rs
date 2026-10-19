@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use eframe::egui;
 
-use super::devices::{self, DeleteCell, DeleteState, DeviceRow, Dismissible, EscapeAction};
+use super::devices::{self, DeleteCell, DeleteState, DeviceRow, EscapeAction, OpenThings};
 use super::general_tab::{interval_combo, interval_label, threshold_slider};
 use super::{ActionProblem, SettingsApp, Tab, open_uri, scan, widgets};
 use crate::config::{Config, DeviceSettings};
@@ -426,7 +426,7 @@ impl SettingsApp {
             return;
         }
         let on_devices = self.tab == Tab::Devices;
-        let open = Dismissible {
+        let open = OpenThings {
             delete_armed: self.delete_state != DeleteState::Idle,
             expanded: on_devices && self.expanded_device.is_some(),
             search_active: on_devices && !self.device_search.is_empty(),

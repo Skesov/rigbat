@@ -238,9 +238,7 @@ impl SettingsApp {
             self.save_problem = Some(SaveProblem::NoConfigDir);
             return;
         };
-        let load = || config::load_from(&path);
-        let save = |cfg: &Config| config::save_to(&path, cfg);
-        match save_edit(&load, &save, edit) {
+        match save_edit(&path, edit) {
             Ok(on_disk) => {
                 self.config = on_disk;
                 self.save_problem = None;
@@ -406,18 +404,10 @@ fn title(lang: Lang) -> String {
 /// Re-reads the on-disk config, applies `edit` — the one change a call site
 /// just made — to it and writes it back, so a field the user did not touch is
 /// never overwritten from the window's snapshot. Returns the saved config.
-fn save_edit<L, S>(
-    load_config: &L,
-    save_config: &S,
-    edit: impl FnOnce(&mut Config),
-) -> anyhow::Result<Config>
-where
-    L: Fn() -> Config,
-    S: Fn(&Config) -> anyhow::Result<()>,
-{
-    let mut on_disk = load_config();
+fn save_edit(path: &std::path::Path, edit: impl FnOnce(&mut Config)) -> anyhow::Result<Config> {
+    let mut on_disk = config::load_from(path);
     edit(&mut on_disk);
-    save_config(&on_disk)?;
+    config::save_to(path, &on_disk)?;
     Ok(on_disk)
 }
 
@@ -678,9 +668,7 @@ mod tests {
         let path = scratch_config_path("writes-only-edited-field");
         config::save_to(&path, &Config::default()).unwrap();
 
-        let load = || config::load_from(&path);
-        let save = |cfg: &Config| config::save_to(&path, cfg);
-        let result = save_edit(&load, &save, |target| target.low_threshold = 15).unwrap();
+        let result = save_edit(&path, |target| target.low_threshold = 15).unwrap();
 
         assert_eq!(result.low_threshold, 15);
         assert_eq!(
@@ -704,9 +692,7 @@ mod tests {
         )
         .unwrap();
 
-        let load = || config::load_from(&path);
-        let save = |cfg: &Config| config::save_to(&path, cfg);
-        let result = save_edit(&load, &save, |target| target.low_threshold = 10).unwrap();
+        let result = save_edit(&path, |target| target.low_threshold = 10).unwrap();
 
         assert_eq!(result.primary_device, Some("mouse".to_string()));
         assert_eq!(result.low_threshold, 10);
@@ -732,10 +718,7 @@ mod tests {
         )
         .unwrap();
 
-        let load = || config::load_from(&path);
-        let save = |cfg: &Config| config::save_to(&path, cfg);
-        let result =
-            save_edit(&load, &save, |target| target.notifications_enabled = false).unwrap();
+        let result = save_edit(&path, |target| target.notifications_enabled = false).unwrap();
 
         assert_eq!(result.hidden_devices, vec!["keyboard".to_string()]);
         assert!(!result.notifications_enabled);
@@ -749,9 +732,7 @@ mod tests {
         let broken = "{ \"hidden_devices\": [\"mouse\"], oops }";
         std::fs::write(&path, broken).unwrap();
 
-        let load = || config::load_from(&path);
-        let save = |cfg: &Config| config::save_to(&path, cfg);
-        let err = save_edit(&load, &save, |target| target.low_threshold = 15).unwrap_err();
+        let err = save_edit(&path, |target| target.low_threshold = 15).unwrap_err();
 
         assert!(err.is::<config::Unreadable>(), "{err:#}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
