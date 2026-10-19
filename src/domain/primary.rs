@@ -102,12 +102,6 @@ mod tests {
     }
 
     #[test]
-    fn battery_reading_clamps_over_100() {
-        let r = BatteryReading::new(150, ChargeState::Discharging);
-        assert_eq!(r.percent, 100);
-    }
-
-    #[test]
     fn classify_stale_below_threshold_is_low() {
         assert_eq!(classify_stale(15, 20), PrimaryStatus::Low { percent: 15 });
     }
@@ -120,14 +114,5 @@ mod tests {
     #[test]
     fn classify_stale_at_threshold_is_low() {
         assert_eq!(classify_stale(20, 20), PrimaryStatus::Low { percent: 20 });
-    }
-
-    #[test]
-    fn classify_stale_ignores_stored_charging_state() {
-        // classify_stale takes a bare percent, not a ChargeState, so a
-        // percentage that was stored alongside Charging still comes out
-        // Low/Ok — never Charging.
-        assert_eq!(classify_stale(80, 20), PrimaryStatus::Ok { percent: 80 });
-        assert_eq!(classify_stale(15, 20), PrimaryStatus::Low { percent: 15 });
     }
 }

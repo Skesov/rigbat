@@ -79,8 +79,8 @@ impl<'a> Roster<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::types::{BatteryReading, ChargeState, DeviceInfo, DeviceKind, Transport};
-    use crate::domain::{DeviceId, Estimate};
+    use crate::domain::DeviceId;
+    use crate::domain::types::Transport;
 
     const SHELF_LIFE: Duration = OFFLINE_SHELF_LIFE_MAX;
 
@@ -90,17 +90,12 @@ mod tests {
         presence: Presence,
         reading: Option<(u8, BootTime)>,
     ) -> DeviceState {
-        DeviceState {
-            info: DeviceInfo {
-                name: name.to_owned(),
-                kind: DeviceKind::Mouse,
-                transport,
-                locator: None,
-            },
-            last_reading: reading.map(|(p, _)| BatteryReading::new(p, ChargeState::Discharging)),
-            last_seen: reading.map(|(_, seen)| seen),
-            presence,
-            estimate: Estimate::Unknown,
+        let device = DeviceState::test(name)
+            .transport(transport)
+            .presence(presence);
+        match reading {
+            Some((percent, seen)) => device.read(percent, seen),
+            None => device,
         }
     }
 
@@ -129,8 +124,6 @@ mod tests {
             .featured(primary)
             .map(|d| d.info.id())
     }
-
-    // --- visibility -----------------------------------------------------------
 
     #[test]
     fn a_hidden_device_is_not_visible() {
@@ -179,8 +172,6 @@ mod tests {
         let locked = device("locked", Transport::Hidraw, Presence::NoAccess, None);
         assert!(is_visible(&locked, all, BootTime::TEST_NOW, SHELF_LIFE));
     }
-
-    // --- order ----------------------------------------------------------------
 
     #[test]
     fn roster_lists_online_devices_first_then_by_name_ignoring_case() {
@@ -231,8 +222,6 @@ mod tests {
         let roster = Roster::visible(&devices, |n| n != "hidden", now, SHELF_LIFE);
         assert_eq!(names(&roster), ["mouse"]);
     }
-
-    // --- featured -------------------------------------------------------------
 
     #[test]
     fn featured_follows_a_visible_pin() {

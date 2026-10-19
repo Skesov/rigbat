@@ -17,6 +17,18 @@ pub enum DeviceKind {
 }
 
 impl DeviceKind {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests iterate the variants so far")
+    )]
+    pub const ALL: [DeviceKind; 5] = [
+        DeviceKind::Mouse,
+        DeviceKind::Keyboard,
+        DeviceKind::Headset,
+        DeviceKind::Controller,
+        DeviceKind::Other,
+    ];
+
     /// Canonical string spelling of the variant. Part of the `--json` CLI contract
     /// (the "kind" field) and of stored inventory rows — never translate; see `label`.
     pub fn as_str(self) -> &'static str {
@@ -42,8 +54,6 @@ impl DeviceKind {
 }
 
 /// Returns the freedesktop icon-theme name for a device kind.
-///
-/// The returned string can be used directly as a `gtk::Image` icon name.
 pub fn freedesktop_icon_name(kind: DeviceKind) -> &'static str {
     match kind {
         DeviceKind::Mouse => "input-mouse",
@@ -62,6 +72,18 @@ pub enum ChargeState {
     Full,
 }
 
+impl ChargeState {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests iterate the variants so far")
+    )]
+    pub const ALL: [ChargeState; 3] = [
+        ChargeState::Discharging,
+        ChargeState::Charging,
+        ChargeState::Full,
+    ];
+}
+
 /// How rigbat reaches a device. Distinguishes otherwise same-named duplicates
 /// (e.g. a mouse seen over both sysfs/HID++ and Bluetooth).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -73,6 +95,12 @@ pub enum Transport {
 }
 
 impl Transport {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only tests iterate the variants so far")
+    )]
+    pub const ALL: [Transport; 3] = [Transport::Sysfs, Transport::Bluetooth, Transport::Hidraw];
+
     /// Also shown untranslated in the UI: these are technology names.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -213,22 +241,15 @@ pub struct DeviceState {
 }
 
 impl DeviceState {
-    /// Whether this device still has something to say on a status bar.
+    /// Whether this device still has something to say on a status bar. An
+    /// `Online` or `NoAccess` device always does; any other needs a reading
+    /// no older than `max_age`:
     ///
-    /// An `Online` device always does. One that is not online is showing a
-    /// memory, and a memory has a shelf life:
+    /// - a wireless dongle stays enumerated while its mouse is off, and never
+    ///   answers: an icon for it is an empty outline that never meant anything.
+    /// - "88%, two days ago" is not a battery level.
     ///
-    /// - no reading at all means nothing to display. A wireless dongle stays
-    ///   enumerated while its mouse is switched off, so the device is
-    ///   discovered, polled and never answers — an icon for it is an empty
-    ///   battery outline that has never meant anything.
-    /// - a reading older than `max_age` is no longer worth a slot. "88%, two
-    ///   days ago" is not a battery level, it is a fact about last Tuesday.
-    ///
-    /// The device stays in the roster and keeps being polled either way, so it
-    /// returns the moment it answers again. This governs display only.
-    ///
-    /// A `NoAccess` device always is: the user has a setup problem to fix.
+    /// Display only: the device stays in the roster and keeps being polled.
     pub fn is_currently_informative(&self, now: BootTime, max_age: Duration) -> bool {
         if matches!(self.presence, Presence::Online | Presence::NoAccess) {
             return true;
@@ -251,18 +272,11 @@ mod tests {
         reading: Option<BatteryReading>,
         seen: Option<BootTime>,
     ) -> DeviceState {
-        DeviceState {
-            info: DeviceInfo {
-                name: "mouse".to_owned(),
-                kind: DeviceKind::Mouse,
-                transport: Transport::Hidraw,
-                locator: None,
-            },
-            last_reading: reading,
-            last_seen: seen,
-            presence,
-            estimate: Estimate::Unknown,
-        }
+        DeviceState::test("mouse")
+            .transport(Transport::Hidraw)
+            .presence(presence)
+            .reading(reading)
+            .seen(seen)
     }
 
     #[test]
@@ -361,34 +375,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn freedesktop_icon_name_mouse() {
-        assert_eq!(freedesktop_icon_name(DeviceKind::Mouse), "input-mouse");
+    fn freedesktop_icon_names() {
+        for (kind, icon) in [
+            (DeviceKind::Mouse, "input-mouse"),
+            (DeviceKind::Keyboard, "input-keyboard"),
+            (DeviceKind::Headset, "audio-headset"),
+            (DeviceKind::Controller, "input-gaming"),
+            (DeviceKind::Other, "battery"),
+        ] {
+            assert_eq!(freedesktop_icon_name(kind), icon);
+        }
     }
 
     #[test]
-    fn freedesktop_icon_name_keyboard() {
-        assert_eq!(
-            freedesktop_icon_name(DeviceKind::Keyboard),
-            "input-keyboard"
-        );
-    }
-
-    #[test]
-    fn freedesktop_icon_name_headset() {
-        assert_eq!(freedesktop_icon_name(DeviceKind::Headset), "audio-headset");
-    }
-
-    #[test]
-    fn freedesktop_icon_name_controller() {
-        assert_eq!(
-            freedesktop_icon_name(DeviceKind::Controller),
-            "input-gaming"
-        );
-    }
-
-    #[test]
-    fn freedesktop_icon_name_other() {
-        assert_eq!(freedesktop_icon_name(DeviceKind::Other), "battery");
+    fn battery_reading_clamps_over_100() {
+        let r = BatteryReading::new(150, ChargeState::Discharging);
+        assert_eq!(r.percent, 100);
     }
 
     #[test]

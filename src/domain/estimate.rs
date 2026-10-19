@@ -1,15 +1,9 @@
 //! Estimates remaining battery time from observed percent-change history.
 //!
-//! Most peripheral battery readings cannot support a time estimate at all:
-//! BlueZ's GATT Battery Service often reports coarse buckets (100/70/40/10)
-//! rather than a real percent, a sleeping device does not discharge at its
-//! in-use rate even though the clock keeps moving, and the default 60 s
-//! poll interval against a single-digit-percent-per-hour discharge means most
-//! consecutive samples are identical. The only usable signal is the edges —
-//! the moments the percent was seen to change — observed over a long enough
-//! window to distinguish a real discharge rate from a bucket edge or poll
-//! jitter. Everything here refuses rather than guesses whenever that
-//! evidence is thin — a wrong number is worse than no number.
+//! A sleeping device does not discharge at its in-use rate, and at a 60 s poll
+//! most consecutive samples are identical, so the only signal is the edges —
+//! the moments the percent changed — over a long window. Thin evidence gives
+//! no estimate: a wrong number is worse than none.
 
 use std::time::Duration;
 
@@ -23,10 +17,8 @@ const MIN_WINDOW: Duration = Duration::from_secs(30 * 60);
 /// Two edges are the fewest that bound a measured interval.
 const MIN_EDGES: usize = 2;
 
-/// A single drop larger than this is not plausible organic discharge at the
-/// default poll interval — it is the signature of a coarse-bucket reading
-/// (BlueZ Battery Service devices commonly report 100/70/40/10 or similar)
-/// or a recalibration jump.
+/// A single drop larger than this is a coarse-bucket reading (BlueZ Battery
+/// Service devices often report 100/70/40/10) or a recalibration jump.
 const MAX_PLAUSIBLE_STEP: i16 = 5;
 
 /// Longer estimates are shown as "more than this many days": the evidence
@@ -38,6 +30,21 @@ pub enum Estimate {
     /// Not discharging, a coarse reading, or not enough evidence yet.
     Unknown,
     Remaining(Duration),
+}
+
+impl Estimate {
+    pub fn remaining(self) -> Option<Duration> {
+        match self {
+            Self::Remaining(left) => Some(left),
+            Self::Unknown => None,
+        }
+    }
+}
+
+impl From<Option<Duration>> for Estimate {
+    fn from(remaining: Option<Duration>) -> Self {
+        remaining.map_or(Self::Unknown, Self::Remaining)
+    }
 }
 
 /// Estimates remaining discharge time from a device's change-point history:
@@ -216,31 +223,20 @@ mod tests {
         assert_eq!(estimate(&history, cur(57)), Estimate::Unknown);
     }
 
-    // --- round_coarse / format_coarse --------------------------------------
-
     fn shown(d: Duration, lang: Lang) -> String {
         format_coarse(round_coarse(d), lang)
     }
 
     #[test]
     fn round_coarse_boundaries() {
-        assert_eq!(
-            shown(Duration::from_secs(59 * 60), Lang::En),
-            "~1\u{a0}h"
-        );
-        assert_eq!(
-            shown(Duration::from_secs(61 * 60), Lang::En),
-            "~1\u{a0}h"
-        );
+        assert_eq!(shown(Duration::from_secs(59 * 60), Lang::En), "~1\u{a0}h");
+        assert_eq!(shown(Duration::from_secs(61 * 60), Lang::En), "~1\u{a0}h");
         assert_eq!(shown(25 * HOUR, Lang::En), "~25\u{a0}h");
     }
 
     #[test]
     fn round_coarse_under_an_hour_rounds_to_nearest_quarter() {
-        assert_eq!(
-            shown(Duration::from_secs(5 * 60), Lang::En),
-            "~15\u{a0}min"
-        );
+        assert_eq!(shown(Duration::from_secs(5 * 60), Lang::En), "~15\u{a0}min");
         assert_eq!(
             shown(Duration::from_secs(44 * 60), Lang::En),
             "~45\u{a0}min"

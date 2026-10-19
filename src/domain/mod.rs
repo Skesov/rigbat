@@ -1,5 +1,7 @@
 pub mod display;
 pub mod estimate;
+#[cfg(test)]
+pub mod fixtures;
 pub mod kind;
 pub mod primary;
 pub mod roster;

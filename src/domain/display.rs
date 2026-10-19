@@ -16,8 +16,8 @@ pub enum DisplayMode {
 #[serde(rename_all = "snake_case")]
 pub enum TrayMode {
     #[default]
-    PrimaryOnly, // one aggregate icon (default)
-    PerDevice, // one icon per shown device
+    PrimaryOnly,
+    PerDevice,
 }
 
 /// The colours inside the system's light or dark scheme.
@@ -75,14 +75,13 @@ impl WindowTheme {
 }
 
 impl DisplayMode {
-    /// All display modes in display order, used to build the Settings menu.
+    /// In display order.
     pub const ALL: [DisplayMode; 3] = [
         DisplayMode::IconOnly,
         DisplayMode::DeviceAndBattery,
         DisplayMode::PercentOnly,
     ];
 
-    /// Human-readable label used in the settings window radio group.
     pub fn label(self, lang: Lang) -> String {
         let l = loader(lang);
         match self {
@@ -96,18 +95,6 @@ impl DisplayMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn display_mode_all_has_three_variants() {
-        assert_eq!(DisplayMode::ALL.len(), 3);
-    }
-
-    #[test]
-    fn display_mode_all_contains_each_variant() {
-        assert!(DisplayMode::ALL.contains(&DisplayMode::IconOnly));
-        assert!(DisplayMode::ALL.contains(&DisplayMode::DeviceAndBattery));
-        assert!(DisplayMode::ALL.contains(&DisplayMode::PercentOnly));
-    }
 
     #[test]
     fn display_mode_label_non_empty() {

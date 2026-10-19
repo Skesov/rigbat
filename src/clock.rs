@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use nix::time::{ClockId, clock_gettime};
 
-use crate::domain::BootTime;
+use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
+
+use crate::domain::{AGE_STEP, BootTime};
 
 pub fn now() -> BootTime {
     // CLOCK_BOOTTIME exists on every kernel rigbat supports (Linux >= 2.6.39).
@@ -12,6 +14,13 @@ pub fn now() -> BootTime {
         .map(Duration::from)
         .unwrap_or_default();
     BootTime::from_boot(since_boot)
+}
+
+/// Ticks every `AGE_STEP`, the first tick one step from now.
+pub fn age_ticker() -> Interval {
+    let mut tick = interval_at(Instant::now() + AGE_STEP, AGE_STEP);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    tick
 }
 
 #[cfg(test)]

@@ -167,3 +167,13 @@ where
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+pub async fn claim_tray_name() -> zbus::Connection {
+    zbus::connection::Builder::session()
+        .expect("private bus")
+        .name(crate::ipc::TRAY_NAME)
+        .expect("name")
+        .build()
+        .await
+        .expect("claiming the tray name")
+}

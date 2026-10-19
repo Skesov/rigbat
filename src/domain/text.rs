@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use super::estimate::format_coarse;
-use super::{BootTime, ChargeState, DeviceState, Estimate, Presence, PrimaryStatus};
+use super::{BootTime, ChargeState, DeviceState, Presence, PrimaryStatus};
 use crate::i18n::{Lang, fl, loader};
 
 /// Installs the shipped udev rule and applies it to the hidraw nodes already
@@ -35,11 +35,11 @@ pub fn state_label(state: ChargeState, lang: Lang) -> String {
     }
 }
 
-/// Formats a duration as a coarse, human-scale age string. Coarse units only
-/// (never raw seconds) — this reads in a tooltip, not a log.
 /// The smallest unit `format_age` shows: text that ages changes at most this often.
 pub const AGE_STEP: Duration = Duration::from_secs(60);
 
+/// Formats a duration as a coarse, human-scale age string. Coarse units only
+/// (never raw seconds) — this reads in a tooltip, not a log.
 pub fn format_age(age: Duration, lang: Lang) -> String {
     let l = loader(lang);
     // Counts go through locals: `fl!` would parse `count = secs / 60` as `secs / 60.into()`.
@@ -165,10 +165,7 @@ pub fn device_line(
         lang,
         Slot::AfterName,
     );
-    let remaining = match device.estimate {
-        Estimate::Remaining(left) => Some(left),
-        Estimate::Unknown => None,
-    };
+    let remaining = device.estimate.remaining();
     let seen_ago = device
         .last_seen
         .map(|seen| now.saturating_duration_since(seen));
@@ -188,16 +185,7 @@ pub fn absent_line(name: &str, lang: Lang) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
-
-    fn device(name: &str) -> DeviceInfo {
-        DeviceInfo {
-            name: name.into(),
-            kind: DeviceKind::Other,
-            transport: crate::domain::Transport::Sysfs,
-            locator: None,
-        }
-    }
+    use crate::domain::{BatteryReading, ChargeState, Estimate};
 
     fn state(
         name: &str,
@@ -205,13 +193,10 @@ mod tests {
         last_reading: Option<BatteryReading>,
         last_seen: Option<BootTime>,
     ) -> DeviceState {
-        DeviceState {
-            info: device(name),
-            last_reading,
-            last_seen,
-            presence,
-            estimate: Estimate::Unknown,
-        }
+        DeviceState::test(name)
+            .presence(presence)
+            .reading(last_reading)
+            .seen(last_seen)
     }
 
     fn state_with_estimate(
@@ -219,60 +204,27 @@ mod tests {
         last_reading: Option<BatteryReading>,
         estimate: Estimate,
     ) -> DeviceState {
-        DeviceState {
-            info: device(name),
-            last_reading,
-            last_seen: Some(BootTime::TEST_NOW),
-            presence: Presence::Online,
-            estimate,
+        DeviceState::test(name)
+            .reading(last_reading)
+            .seen(BootTime::TEST_NOW)
+            .estimate(estimate)
+    }
+
+    #[test]
+    fn format_age_takes_the_largest_whole_unit() {
+        for (secs, expected) in [
+            (0, "just now"),
+            (59, "just now"),
+            (60, "1\u{a0}min ago"),
+            (59 * 60, "59\u{a0}min ago"),
+            (3600, "1\u{a0}h ago"),
+            (23 * 3600, "23\u{a0}h ago"),
+            (86400, "1\u{a0}d ago"),
+            (3 * 86400, "3\u{a0}d ago"),
+        ] {
+            assert_eq!(format_age(Duration::from_secs(secs), Lang::En), expected);
         }
     }
-
-    // --- format_age -------------------------------------------------------
-
-    #[test]
-    fn format_age_under_a_minute_is_just_now() {
-        assert_eq!(format_age(Duration::from_secs(0), Lang::En), "just now");
-        assert_eq!(format_age(Duration::from_secs(59), Lang::En), "just now");
-    }
-
-    #[test]
-    fn format_age_minutes() {
-        assert_eq!(
-            format_age(Duration::from_secs(60), Lang::En),
-            "1\u{a0}min ago"
-        );
-        assert_eq!(
-            format_age(Duration::from_secs(59 * 60), Lang::En),
-            "59\u{a0}min ago"
-        );
-    }
-
-    #[test]
-    fn format_age_hours() {
-        assert_eq!(
-            format_age(Duration::from_secs(3600), Lang::En),
-            "1\u{a0}h ago"
-        );
-        assert_eq!(
-            format_age(Duration::from_secs(23 * 3600), Lang::En),
-            "23\u{a0}h ago"
-        );
-    }
-
-    #[test]
-    fn format_age_days() {
-        assert_eq!(
-            format_age(Duration::from_secs(86400), Lang::En),
-            "1\u{a0}d ago"
-        );
-        assert_eq!(
-            format_age(Duration::from_secs(3 * 86400), Lang::En),
-            "3\u{a0}d ago"
-        );
-    }
-
-    // --- Russian ------------------------------------------------------------
 
     #[test]
     fn russian_ages_take_the_plural_form_of_their_count() {
@@ -303,8 +255,6 @@ mod tests {
             }
         }
     }
-
-    // --- device_line ---------------------------------------------------------
 
     fn line(device: &DeviceState, now: BootTime, lang: Lang) -> String {
         let (status, _) = crate::domain::device_status(device, 20);
@@ -411,8 +361,6 @@ mod tests {
         assert_eq!(absent_line("pad", Lang::En), "pad: disconnected");
         assert_eq!(absent_line("pad", Lang::Ru), "pad: отключено");
     }
-
-    // --- presence words ------------------------------------------------------
 
     #[test]
     fn a_presence_word_is_capitalised_in_its_own_slot_and_not_after_a_name() {

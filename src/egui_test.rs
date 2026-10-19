@@ -219,13 +219,7 @@ pub fn assert_no_overlap(painted: &[Painted]) {
     }
 }
 
-pub const KINDS: [DeviceKind; 5] = [
-    DeviceKind::Mouse,
-    DeviceKind::Keyboard,
-    DeviceKind::Headset,
-    DeviceKind::Controller,
-    DeviceKind::Other,
-];
+pub const KINDS: [DeviceKind; 5] = DeviceKind::ALL;
 
 /// One node of a frame's AccessKit tree; the context must have AccessKit on.
 #[derive(Debug, Clone)]

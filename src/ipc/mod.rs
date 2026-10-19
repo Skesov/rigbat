@@ -123,17 +123,17 @@ mod tests {
     /// The JSON spelling must be the same wire value `--json` prints.
     #[test]
     fn enum_spellings_match_the_cli_wire_values() {
-        for kind in [
-            DeviceKind::Mouse,
-            DeviceKind::Keyboard,
-            DeviceKind::Headset,
-            DeviceKind::Controller,
-            DeviceKind::Other,
-        ] {
+        for kind in DeviceKind::ALL {
             assert_eq!(serde_json::to_value(kind).unwrap(), kind.as_str());
         }
-        for transport in [Transport::Sysfs, Transport::Bluetooth, Transport::Hidraw] {
+        for transport in Transport::ALL {
             assert_eq!(serde_json::to_value(transport).unwrap(), transport.as_str());
+        }
+        for state in ChargeState::ALL {
+            assert_eq!(
+                serde_json::to_value(state).unwrap(),
+                crate::domain::state_str(state)
+            );
         }
     }
 }
