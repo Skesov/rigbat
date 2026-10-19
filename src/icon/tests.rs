@@ -1,4 +1,10 @@
+use super::bitmap::BOLT;
+use super::theme::{NOMINAL_PANEL_DARK, NOMINAL_PANEL_LIGHT};
 use super::*;
+use crate::appearance::ColorScheme;
+use crate::domain::Palette;
+use crate::palette::{self, DIM, GRAPHIC_CONTRAST};
+use tiny_skia::{Rect, Transform};
 
 impl Theme {
     fn dark() -> Self {
