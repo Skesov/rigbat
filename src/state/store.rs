@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-use crate::domain::{BatteryReading, ChargeState, DeviceId, DeviceKind, Transport};
+use crate::domain::{BatteryReading, ChargeState, DeviceId, DeviceKind, Transport, state_str};
 
 use super::{DeviceRecord, Seen};
 
@@ -207,42 +207,17 @@ fn index_readings_by_time(conn: &Connection) -> anyhow::Result<()> {
 /// The reverse of `Transport::as_str`. `None` is a value this build cannot
 /// name — a newer build's variant — and the caller skips the row.
 fn transport_from_str(s: &str) -> Option<Transport> {
-    match s {
-        "sysfs" => Some(Transport::Sysfs),
-        "bluetooth" => Some(Transport::Bluetooth),
-        "hidraw" => Some(Transport::Hidraw),
-        _ => None,
-    }
+    Transport::ALL.into_iter().find(|t| t.as_str() == s)
 }
 
 /// The reverse of `DeviceKind::as_str`; `None` as for `transport_from_str`.
 fn kind_from_str(s: &str) -> Option<DeviceKind> {
-    match s {
-        "mouse" => Some(DeviceKind::Mouse),
-        "keyboard" => Some(DeviceKind::Keyboard),
-        "headset" => Some(DeviceKind::Headset),
-        "controller" => Some(DeviceKind::Controller),
-        "other" => Some(DeviceKind::Other),
-        _ => None,
-    }
+    DeviceKind::ALL.into_iter().find(|k| k.as_str() == s)
 }
 
-fn state_to_str(s: ChargeState) -> &'static str {
-    match s {
-        ChargeState::Discharging => "discharging",
-        ChargeState::Charging => "charging",
-        ChargeState::Full => "full",
-    }
-}
-
-/// The reverse of `state_to_str`; `None` as for `transport_from_str`.
+/// The reverse of `state_str`; `None` as for `transport_from_str`.
 fn state_from_str(s: &str) -> Option<ChargeState> {
-    match s {
-        "discharging" => Some(ChargeState::Discharging),
-        "charging" => Some(ChargeState::Charging),
-        "full" => Some(ChargeState::Full),
-        _ => None,
-    }
+    ChargeState::ALL.into_iter().find(|&c| state_str(c) == s)
 }
 
 /// Finds the `devices.id` for a `DeviceId`. `IS`, not `=`, makes a `None`
@@ -363,7 +338,7 @@ impl SqliteStore {
             return Ok(());
         };
         let last = last_row(&tx, device_id).context("reading the last stored reading")?;
-        let state = state_to_str(reading.state);
+        let state = state_str(reading.state);
         if let Some((at, percent, stored_state)) = last
             && percent == i64::from(reading.percent)
             && stored_state == state
@@ -718,46 +693,14 @@ mod tests {
         assert_eq!(devices[0].last_seen, 5000);
     }
 
-    /// Every variant, in declaration order; a new one fails to compile here until listed.
-    fn every_transport() -> Vec<Transport> {
-        let mut all = Vec::new();
-        let mut next = Some(Transport::Sysfs);
-        while let Some(t) = next {
-            all.push(t);
-            next = match t {
-                Transport::Sysfs => Some(Transport::Bluetooth),
-                Transport::Bluetooth => Some(Transport::Hidraw),
-                Transport::Hidraw => None,
-            };
-        }
-        all
-    }
-
-    /// Every variant, in declaration order; a new one fails to compile here until listed.
-    fn every_kind() -> Vec<DeviceKind> {
-        let mut all = Vec::new();
-        let mut next = Some(DeviceKind::Mouse);
-        while let Some(k) = next {
-            all.push(k);
-            next = match k {
-                DeviceKind::Mouse => Some(DeviceKind::Keyboard),
-                DeviceKind::Keyboard => Some(DeviceKind::Headset),
-                DeviceKind::Headset => Some(DeviceKind::Controller),
-                DeviceKind::Controller => Some(DeviceKind::Other),
-                DeviceKind::Other => None,
-            };
-        }
-        all
-    }
-
     #[test]
     fn list_devices_round_trips_every_kind_and_transport() {
         let scratch = ScratchDir::new("roundtrip-all");
         let path = scratch.join("state.db");
         let mut store = SqliteStore::open(&path).unwrap();
         let mut expected = Vec::new();
-        for transport in every_transport() {
-            for kind in every_kind() {
+        for transport in Transport::ALL {
+            for kind in DeviceKind::ALL {
                 let device = id(
                     &format!("{}-{}", transport.as_str(), kind.as_str()),
                     transport,

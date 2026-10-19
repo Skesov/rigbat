@@ -17,10 +17,6 @@ pub enum DeviceKind {
 }
 
 impl DeviceKind {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only tests iterate the variants so far")
-    )]
     pub const ALL: [DeviceKind; 5] = [
         DeviceKind::Mouse,
         DeviceKind::Keyboard,
@@ -73,10 +69,6 @@ pub enum ChargeState {
 }
 
 impl ChargeState {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only tests iterate the variants so far")
-    )]
     pub const ALL: [ChargeState; 3] = [
         ChargeState::Discharging,
         ChargeState::Charging,
@@ -95,10 +87,6 @@ pub enum Transport {
 }
 
 impl Transport {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only tests iterate the variants so far")
-    )]
     pub const ALL: [Transport; 3] = [Transport::Sysfs, Transport::Bluetooth, Transport::Hidraw];
 
     /// Also shown untranslated in the UI: these are technology names.
@@ -236,7 +224,7 @@ pub struct DeviceState {
     pub presence: Presence,
     /// Remaining-time estimate derived from this device's recorded
     /// percent-change history (kept in the supervisor, not here — see
-    /// `push_reading` in `app::supervisor`).
+    /// `push_history_point` in `app::supervisor`).
     pub estimate: Estimate,
 }
 
