@@ -247,7 +247,7 @@ fn parse_dev_numbers(s: &str) -> Option<(u64, u64)> {
 /// or present but empty. Empty is treated as absent because the kernel writes
 /// `HID_UNIQ=` for every device that has no serial, and an empty locator
 /// identifies nothing.
-fn uevent_value<'a>(uevent: &'a str, key: &str) -> Option<&'a str> {
+pub fn uevent_value<'a>(uevent: &'a str, key: &str) -> Option<&'a str> {
     uevent
         .lines()
         .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))

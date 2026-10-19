@@ -79,6 +79,14 @@ The rest speak a vendor protocol over `/dev/hidraw`, and those need the device t
   Wireless SE, K57 RGB Wireless, K65 Plus Wireless, K70 Core TKL Wireless. A receiver shows as one
   device with the battery of its first connected paired device. Protocol notes and the models left
   out: [docs/corsair.md](docs/corsair.md).
+- **Razer wireless mice** — untested, reports welcome: through a HyperSpeed receiver or on the
+  cable: Viper Ultimate / Mini SE / V2 Pro / V3 Pro / V3 Pro SE / V3 HyperSpeed, DeathAdder V2 Pro
+  / V2 X HyperSpeed / V3 Pro / V3 HyperSpeed / V4 Pro, Basilisk Ultimate / X HyperSpeed / V3 Pro /
+  V3 Pro 35K / V3 X HyperSpeed / Mobile, Naga Pro / V2 Pro / V2 HyperSpeed, Cobra Pro / HyperSpeed,
+  Pro Click / Mini / V2 / V2 Vertical Edition, Atheris, Orochi V2, Lancehead, Mamba, Naga Epic,
+  Ouroboros, the HyperPolling Wireless Dongle. With OpenRazer installed, rigbat reads the battery
+  through OpenRazer's driver instead, which needs your user in the `plugdev` group. Protocol notes
+  and the models left out: [docs/razer.md](docs/razer.md).
 
 Adding a device to either table is a small, well-scoped change: see
 [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/adding-a-device.md](docs/adding-a-device.md).

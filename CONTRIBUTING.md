@@ -167,8 +167,10 @@ own code.
   blanket ban on C dependencies: the state store is SQLite via `rusqlite`, chosen because no
   pure-Rust engine offers a comparable multi-process story (redb's is an experimental flag in
   an unreleased version; the Turso rewrite is pre-1.0 by its own maintainers).
-- No `unsafe` in this crate — enforced by `unsafe_code = "forbid"` in `Cargo.toml`, which the
-  compiler checks. Dependencies may use it internally; rigbat's own code may not.
+- No `unsafe` outside `src/sources/hid_feature.rs` (the two hidraw feature-report ioctls, behind
+  safe functions): `unsafe_code = "deny"` in `Cargo.toml`, an `#[expect]` in that file only, and
+  `tests/unsafe_scope.rs` fails on the word anywhere else. A backend that needs a feature report
+  calls `hid_feature::{set_feature, get_feature}`.
 
 ## Build requirements
 

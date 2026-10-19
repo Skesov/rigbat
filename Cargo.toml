@@ -28,7 +28,7 @@ skrifa = { version = "0.44", default-features = false, features = ["std"] }
 ashpd = { version = "0.13.11", default-features = false, features = ["tokio", "settings"] }
 futures-util = { version = "0.3", default-features = false }
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
-nix = { version = "0.31", default-features = false, features = ["fs", "poll", "time"] }
+nix = { version = "0.31", default-features = false, features = ["fs", "ioctl", "poll", "time"] }
 notify = "8"
 # bundled compiles SQLite from source and links it statically: no runtime
 # libsqlite3 dependency, cargo build stays self-contained. Needs a C
@@ -103,7 +103,8 @@ assets = [
 ]
 
 [lints.rust]
-unsafe_code = "forbid"
+# `deny`, not `forbid`: src/sources/hid_feature.rs alone opts out (tests/unsafe_scope.rs).
+unsafe_code = "deny"
 
 # pedantic/nursery are deliberately not enabled: they produce ~190 diagnostics
 # on this codebase, ~50 of which are u32->f32 casts inherent to the icon
@@ -118,6 +119,8 @@ dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
 panic = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
 # Denies `#[allow]`, so a suppression must be `#[expect]` — which clippy
 # reports when it stops being needed. An `allow` that outlives its reason is
 # invisible; an unfulfilled `expect` fails the gate.

@@ -5,7 +5,7 @@ System tray battery monitor for gaming peripherals (Linux), written in Rust.
 ## Status
 
 Working: `rigbat list` / `--json` / `--wide` / `--waybar` / `tray` / `settings`. Sources: sysfs,
-bluez, steelseries, eightbitdo, headsets, kysona, corsair (via `discovery::discover_all`, re-discovered live so hotplugged
+bluez, steelseries, eightbitdo, headsets, kysona, corsair, razer (via `discovery::discover_all`, re-discovered live so hotplugged
 devices appear; BlueZ signals debounced, and a backend whose sweep _fails_ does not retire its
 devices — an empty result and an error are different things). Devices retain their last reading
 across drops (`Presence`: Online/Unreachable/Disconnected/NoAccess) and render dimmed while unreachable,
@@ -109,7 +109,7 @@ src/
 ├── clock.rs       # clock::now(): domain::BootTime from CLOCK_BOOTTIME (counts suspend)
 ├── sources/       # BatterySource + BatteryBackend + Context (shared system bus) +
 │                 # supervise (bus-watcher retry); sysfs/bluez/steelseries/eightbitdo/
-│                 # headsets/kysona/corsair
+│                 # headsets/kysona/corsair/razer
 ├── discovery/     # discover_all + registry::backends()
 ├── cli/           # output adapter: table / --json / --wide; waybar.rs: --waybar line + loop
 ├── tray/          # manager.rs (icon set + run loop), item.rs (SNI item + menu),
@@ -152,7 +152,8 @@ which fails on any other edge and on any cycle.
 - No `unwrap`/`expect` in non-test code — return `anyhow::Result` with context.
 - HID via `/dev/hidraw` directly (no C `libhidapi`); BlueZ via `zbus` (no `bluer`/libdbus).
 - Diagnostics go through `tracing`; `println!` is reserved for CLI output on stdout.
-- These rules (plus no `unsafe`) are enforced by `[lints.clippy]` in `Cargo.toml`, not only by
+- These rules (plus `unsafe` only in `sources/hid_feature.rs`, the two hidraw feature-report
+  ioctls, guarded by `tests/unsafe_scope.rs`) are enforced by `[lints.clippy]` in `Cargo.toml`, not only by
   review — `cargo clippy --all-targets -- -D warnings` fails the gate on a violation.
   (`clippy.toml` only exempts `#[cfg(test)]` code from the no-unwrap rule.)
 - Suppressions are `#[expect(...)]`, never `#[allow(...)]`: `allow_attributes = "deny"` makes

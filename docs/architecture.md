@@ -44,7 +44,7 @@ layers, never the reverse.
    clock / palette / launch
           │
         sources           BatterySource / BatteryBackend traits + Context + supervise +
-          ▲               sysfs/bluez/steelseries/eightbitdo/headsets/kysona/corsair impls
+          ▲               sysfs/bluez/steelseries/eightbitdo/headsets/kysona/corsair/razer impls
         discovery         registry of backends + discover_all()
           ▲
           app             poll_once (list/--json) and Supervisor (tray, --waybar): orchestration
