@@ -1,15 +1,11 @@
-//! The SQLite database behind `state::Store`, behind `rusqlite`'s `bundled`
-//! feature (SQLite compiled from source, linked statically — see
-//! `CONTRIBUTING.md`). Owned by the store thread; nothing else touches the
-//! connection.
+//! The SQLite database behind `state::Store`, owned by the store thread.
 //!
-//! WAL journal mode plus a `busy_timeout` is the documented pattern for a
-//! database two processes touch concurrently (the tray writes, the settings
-//! window reads and deletes); write transactions use `BEGIN IMMEDIATE` so a
-//! lock upgrade between two writers cannot deadlock. `PRAGMA foreign_keys`
-//! is off by default in SQLite and is not persisted in the file — it is set
-//! on every connection in `configure`, which is what makes the `readings`
-//! foreign key's `ON DELETE CASCADE` actually fire.
+//! WAL plus a `busy_timeout` is the documented pattern for a database two
+//! processes touch (the tray writes, the settings window reads and deletes);
+//! write transactions use `BEGIN IMMEDIATE` so a lock upgrade between two
+//! writers cannot deadlock. `PRAGMA foreign_keys` is off by default and not
+//! persisted in the file, so `configure` sets it on every connection — that is
+//! what makes `ON DELETE CASCADE` fire.
 
 use std::path::Path;
 use std::time::Duration;
@@ -21,10 +17,8 @@ use crate::domain::{BatteryReading, ChargeState, DeviceId, DeviceKind, Transport
 
 use super::{DeviceRecord, Seen};
 
-/// How long `readings` rows are kept. `domain::estimate` only ever looks at
-/// the most recent `HISTORY_CAP` change points (see `app::supervisor`), so
-/// this is generous headroom rather than a window the estimator needs
-/// filled.
+/// How long `readings` rows are kept: headroom, since the estimator reads
+/// only the newest few change points.
 const RETENTION_SECS: i64 = 14 * 24 * 60 * 60;
 
 /// A reading equal to the last stored one is written only once that row is
@@ -38,10 +32,8 @@ const LAST_SEEN_RESOLUTION_SECS: i64 = 5 * 60;
 /// Truncates the WAL after a checkpoint; SQLite's default (-1) never shrinks it.
 const JOURNAL_SIZE_LIMIT_BYTES: i64 = 2 * 1024 * 1024;
 
-/// A settings-window read losing a brief race with a tray write should not
-/// surface as a user-visible error, but a genuinely stuck writer should not
-/// be waited out forever either — a few seconds covers the first without
-/// risking the second.
+/// Covers a settings-window read losing a brief race with a tray write
+/// without waiting out a stuck writer forever.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct SqliteStore {
@@ -49,10 +41,8 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-    /// Opens (creating if absent) the database at `path`, applies pragmas,
-    /// and runs the schema migration. `path`'s parent directory is created
-    /// if missing — `ProjectDirs::state_dir()` names a directory this
-    /// process may be the first thing to ever write into.
+    /// Opens (creating if absent) the database at `path` and its parent
+    /// directory, applies pragmas, and runs the schema migration.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
@@ -82,20 +72,14 @@ fn configure(conn: &Connection) -> anyhow::Result<()> {
 /// so each step is a forward migration from a known starting point, not a
 /// guess about what an existing file already contains.
 fn migrate(conn: &Connection) -> anyhow::Result<()> {
-    // The version check and the CREATE must sit inside one write transaction,
-    // and it has to be IMMEDIATE so the write lock is taken up front. A
-    // deferred transaction lets two connections both read version 0 and both
-    // reach the CREATE; the loser then fails with "table already exists".
-    // Unreachable while only the single-instance-guarded tray opens the store,
-    // and live the moment a second process — the settings window — opens its
-    // own connection.
+    // IMMEDIATE takes the write lock up front: a deferred transaction lets the
+    // tray and the settings window both read version 0 and both reach the
+    // CREATE, and the loser fails with "table already exists".
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("starting the schema migration transaction")?;
 
     let applied = (|| -> anyhow::Result<()> {
-        let version: i64 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .context("reading schema version")?;
+        let version = schema_version(conn).context("reading schema version")?;
         if version >= SCHEMA_VERSION {
             return Ok(());
         }
@@ -133,6 +117,10 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
 /// The schema this build expects. `migrate` runs every step between the
 /// version stamped in the file and this one.
 const SCHEMA_VERSION: i64 = 4;
+
+fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+}
 
 fn create_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
@@ -186,17 +174,10 @@ fn find_renamed(conn: &Connection, id: &DeviceId) -> anyhow::Result<Option<(i64,
     }
 }
 
-/// Clears inventory rows keyed by a `hidrawN` node name.
-///
-/// Before `sources::hidraw::stable_locator`, the hidraw backends used the node
-/// name as the locator, and the node number changes on replug — so one
-/// controller accumulated a row per enumeration order, each with its own
-/// "first seen". There is no honest way to merge those rows: two rows with the
-/// same name may be one device replugged or two identical devices. Dropping
-/// them lets the next discovery sweep re-register each device once under its
-/// serial or USB path. The cost is the first-seen date and the reading history
-/// of hidraw devices only, which is exactly the loss `XDG_STATE_HOME` data is
-/// defined to survive.
+/// Clears inventory rows keyed by a `hidrawN` node name, which changes on
+/// replug. They cannot be merged — two may be one device replugged or two
+/// identical ones — so the next sweep re-registers each device by its serial
+/// or USB path, losing only hidraw first-seen dates and history.
 fn drop_node_name_locators(conn: &Connection) -> anyhow::Result<()> {
     conn.execute(
         "DELETE FROM devices
@@ -207,21 +188,10 @@ fn drop_node_name_locators(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Clears every sysfs inventory row.
-///
-/// Before `sources::sysfs::stable_locator`, the sysfs backend used the
-/// power_supply directory name as the locator. For a Logitech device that name
-/// comes from a module-global counter in `hid-logitech-hidpp`, so it changed on
-/// every reconnect and each reconnect wrote a new row.
-///
-/// This drops all sysfs rows rather than only the `hidpp_battery_*` ones,
-/// because which stored locator the new scheme would reproduce cannot be known
-/// without the device present: a supply that exposes a HID uevent now keys on
-/// the serial or USB path, and one that does not keeps its directory name. A
-/// row the new scheme would not reproduce is a duplicate that never merges, so
-/// the honest move is to re-register them all on the next sweep. The cost is
-/// first-seen dates and reading history for sysfs devices — loss-survivable by
-/// definition, which is why this data lives in `XDG_STATE_HOME`.
+/// Clears every sysfs inventory row keyed by a power_supply directory name,
+/// which `hid-logitech-hidpp` renumbers on every reconnect. Which rows the
+/// current locator scheme would reproduce cannot be known without the device
+/// present, so all are re-registered, losing sysfs first-seen dates and history.
 fn drop_sysfs_rows(conn: &Connection) -> anyhow::Result<()> {
     conn.execute("DELETE FROM devices WHERE transport = 'sysfs'", [])
         .context("dropping sysfs inventory rows keyed by a power_supply directory name")?;
@@ -233,10 +203,6 @@ fn index_readings_by_time(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch("CREATE INDEX IF NOT EXISTS readings_at ON readings (at)")
         .context("indexing readings by time")
 }
-
-// ---------------------------------------------------------------------------
-// String encoding for the two domain enums this schema persists as TEXT.
-// ---------------------------------------------------------------------------
 
 /// The reverse of `Transport::as_str`. `None` is a value this build cannot
 /// name — a newer build's variant — and the caller skips the row.
@@ -279,13 +245,9 @@ fn state_from_str(s: &str) -> Option<ChargeState> {
     }
 }
 
-/// Finds the `devices.id` for a `DeviceId`, using `IS` rather than `=` for
-/// `locator` so a `None` locator matches a `NULL` column the same way two
-/// `DeviceId`s with `locator: None` are equal in Rust. SQLite's `UNIQUE`
-/// constraint cannot do this on its own — it treats every `NULL` as
-/// distinct from every other `NULL` — so `record_seen`'s upsert (and every
-/// other lookup by identity) resolves the row explicitly instead of relying
-/// on `ON CONFLICT`.
+/// Finds the `devices.id` for a `DeviceId`. `IS`, not `=`, makes a `None`
+/// locator match a `NULL` column; SQLite's `UNIQUE` treats every `NULL` as
+/// distinct, so lookups resolve the row here instead of via `ON CONFLICT`.
 fn find_device_id(conn: &Connection, id: &DeviceId) -> rusqlite::Result<Option<i64>> {
     conn.query_row(
         "SELECT id FROM devices WHERE name = ?1 AND transport = ?2 AND locator IS ?3",
@@ -293,6 +255,21 @@ fn find_device_id(conn: &Connection, id: &DeviceId) -> rusqlite::Result<Option<i
         |row| row.get(0),
     )
     .optional()
+}
+
+/// The newest `readings` row of a device: `at`, `percent`, `state`.
+fn last_row(conn: &Connection, device_id: i64) -> rusqlite::Result<Option<(i64, i64, String)>> {
+    conn.query_row(
+        "SELECT at, percent, state FROM readings
+          WHERE device_id = ?1 ORDER BY at DESC LIMIT 1",
+        params![device_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+}
+
+fn percent_from_db(percent: i64) -> u8 {
+    u8::try_from(percent.clamp(0, 100)).unwrap_or(0)
 }
 
 fn upsert_seen(
@@ -374,28 +351,18 @@ impl SqliteStore {
         reading: BatteryReading,
         now: i64,
     ) -> anyhow::Result<()> {
-        let conn = &mut self.conn;
-        let tx = conn
+        let tx = self
+            .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("beginning record_reading transaction")?;
         let Some(device_id) =
             find_device_id(&tx, id).context("looking up device row for reading")?
         else {
-            // record_seen always runs before a device is polled (see
-            // app::supervisor::reconcile), so this should not happen in
-            // practice; a missing inventory row is not worth losing the
-            // reading's caller an error over.
+            // record_seen runs before a device is polled, so this does not
+            // happen in practice, and is not worth an error to the caller.
             return Ok(());
         };
-        let last: Option<(i64, i64, String)> = tx
-            .query_row(
-                "SELECT at, percent, state FROM readings
-                  WHERE device_id = ?1 ORDER BY at DESC LIMIT 1",
-                params![device_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .context("reading the last stored reading")?;
+        let last = last_row(&tx, device_id).context("reading the last stored reading")?;
         let state = state_to_str(reading.state);
         if let Some((at, percent, stored_state)) = last
             && percent == i64::from(reading.percent)
@@ -404,12 +371,8 @@ impl SqliteStore {
         {
             return Ok(());
         }
-        // Timestamped as observed, not clamped forward like `last_seen`: a
-        // wall-clock step backward can make this collide with (and, via
-        // ON CONFLICT, overwrite) an existing row at the recomputed second,
-        // losing one data point. Accepted — one lost sample is
-        // inconsequential, unlike `last_seen`, which is the field a user
-        // actually reads.
+        // Timestamped as observed, not clamped forward like `last_seen`: after
+        // a wall-clock step back it may overwrite one sample, which is harmless.
         tx.execute(
             "INSERT INTO readings (device_id, at, percent, state) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (device_id, at)
@@ -425,19 +388,17 @@ impl SqliteStore {
         id: &DeviceId,
         cap: usize,
     ) -> anyhow::Result<Vec<(i64, u8)>> {
-        let conn = &self.conn;
         let Some(device_id) =
-            find_device_id(conn, id).context("looking up device row for history")?
+            find_device_id(&self.conn, id).context("looking up device row for history")?
         else {
             return Ok(Vec::new());
         };
 
-        // Heartbeat rows and state-only changes repeat the last percent. This
-        // collapses runs of equal percent down to their first row —
-        // exactly what `push_reading` keeps for the live, in-memory
-        // history — so a caller can replay the result straight into a
-        // fresh history and get what a live run would have produced.
-        let mut stmt = conn
+        // Heartbeat rows and state-only changes repeat the last percent. Runs
+        // of equal percent collapse to their first row, the same reduction the
+        // supervisor applies to its live history.
+        let mut stmt = self
+            .conn
             .prepare(
                 "WITH ranked AS (
                      SELECT at, percent,
@@ -451,49 +412,33 @@ impl SqliteStore {
                  LIMIT ?2",
             )
             .context("preparing recent_readings query")?;
-        let rows = stmt
-            .query_map(params![device_id, cap as i64], |row| {
-                let at: i64 = row.get(0)?;
-                let percent: i64 = row.get(1)?;
-                Ok((at, u8::try_from(percent.clamp(0, 100)).unwrap_or(0)))
-            })
-            .context("querying recent readings")?;
-
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.context("reading a history row")?);
-        }
-        Ok(out)
+        stmt.query_map(params![device_id, cap as i64], |row| {
+            Ok((row.get(0)?, percent_from_db(row.get(1)?)))
+        })
+        .context("querying recent readings")?
+        .collect::<rusqlite::Result<_>>()
+        .context("reading a history row")
     }
 
     pub(super) fn latest_reading(
         &self,
         id: &DeviceId,
     ) -> anyhow::Result<Option<(i64, BatteryReading)>> {
-        let conn = &self.conn;
-        let Some(device_id) =
-            find_device_id(conn, id).context("looking up device row for the latest reading")?
+        let Some(device_id) = find_device_id(&self.conn, id)
+            .context("looking up device row for the latest reading")?
         else {
             return Ok(None);
         };
-        let last: Option<(i64, i64, String)> = conn
-            .query_row(
-                "SELECT at, percent, state FROM readings
-                  WHERE device_id = ?1 ORDER BY at DESC LIMIT 1",
-                params![device_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .context("reading the latest stored reading")?;
+        let last = last_row(&self.conn, device_id).context("reading the latest stored reading")?;
         Ok(last.and_then(|(at, percent, state)| {
-            let percent = u8::try_from(percent.clamp(0, 100)).unwrap_or(0);
-            Some((at, BatteryReading::new(percent, state_from_str(&state)?)))
+            let reading = BatteryReading::new(percent_from_db(percent), state_from_str(&state)?);
+            Some((at, reading))
         }))
     }
 
     pub(super) fn list_devices(&self) -> anyhow::Result<Vec<DeviceRecord>> {
-        let conn = &self.conn;
-        let mut stmt = conn
+        let mut stmt = self
+            .conn
             .prepare(
                 "SELECT id, name, transport, locator, kind, first_seen, last_seen \
                  FROM devices ORDER BY name",
@@ -526,34 +471,29 @@ impl SqliteStore {
                 }))
             })
             .context("querying devices")?;
-
-        let mut out = Vec::new();
-        for row in rows {
-            out.extend(row.context("reading a device row")?);
-        }
-        Ok(out)
+        let rows = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading a device row")?;
+        Ok(rows.into_iter().flatten().collect())
     }
 
     pub(super) fn delete_device(&self, id: i64) -> anyhow::Result<()> {
-        let conn = &self.conn;
-        conn.execute("DELETE FROM devices WHERE id = ?1", params![id])
+        self.conn
+            .execute("DELETE FROM devices WHERE id = ?1", params![id])
             .context("deleting device")?;
         Ok(())
     }
 
     pub(super) fn prune(&mut self, now: i64) -> anyhow::Result<()> {
-        let conn = &mut self.conn;
-        let tx = conn
+        let tx = self
+            .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("beginning prune transaction")?;
         let cutoff = now.saturating_sub(RETENTION_SECS);
         tx.execute("DELETE FROM readings WHERE at < ?1", params![cutoff])
             .context("pruning old readings")?;
-        // Belt-and-braces: with foreign_keys=ON (set on every connection in
-        // `configure`), ON DELETE CASCADE already removes a device's
-        // readings the moment its devices row is deleted. This catches any
-        // row that predates that pragma, or arrived through a connection
-        // that did not set it.
+        // ON DELETE CASCADE covers this on every connection `configure` set
+        // up; this catches rows written through one that did not.
         tx.execute(
             "DELETE FROM readings WHERE device_id NOT IN (SELECT id FROM devices)",
             [],
@@ -604,11 +544,7 @@ mod tests {
         }
 
         let store = SqliteStore::open(&path).unwrap();
-        let version: i64 = store
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(schema_version(&store.conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(store.list_devices().unwrap().len(), 1);
     }
 
@@ -1112,11 +1048,7 @@ mod tests {
         }
 
         let store = SqliteStore::open(&path).unwrap();
-        let version: i64 = store
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(schema_version(&store.conn).unwrap(), 4);
         let plan: String = store
             .conn
             .query_row(

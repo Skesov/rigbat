@@ -1,21 +1,14 @@
 //! A persistent inventory of every device this machine has seen, and each
-//! device's recent battery readings — kept so the settings window can offer
-//! devices the user cannot currently see (T35), and so `domain::estimate`
-//! survives a tray restart instead of starting its 30-minute window over
-//! every time.
+//! device's recent battery readings — so the settings window can offer
+//! devices not currently connected, and the estimate survives a tray restart.
 //!
-//! Deliberately **not** where settings live: `config::Config` is the user's
-//! intent (`$XDG_CONFIG_HOME`) and must survive; this module is an
-//! observation log (`$XDG_STATE_HOME`) the program can rebuild by watching
-//! devices again. Chrome keeps the same split (`Preferences` JSON,
-//! `History` SQLite); the XDG spec defines `STATE_HOME` as data "not
-//! important or portable enough" for `DATA_HOME`.
+//! Not where settings live: `config::Config` is user intent
+//! (`$XDG_CONFIG_HOME`); this is an observation log (`$XDG_STATE_HOME`, data
+//! "not important or portable enough" for `DATA_HOME`) the program can
+//! rebuild by watching devices again.
 //!
-//! The store is optional by design: `open()` returns `None` on any failure
-//! (no state directory, read-only home, a corrupt file) rather than an
-//! `Err` a caller might feel obliged to propagate. Battery monitoring must
-//! not depend on the inventory — this mirrors how `sources::bluez::watch_events`
-//! degrades: an optimisation, never a dependency.
+//! Optional by design: `open()` returns `None` on any failure rather than an
+//! `Err` a caller might propagate. Battery monitoring never depends on it.
 
 mod store;
 
@@ -29,8 +22,7 @@ use tokio::sync::oneshot;
 
 use crate::domain::{BatteryReading, DeviceId, DeviceKind};
 
-/// How often `spawn_retention` re-runs `Store::prune` after its initial
-/// startup pass.
+/// How often `spawn_retention` re-runs `Store::prune` after the startup pass.
 const RETENTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// One inventory row: a device's identity, guessed kind, and the window it
@@ -111,9 +103,7 @@ impl Store {
         &self,
         op: impl FnOnce(&mut SqliteStore) -> anyhow::Result<T> + Send + 'static,
     ) -> anyhow::Result<T> {
-        self.send(op)?
-            .await
-            .map_err(|_| anyhow::anyhow!("the state store thread stopped mid-request"))?
+        self.send(op)?.await.map_err(|_| stopped_mid_request())?
     }
 
     /// Upserts a `devices` row per device of one discovery sweep, in one
@@ -144,11 +134,9 @@ impl Store {
         }
     }
 
-    /// The most recent `cap` percent-change points for `id` (readings where
-    /// the percent differs from the previous one), most-recent-first —
-    /// mirrors `push_reading`'s dedup so a caller can replay them straight
-    /// into a fresh change-point history. Empty if `id` has no readings, or
-    /// no `devices` row.
+    /// The most recent `cap` percent-change points for `id`, most-recent-first,
+    /// ready to replay into a fresh change-point history. Empty if `id` has no
+    /// readings, or no `devices` row.
     pub async fn recent_readings(
         &self,
         id: &DeviceId,
@@ -168,30 +156,28 @@ impl Store {
         self.call(move |db| db.latest_reading(&id)).await
     }
 
-    /// Every device this store has ever recorded, in no particular order
-    /// stronger than "stable enough for a UI to sort".
+    /// Every device this store has ever recorded, ordered by name.
     pub async fn list_devices(&self) -> anyhow::Result<Vec<DeviceRecord>> {
         self.call(|db| db.list_devices()).await
     }
 
     /// Forgets a device: deletes its `devices` row and, by cascade, every
-    /// `readings` row for it. Does not touch `config::Config` —
-    /// `hidden_devices` is the caller's responsibility (the settings
-    /// window), since this module never depends on `config`. Blocks the
+    /// `readings` row for it; `hidden_devices` is the caller's job. Blocks the
     /// calling thread, which must not be a runtime thread.
     pub fn delete_device_blocking(&self, id: i64) -> anyhow::Result<()> {
         self.send(move |db| db.delete_device(id))?
             .blocking_recv()
-            .map_err(|_| anyhow::anyhow!("the state store thread stopped mid-request"))?
+            .map_err(|_| stopped_mid_request())?
     }
 
-    /// Deletes `readings` rows older than the retention window, and any
-    /// `readings` row whose device no longer exists (normally handled by
-    /// the `ON DELETE CASCADE` foreign key already; see `SqliteStore::prune`
-    /// for why this is checked again explicitly).
+    /// Deletes `readings` rows past the retention window, and orphaned ones.
     async fn prune(&self, now: i64) -> anyhow::Result<()> {
         self.call(move |db| db.prune(now)).await
     }
+}
+
+fn stopped_mid_request() -> anyhow::Error {
+    anyhow::anyhow!("the state store thread stopped mid-request")
 }
 
 /// `$XDG_STATE_HOME/rigbat/rigbat.db` — `None` if there is no state
@@ -203,16 +189,13 @@ pub fn db_path() -> Option<PathBuf> {
 
 /// Opens the state store, or returns `None` and logs a warning once if it
 /// cannot: no state directory, a read-only filesystem, a corrupt file. The
-/// caller runs with today's behaviour in that case — see the module doc.
+/// caller runs without inventory and history in that case.
 pub fn open() -> Option<Store> {
-    let path = match db_path() {
-        Some(path) => path,
-        None => {
-            tracing::warn!(
-                "no state directory available; device inventory and reading history are disabled"
-            );
-            return None;
-        }
+    let Some(path) = db_path() else {
+        tracing::warn!(
+            "no state directory available; device inventory and reading history are disabled"
+        );
+        return None;
     };
     match SqliteStore::open(&path).and_then(Store::start) {
         Ok(store) => Some(store),
@@ -240,11 +223,9 @@ pub fn spawn_retention(store: Store) {
     });
 }
 
-/// Current wall-clock time as unix seconds — the one place this project
-/// persists a timestamp (`domain::BootTime` restarts at every boot, see
-/// `domain::DeviceState::last_seen`).
-/// `SystemTime::now()` before `UNIX_EPOCH` cannot happen on a real system
-/// clock; falls back to `0` rather than panicking if it ever did.
+/// Current wall-clock time as unix seconds, the timestamp this project
+/// persists (`domain::BootTime` restarts at every boot); `0` for a clock
+/// before the epoch.
 pub fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
