@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::AbortHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep_until};
 
-use super::migration::migrate_shown_devices_once;
+use super::migration::ShownDevicesMigration;
 use crate::config::Config;
 use crate::discovery::BackendSweep;
 use crate::domain::estimate::estimate as estimate_remaining;
@@ -15,38 +15,29 @@ use crate::domain::{
     BatteryReading, BootTime, DeviceId, DeviceInfo, DeviceKind, DeviceState, Estimate, Presence,
     TrayState,
 };
-use crate::refresh::RefreshSignal;
+use crate::refresh::{RefreshSignal, RefreshWaiter};
 use crate::sources::hidraw::NodeReassigned;
 use crate::sources::{AccessDenied, BatterySource, Context};
 use crate::state;
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
 
-/// A device flips to `Unreachable` only after this many consecutive failed
-/// polls. Wireless receivers drop telemetry packets as normal behaviour, so 1
-/// would flicker the icon on every dropped packet; 3 misses is long enough to
-/// absorb that noise while still catching a genuinely dead device within a
-/// few minutes at the default 60 s poll interval.
+/// Wireless receivers drop packets routinely; 3 misses in a row is a real outage.
 const OFFLINE_AFTER_FAILURES: u32 = 3;
 
-/// How long a `Disconnected` device stays in the roster before it is pruned,
-/// so a long-running session's roster does not grow without bound. Generous
-/// enough that a device used yesterday is still listed today.
+/// How long a `Disconnected` device stays in the roster: a device used
+/// yesterday is still listed today.
 const DISCONNECTED_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Cap on the retained percent-change history per device, used to estimate
-/// remaining battery time. Only points where the percent changed are kept
-/// (see `push_reading`), so this is naturally small; the cap exists so a
-/// device left running for weeks cannot grow it without bound. 20 points is
-/// generous for the multi-hour windows the estimator needs while staying a
-/// few bytes per device. A new source is seeded from the state store.
+/// Bounds the change-point history per device.
 const HISTORY_CAP: usize = 20;
 
 pub struct Supervisor;
 
-/// Whether this process may write `config.json`. Exactly one process owns
-/// the file: the tray, which holds the single-instance name. Every other
-/// mode reads it and leaves it alone.
+/// Whether this process may write `config.json`. Only the tray, which holds
+/// the single-instance name, owns it; `--waybar` can run beside a tray, and
+/// two processes converting the same legacy whitelist against two rosters
+/// would race with a destructive outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigRole {
     Owner,
@@ -54,38 +45,16 @@ pub enum ConfigRole {
 }
 
 impl Supervisor {
-    /// Spawns the manager with the real `discovery::discover_all` backend,
-    /// threading the shared `Context` (in particular its system-bus
-    /// connection) into every discovery pass, and the real
-    /// `config::load`/`config::save` backing the one-time `shown_devices`
-    /// conversion (see `migrate_shown_devices_once`).
-    ///
-    /// `store` is the optional device inventory / reading history (T34) —
-    /// `None` runs exactly as before it existed. See `src/state/mod.rs` for
-    /// why it stays optional and which caller is expected to pass `Some`.
+    /// Spawns the manager over the real discovery and config file.
     pub fn spawn(
         config_tx: watch::Sender<Config>,
         ctx: Arc<Context>,
         store: Option<state::Store>,
         role: ConfigRole,
     ) -> (watch::Receiver<TrayState>, RefreshSignal) {
-        // Only the owner may write the config. `--waybar` does not take the
-        // session-bus single-instance name the tray takes, so it can run
-        // alongside a tray — and two processes independently converting the
-        // same legacy whitelist, against two different rosters, is a race with
-        // a destructive outcome. A reader loads normally and saves nothing.
         let save: fn(&Config) -> anyhow::Result<()> = match role {
             ConfigRole::Owner => crate::config::save,
             ConfigRole::Reader => |_cfg| Ok(()),
-        };
-        let load: fn() -> Config = match role {
-            ConfigRole::Owner => crate::config::load,
-            // A reader must not convert at all, and `migrate_shown_devices`
-            // returns `NotNeeded` for an empty whitelist, so hand it one.
-            ConfigRole::Reader => || Config {
-                shown_devices: Vec::new(),
-                ..crate::config::load()
-            },
         };
         Self::spawn_with(
             config_tx,
@@ -93,34 +62,23 @@ impl Supervisor {
                 let ctx = ctx.clone();
                 Box::pin(async move { crate::discovery::discover_all(&ctx).await })
             },
-            load,
+            crate::config::load,
             save,
             store,
+            role,
         )
     }
 
-    /// Injectable discovery, config persistence, and state store for tests.
-    /// `discover` is called once at start, then on every discovery tick and
-    /// every `trigger`/`rediscover`. `load_config`/`save_config` back the
-    /// one-time `shown_devices` → `hidden_devices` conversion
-    /// (`migrate_shown_devices_once`) — tests must inject fakes here rather
-    /// than let it fall through to the real `config::load`/`config::save`,
-    /// which would read and rewrite the caller's actual config file. `store`
-    /// is likewise never the real `state::open()` here — tests that
-    /// exercise the wiring pass a `SqliteStore` opened against a temporary
-    /// file, and every other test passes `None`, so no test can ever touch
-    /// the real state directory.
-    ///
-    /// Takes the config `Sender`, not just a `Receiver`: the conversion
-    /// needs to publish its result back onto the channel so the tray and
-    /// notifier pick it up without a restart. `manager_task` derives its own
-    /// `Receiver` from it.
+    /// Takes injectable discovery and config IO, so tests never touch the
+    /// real config file. `discover` runs at start, on every discovery tick
+    /// and on every refresh.
     fn spawn_with<F, Fut, L, S>(
         config_tx: watch::Sender<Config>,
         discover: F,
-        load_config: L,
-        save_config: S,
+        load: L,
+        save: S,
         store: Option<state::Store>,
+        role: ConfigRole,
     ) -> (watch::Receiver<TrayState>, RefreshSignal)
     where
         F: Fn() -> Fut + Send + 'static,
@@ -128,46 +86,65 @@ impl Supervisor {
         L: Fn() -> Config + Send + 'static,
         S: Fn(&Config) -> anyhow::Result<()> + Send + 'static,
     {
-        let initial = TrayState { devices: vec![] };
-        let (watch_tx, watch_rx) = watch::channel(initial);
+        let (watch_tx, watch_rx) = watch::channel(TrayState { devices: vec![] });
         let refresh = RefreshSignal::new();
-
-        let refresh_inner = refresh.clone();
         tokio::spawn(manager_task(
-            config_tx,
             discover,
             watch_tx,
-            refresh_inner,
-            load_config,
-            save_config,
+            refresh.clone(),
+            ConfigIo {
+                tx: config_tx,
+                load,
+                save,
+            },
             store,
+            ShownDevicesMigration::new(role == ConfigRole::Owner),
         ));
-
         (watch_rx, refresh)
     }
 }
 
-/// Bookkeeping kept per device, in addition to the `DeviceState` snapshot
-/// exposed to the tray/notifications: the running-total failure count that
-/// drives debounce, kept out of `DeviceState` because nothing outside the
-/// registry needs it.
+/// A device rename the state store detected, for the config to follow.
+#[derive(Debug, PartialEq, Eq)]
+struct Rename {
+    from: String,
+    to: String,
+}
+
+/// Per-device bookkeeping behind the `DeviceState` snapshot; the failure
+/// count stays here because nothing outside the registry needs it.
 struct DeviceEntry {
     info: DeviceInfo,
     last_reading: Option<BatteryReading>,
     last_seen: Option<BootTime>,
     presence: Presence,
     consecutive_failures: u32,
-    /// Percent-change points feeding the remaining-time estimate. Only a
-    /// point where the percent differs from the previous one is kept — see
-    /// `push_reading`.
+    /// Percent-change points feeding the remaining-time estimate.
     battery_history: Vec<(BootTime, u8)>,
 }
 
 impl DeviceEntry {
-    /// Records a new percent reading into `battery_history`. See
-    /// `push_history_point` for the reduction rule.
-    fn push_reading(&mut self, now: BootTime, percent: u8) {
-        push_history_point(&mut self.battery_history, now, percent);
+    fn new(
+        info: DeviceInfo,
+        presence: Presence,
+        latest: Option<(BootTime, BatteryReading)>,
+        battery_history: Vec<(BootTime, u8)>,
+    ) -> Self {
+        Self {
+            info,
+            last_reading: latest.map(|(_, r)| r),
+            last_seen: latest.map(|(at, _)| at),
+            presence,
+            consecutive_failures: 0,
+            battery_history,
+        }
+    }
+
+    /// Proof the device cannot answer, not a missed poll: demotes at once,
+    /// and the saturated counter skips the grace on the next miss.
+    fn mark_dead(&mut self, presence: Presence) {
+        self.presence = presence;
+        self.consecutive_failures = OFFLINE_AFTER_FAILURES;
     }
 
     fn estimate(&self) -> Estimate {
@@ -178,18 +155,10 @@ impl DeviceEntry {
     }
 }
 
-/// Applies one percent observation to a change-point history in place. A
-/// percent equal to the last recorded one is not a transition and is
-/// dropped — most polls see no change at the default interval, and only the
-/// change points carry a discharge-rate signal. An increase (charging, or a
-/// device re-reporting after a battery swap) invalidates any discharge trend
-/// observed so far, so it clears the history before recording the new
-/// baseline. The result is capped at `HISTORY_CAP`, oldest dropped first.
-///
-/// Shared between live polling (`DeviceEntry::push_reading`) and seeding a
-/// freshly (re)discovered device's history from the state store
-/// (`seed_history`), so a reading replayed from disk is reduced exactly the
-/// way a live one would have been.
+/// Only change points carry a discharge rate, so an equal percent is
+/// dropped; an increase (charging, a battery swap) invalidates the trend
+/// and clears it. Shared by live polls and `seed_history`, so a replayed
+/// reading is reduced exactly like a live one.
 fn push_history_point(history: &mut Vec<(BootTime, u8)>, now: BootTime, percent: u8) {
     if let Some(&(_, last)) = history.last() {
         match percent.cmp(&last) {
@@ -204,16 +173,8 @@ fn push_history_point(history: &mut Vec<(BootTime, u8)>, now: BootTime, percent:
     }
 }
 
-/// Rebuilds a newly-added device's in-memory change-point history
-/// from the state store, so `domain::estimate` has data to work with without
-/// waiting out a fresh `MIN_WINDOW` after every tray restart. `store.
-/// recent_readings` already returns change points, most-recent-first,
-/// capped at `HISTORY_CAP`; this replays them in chronological order through
-/// `push_history_point` — the same reduction a live poll would apply — so an
-/// increase partway through the persisted history still clears what came
-/// before it, exactly as it would live.
-///
-/// Each stored wall-clock timestamp is converted once, by `boot_time_at`.
+/// A new entry's change-point history from the store, so the estimate need
+/// not wait out a fresh window after every tray restart.
 async fn seed_history(
     store: &state::Store,
     id: &DeviceId,
@@ -267,31 +228,22 @@ fn outlived(last_seen: Option<BootTime>, now: BootTime) -> bool {
 }
 
 /// Live set of discovered devices and their polling tasks, keyed by identity.
-/// `order` preserves discovery order so the tray roster is stable across polls.
-/// A device that leaves discovery keeps its entry (see `reconcile`) — only
-/// `tasks` loses the id, so `entries` can outlive `tasks` for a given id. A
-/// device restored from the store at startup (`restore_retained`) is such an
-/// entry from the start: `Disconnected`, no task, until a sweep finds it.
+/// `order` keeps the tray roster stable. A device that leaves discovery, or
+/// one restored from the store at startup, keeps its entry without a task.
 struct DeviceRegistry {
     order: Vec<DeviceId>,
     entries: HashMap<DeviceId, DeviceEntry>,
     tasks: HashMap<DeviceId, SourceTask>,
     /// Last generation handed to a spawned task; see `SourceMsg`.
     last_generation: u64,
-    /// Optional device inventory / reading history (T34). `reconcile`
-    /// upserts a `devices` row and seeds a new entry's history from it;
-    /// `record` writes each successful poll. `None` runs exactly as before
-    /// the store existed — see `src/state/mod.rs` for why it stays optional.
     store: Option<state::Store>,
 }
 
 struct SourceTask {
     handle: AbortHandle,
     generation: u64,
-    /// The `BatteryBackend` that found the device — whose failed sweep must
-    /// not retire it. Not derived from `DeviceId`/`transport`:
-    /// `Transport::Hidraw` is shared by the `steelseries` and `eightbitdo`
-    /// backends.
+    /// The backend whose failed sweep must not retire the device. Not derived
+    /// from the transport: several backends share `Transport::Hidraw`.
     backend: &'static str,
 }
 
@@ -309,8 +261,7 @@ enum SourceEvent {
     NodeReassigned,
 }
 
-/// What spawning a source task needs, bundled so `reconcile` stays a
-/// small-signature method rather than an argument list.
+/// What spawning a source task needs.
 struct SourceCtx {
     tx: mpsc::Sender<SourceMsg>,
     config_rx: watch::Receiver<Config>,
@@ -354,14 +305,22 @@ impl DeviceRegistry {
         );
     }
 
-    /// Applies a poll outcome to a device that is still registered. A result
-    /// from any generation but the live one is ignored — a poll can win a race
-    /// against the abort of its own task.
-    ///
-    /// Success sets `Online` and resets the failure count immediately. A
-    /// failure only flips presence to `Unreachable` once it reaches
-    /// `OFFLINE_AFTER_FAILURES` — a single dropped poll leaves presence (and
-    /// any retained reading) untouched.
+    fn apply(&mut self, msg: SourceMsg) {
+        let SourceMsg {
+            id,
+            generation,
+            event,
+        } = msg;
+        match event {
+            SourceEvent::Polled(reading) => self.record(&id, generation, reading),
+            SourceEvent::AccessDenied => self.deny(&id, generation),
+            SourceEvent::NodeReassigned => self.retire(&id, generation),
+        }
+    }
+
+    /// Ignores a result from any generation but the live one: a poll can win
+    /// a race against the abort of its own task. A failure demotes only
+    /// after `OFFLINE_AFTER_FAILURES` in a row.
     fn record(&mut self, id: &DeviceId, generation: u64, reading: Option<BatteryReading>) {
         if !self.is_live(id, generation) {
             return;
@@ -372,7 +331,7 @@ impl DeviceRegistry {
         match reading {
             Some(r) => {
                 let now = crate::clock::now();
-                entry.push_reading(now, r.percent);
+                push_history_point(&mut entry.battery_history, now, r.percent);
                 entry.last_reading = Some(r);
                 entry.last_seen = Some(now);
                 entry.consecutive_failures = 0;
@@ -390,42 +349,23 @@ impl DeviceRegistry {
         }
     }
 
-    /// Spawns a task for each genuinely new or reappeared id, drops the
-    /// transient handle for ids that already run, and aborts (without
-    /// forgetting) ids that vanished from discovery. Finally prunes entries
-    /// that have been `Disconnected` for too long.
-    ///
-    /// `sweeps` carries one outcome per backend rather than a flat source
-    /// list (see `discovery::BackendSweep`). A backend whose sweep errored
-    /// is skipped for both the upsert pass and the vanished-device pass
-    /// below: polling only demotes a device after `OFFLINE_AFTER_FAILURES`
-    /// consecutive misses, and a single failed discovery sweep must not be
-    /// more trigger-happy than that. `tasks[id].backend` — not
-    /// `DeviceId`/`transport` — is what answers "which backend owns this
-    /// id": `Transport::Hidraw` is shared by both the `steelseries` and
-    /// `eightbitdo` backends, so transport cannot make that call.
-    async fn reconcile(
-        &mut self,
-        sweeps: Vec<BackendSweep>,
-        ctx: &SourceCtx,
-    ) -> Vec<(String, String)> {
-        let mut renames: Vec<(String, String)> = Vec::new();
+    /// Spawns a task for each new or reappeared device, aborts (without
+    /// forgetting) the ones that vanished, and prunes long-`Disconnected`
+    /// entries. A backend whose sweep failed is skipped by both passes: one
+    /// failed sweep must not be more trigger-happy than
+    /// `OFFLINE_AFTER_FAILURES` missed polls.
+    async fn reconcile(&mut self, sweeps: Vec<BackendSweep>, ctx: &SourceCtx) -> Vec<Rename> {
+        let mut renames = Vec::new();
         let now_boot = crate::clock::now();
         let now_unix = state::now_unix();
 
         let mut found: Vec<(&'static str, Box<dyn BatterySource>)> = Vec::new();
         let mut succeeded_backends: Vec<&'static str> = Vec::new();
-
-        for sweep in sweeps {
-            let BackendSweep { name, result } = sweep;
-            match result {
-                Ok(sources) => {
-                    succeeded_backends.push(name);
-                    found.extend(sources.into_iter().map(|src| (name, src)));
-                }
-                // Already logged once, by `discovery::discover_all` — not
-                // logged again here per device or per sweep.
-                Err(_) => continue,
+        for BackendSweep { name, result } in sweeps {
+            // An error was already logged once, by `discovery::discover_all`.
+            if let Ok(sources) = result {
+                succeeded_backends.push(name);
+                found.extend(sources.into_iter().map(|src| (name, src)));
             }
         }
 
@@ -471,117 +411,108 @@ impl DeviceRegistry {
             })
     }
 
-    /// One device a successful sweep found: follows the rename the store
-    /// detected, then respawns a crashed task, keeps a healthy one, or adds
-    /// the entry and spawns its task. Returns the rename, if any.
+    /// One device a successful sweep found: follows a rename, then keeps a
+    /// healthy task, respawns a crashed one, or adds the entry and spawns.
     async fn admit(
         &mut self,
         src: Box<dyn BatterySource>,
-        name: &'static str,
+        backend: &'static str,
         seen: Option<state::Seen>,
         now_boot: BootTime,
         now_unix: i64,
         ctx: &SourceCtx,
-    ) -> Option<(String, String)> {
+    ) -> Option<Rename> {
         let id = src.device().id();
-        let mut rename = None;
-        if let Some(state::Seen::Renamed { from }) = seen {
-            tracing::info!(
-                device = %id.name,
-                previous = %from,
-                "device renamed; inventory row and settings follow it"
-            );
-            // The live roster is keyed by the same identity, so
-            // the entry under the old name has to go now. Left
-            // to `retire_vanished` it would linger as a
-            // Disconnected duplicate for DISCONNECTED_RETENTION
-            // — one device showing twice in the tray for a day,
-            // while the Devices tab already shows it once.
-            self.forget(&DeviceId {
-                name: from.clone(),
-                ..id.clone()
-            });
-            rename = Some((from, id.name.clone()));
-        }
-
-        if let Some(task) = self.tasks.get(&id) {
-            if task.handle.is_finished() {
-                // A handle only stays in `tasks` for an id that is also
-                // still in `fresh_ids` if it was never aborted:
-                // `retire_vanished` removes the handle from
-                // `tasks` in the same call that aborts it, so it is never
-                // seen here again. `is_finished()` can't tell a panic
-                // apart from a deliberate abort on its own — this is
-                // what makes the two paths unambiguous. Reaching this
-                // branch therefore means the task ended by itself:
-                // panicked, or its mpsc sender was dropped.
-                tracing::error!(
-                    device = %src.device().name,
-                    "polling task ended unexpectedly; restarting it"
-                );
-                self.tasks.remove(&id);
-                if let Some(entry) = self.entries.get_mut(&id) {
-                    // Positive proof of death, not a single missed poll —
-                    // demote immediately rather than waiting out
-                    // OFFLINE_AFTER_FAILURES.
-                    entry.presence = Presence::Unreachable;
-                    entry.consecutive_failures = OFFLINE_AFTER_FAILURES;
-                }
-                self.spawn(src, id, name, ctx);
-            } else {
-                // Still healthy — drop the transient handle, task keeps running.
-                drop(src);
+        let rename = match seen {
+            Some(state::Seen::Renamed { from }) => Some(self.follow_rename(&id, from)),
+            _ => None,
+        };
+        match self.tasks.get(&id).map(|task| task.handle.is_finished()) {
+            // Healthy: dropping `src` drops only the transient handle.
+            Some(false) => {}
+            Some(true) => self.respawn_crashed(src, id, backend, ctx),
+            None => {
+                self.add_or_reuse_entry(src.device(), now_boot, now_unix)
+                    .await;
+                self.spawn(src, id, backend, ctx);
             }
-            return rename;
         }
+        rename
+    }
 
+    /// Drops the entry under the old name now: left to `retire_vanished` it
+    /// would show as a `Disconnected` duplicate for `DISCONNECTED_RETENTION`.
+    fn follow_rename(&mut self, id: &DeviceId, from: String) -> Rename {
+        tracing::info!(
+            device = %id.name,
+            previous = %from,
+            "device renamed; inventory row and settings follow it"
+        );
+        self.forget(&DeviceId {
+            name: from.clone(),
+            ..id.clone()
+        });
+        Rename {
+            from,
+            to: id.name.clone(),
+        }
+    }
+
+    /// `is_finished()` cannot tell a panic from an abort, but `retire_vanished`
+    /// removes a handle in the same call that aborts it, so a finished task
+    /// still listed for a device the sweep found ended by itself.
+    fn respawn_crashed(
+        &mut self,
+        src: Box<dyn BatterySource>,
+        id: DeviceId,
+        backend: &'static str,
+        ctx: &SourceCtx,
+    ) {
+        tracing::error!(
+            device = %src.device().name,
+            "polling task ended unexpectedly; restarting it"
+        );
+        self.tasks.remove(&id);
+        if let Some(entry) = self.entries.get_mut(&id) {
+            entry.mark_dead(Presence::Unreachable);
+        }
+        self.spawn(src, id, backend, ctx);
+    }
+
+    /// A reappearing device keeps its entry, retained reading and presence
+    /// until its fresh task proves it online; a new one starts from what the
+    /// store remembers.
+    async fn add_or_reuse_entry(&mut self, info: &DeviceInfo, now_boot: BootTime, now_unix: i64) {
+        let id = info.id();
         match self.entries.entry(id.clone()) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
-                // Reappeared after being Disconnected: reuse the entry,
-                // keep the retained reading and presence until the fresh
-                // task proves it Online again.
-                tracing::info!(device = %src.device().name, "device reappeared");
-                slot.get_mut().info = src.device().clone();
+                tracing::info!(device = %info.name, "device reappeared");
+                slot.get_mut().info = info.clone();
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
-                tracing::info!(device = %src.device().name, "device appeared");
-                // First time this run: start from what the store remembers
-                // — the last reading until the first poll answers, and the
-                // change-point history so an estimate need not wait out a
-                // fresh window. A device reappearing after `Disconnected`
-                // reuses the Occupied arm above and keeps its memory instead.
-                let (latest, battery_history) = match &self.store {
+                tracing::info!(device = %info.name, "device appeared");
+                let (latest, history) = match &self.store {
                     Some(store) => (
                         latest_reading(store, &id, now_boot, now_unix).await,
                         seed_history(store, &id, now_boot, now_unix).await,
                     ),
                     None => (None, Vec::new()),
                 };
-                slot.insert(DeviceEntry {
-                    info: src.device().clone(),
-                    last_reading: latest.map(|(_, r)| r),
-                    last_seen: latest.map(|(at, _)| at),
-                    presence: Presence::Unreachable,
-                    consecutive_failures: 0,
-                    battery_history,
-                });
-                self.order.push(id.clone());
+                slot.insert(DeviceEntry::new(
+                    info.clone(),
+                    Presence::Unreachable,
+                    latest,
+                    history,
+                ));
+                self.order.push(id);
             }
         }
-
-        self.spawn(src, id, name, ctx);
-        rename
     }
 
+    /// A task whose backend's sweep failed escapes the crash check in `admit`
+    /// and is not retired either. Respawning needs a source only a successful
+    /// sweep hands over, so the entry is demoted and the dead handle dropped.
     fn demote_crashed(&mut self, fresh_ids: &[DeviceId], succeeded_backends: &[&'static str]) {
-        // A task whose backend's sweep failed is not in `fresh_ids`, so the
-        // crash check in `admit` never looked at it. Its device is not retired
-        // either (an error is not an empty result), which left a panicked task
-        // frozen — last reading intact, presence Online — for as long as the
-        // backend kept failing. Respawning needs a source object only a
-        // successful sweep can hand over, so the honest move is to demote the
-        // entry and drop the dead handle; the next sweep that succeeds
-        // respawns it through `admit`.
         let crashed: Vec<DeviceId> = self
             .tasks
             .iter()
@@ -597,8 +528,7 @@ impl DeviceRegistry {
                     "polling task ended unexpectedly while its backend was failing; \
                      marking unreachable until discovery can respawn it"
                 );
-                entry.presence = Presence::Unreachable;
-                entry.consecutive_failures = OFFLINE_AFTER_FAILURES;
+                entry.mark_dead(Presence::Unreachable);
             }
         }
     }
@@ -626,9 +556,8 @@ impl DeviceRegistry {
             return;
         }
         if let Some(entry) = self.entries.get_mut(id) {
-            entry.presence = Presence::NoAccess;
             // Once access is granted, a silent device reads Unreachable at its first miss.
-            entry.consecutive_failures = OFFLINE_AFTER_FAILURES;
+            entry.mark_dead(Presence::NoAccess);
         }
     }
 
@@ -640,24 +569,17 @@ impl DeviceRegistry {
     }
 
     fn disconnect(&mut self, id: &DeviceId) {
-        if let Some(task) = self.tasks.remove(id) {
-            task.handle.abort();
-        }
+        self.abort_task(id);
         if let Some(entry) = self.entries.get_mut(id) {
             entry.presence = Presence::Disconnected;
-            // Reset the debounce counter: the failures that preceded the
-            // disconnect belong to the connection that ended. Left as they
-            // were, one failed poll after it reconnects re-trips
-            // `Unreachable` instead of getting the usual grace.
+            // The failures before the disconnect belong to the connection that
+            // ended; kept, one miss after reconnecting would skip the grace.
             entry.consecutive_failures = 0;
         }
     }
 
-    /// Drops `Disconnected` entries that have not been seen for longer than
-    /// `DISCONNECTED_RETENTION`. An entry that never produced a reading has
-    /// nothing to retain, so it is dropped on disconnect rather than waiting
-    /// out the cap. `now` is a parameter so tests can age an entry without a
-    /// wall-clock sleep.
+    /// Drops `Disconnected` entries not seen for `DISCONNECTED_RETENTION`.
+    /// `now` is a parameter so tests can age an entry without a sleep.
     fn prune_stale(&mut self, now: BootTime) {
         let stale: Vec<DeviceId> = self
             .entries
@@ -673,8 +595,7 @@ impl DeviceRegistry {
     /// Adds each inventory device no sweep has found yet whose stored reading
     /// is within `DISCONNECTED_RETENTION`, as `Disconnected` with that
     /// reading: a device that dropped before a restart reads the same as one
-    /// that dropped while the tray ran, and ages out the same way. A later
-    /// sweep that finds it takes the reappeared path in `admit`.
+    /// that dropped while the tray ran, and ages out the same way.
     async fn restore_retained(&mut self) {
         let Some(store) = self.store.clone() else {
             return;
@@ -697,35 +618,32 @@ impl DeviceRegistry {
             if outlived(latest.map(|(at, _)| at), now_boot) {
                 continue;
             }
-            let battery_history = seed_history(&store, &id, now_boot, now_unix).await;
+            let history = seed_history(&store, &id, now_boot, now_unix).await;
+            let info = DeviceInfo {
+                name: id.name.clone(),
+                kind: record.kind,
+                transport: id.transport,
+                locator: id.locator.clone(),
+            };
             self.entries.insert(
                 id.clone(),
-                DeviceEntry {
-                    info: DeviceInfo {
-                        name: id.name.clone(),
-                        kind: record.kind,
-                        transport: id.transport,
-                        locator: id.locator.clone(),
-                    },
-                    last_reading: latest.map(|(_, r)| r),
-                    last_seen: latest.map(|(at, _)| at),
-                    presence: Presence::Disconnected,
-                    consecutive_failures: 0,
-                    battery_history,
-                },
+                DeviceEntry::new(info, Presence::Disconnected, latest, history),
             );
             self.order.push(id);
         }
     }
 
-    /// Drops every trace of one identity: its polling task (aborted), its
-    /// entry, and its place in the display order.
+    /// Drops every trace of one identity: its task, its entry, its place in the order.
     fn forget(&mut self, id: &DeviceId) {
+        self.abort_task(id);
+        self.entries.remove(id);
+        self.order.retain(|oid| oid != id);
+    }
+
+    fn abort_task(&mut self, id: &DeviceId) {
         if let Some(task) = self.tasks.remove(id) {
             task.handle.abort();
         }
-        self.entries.remove(id);
-        self.order.retain(|oid| oid != id);
     }
 
     fn names(&self) -> Vec<String> {
@@ -749,14 +667,55 @@ impl DeviceRegistry {
     }
 }
 
+/// The config channel and the file behind it, injectable for tests.
+struct ConfigIo<L, S> {
+    tx: watch::Sender<Config>,
+    load: L,
+    save: S,
+}
+
+impl<L, S> ConfigIo<L, S>
+where
+    L: Fn() -> Config,
+    S: Fn(&Config) -> anyhow::Result<()>,
+{
+    /// Moves per-device settings onto each device's new name, saves, and
+    /// republishes so the tray applies them before the file watch fires.
+    /// Reads the file fresh, not the channel: the settings window may have
+    /// saved an edit the in-memory copy predates. Not async, so the borrows
+    /// never cross an `.await` and `L`/`S` need not be `Sync`.
+    fn apply_renames(&self, renames: &[Rename]) {
+        if renames.is_empty() {
+            return;
+        }
+        let mut cfg = (self.load)();
+        let mut changed = false;
+        for Rename { from, to } in renames {
+            changed |= crate::config::rename_device(&mut cfg, from, to);
+        }
+        if !changed {
+            return;
+        }
+        match (self.save)(&cfg) {
+            Ok(()) => {
+                let _ = self.tx.send(cfg);
+            }
+            Err(e) => tracing::warn!("failed to save config after a device rename: {e:#}"),
+        }
+    }
+
+    fn migrate(&self, migration: &mut ShownDevicesMigration, registry: &DeviceRegistry) {
+        migration.attempt(&registry.names(), &self.tx, &self.load, &self.save);
+    }
+}
+
 async fn manager_task<F, Fut, L, S>(
-    config_tx: watch::Sender<Config>,
     discover: F,
     watch_tx: watch::Sender<TrayState>,
     refresh: RefreshSignal,
-    load_config: L,
-    save_config: S,
+    config: ConfigIo<L, S>,
     store: Option<state::Store>,
+    mut migration: ShownDevicesMigration,
 ) where
     F: Fn() -> Fut + Send + 'static,
     Fut: Future<Output = Vec<BackendSweep>> + Send + 'static,
@@ -767,7 +726,7 @@ async fn manager_task<F, Fut, L, S>(
     let mut waiter = refresh.sweep_waiter();
     let ctx = SourceCtx {
         tx: mpsc_tx,
-        config_rx: config_tx.subscribe(),
+        config_rx: config.tx.subscribe(),
         refresh,
     };
 
@@ -779,78 +738,39 @@ async fn manager_task<F, Fut, L, S>(
     watch_tx.send_replace(TrayState {
         devices: registry.snapshot(),
     });
-    apply_renames(&renames, &config_tx, &load_config, &save_config);
-
-    // The conversion needs a roster it can trust, and the first sweep after
-    // login rarely has one — Bluetooth peripherals enumerate late. So it is
-    // attempted here and retried on each sweep until it either converts or
-    // gives up at MIGRATION_MAX_SWEEPS; `migration_sweeps` counts the
-    // attempts and `migration_done` stops it for the life of the process,
-    // so a device connecting later can never retrigger it.
-    let mut migration_sweeps: u32 = 0;
-    let mut migration_done = migrate_shown_devices_once(
-        &registry.names(),
-        &config_tx,
-        &load_config,
-        &save_config,
-        migration_sweeps,
-    );
+    config.apply_renames(&renames);
+    config.migrate(&mut migration, &registry);
 
     // Outlives iterations: a per-iteration sleep restarts on every reading and starves.
-    let mut sweep_timer = interval_at(
-        tokio::time::Instant::now() + DISCOVERY_INTERVAL,
-        DISCOVERY_INTERVAL,
-    );
+    let mut sweep_timer = interval_at(Instant::now() + DISCOVERY_INTERVAL, DISCOVERY_INTERVAL);
     sweep_timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
             msg = mpsc_rx.recv() => {
-                match msg {
-                    Some(SourceMsg { id, generation, event }) => {
-                        match event {
-                            SourceEvent::Polled(reading) => registry.record(&id, generation, reading),
-                            SourceEvent::AccessDenied => registry.deny(&id, generation),
-                            SourceEvent::NodeReassigned => registry.retire(&id, generation),
-                        }
-                        publish(&registry, &watch_tx);
-                        continue;
-                    }
-                    // All source tasks dropped their senders — nothing left to do.
-                    None => return,
-                }
+                // All source tasks dropped their senders — nothing left to do.
+                let Some(msg) = msg else { return };
+                registry.apply(msg);
+                publish(&registry, &watch_tx);
+                continue;
             }
             _ = sweep_timer.tick() => {}
             _ = waiter.wait() => sweep_timer.reset(),
         }
         let renames = rediscover(&mut registry, discover(), &ctx, &watch_tx).await;
-        apply_renames(&renames, &config_tx, &load_config, &save_config);
-        // Retried per sweep, not per loop iteration: readings arrive
-        // far more often than sweeps, and counting those would burn
-        // the deadline in seconds instead of minutes.
-        if !migration_done {
-            migration_sweeps = migration_sweeps.saturating_add(1);
-            migration_done = migrate_shown_devices_once(
-                &registry.names(),
-                &config_tx,
-                &load_config,
-                &save_config,
-                migration_sweeps,
-            );
-        }
+        config.apply_renames(&renames);
+        config.migrate(&mut migration, &registry);
     }
 }
 
-// Takes the discovery future itself, rather than the `discover` closure, so
-// the generated future only needs `Fut: Send` — holding `&F` across the
-// `.await` below would additionally require `F: Sync`, which the public API
-// does not promise.
+// Takes the discovery future, not the closure: holding `&F` across the
+// `.await` would require `F: Sync`, which the public API does not promise.
 async fn rediscover<Fut>(
     registry: &mut DeviceRegistry,
     discover: Fut,
     ctx: &SourceCtx,
     watch_tx: &watch::Sender<TrayState>,
-) -> Vec<(String, String)>
+) -> Vec<Rename>
 where
     Fut: Future<Output = Vec<BackendSweep>>,
 {
@@ -858,46 +778,6 @@ where
     let renames = registry.reconcile(sweeps, ctx).await;
     publish(registry, watch_tx);
     renames
-}
-
-/// Moves per-device settings onto each device's new name, then republishes the
-/// config so the tray applies them without waiting for the file watch.
-///
-/// Reads the config fresh from disk rather than from the watch channel, for
-/// the reason `settings::save_edit` documents: the in-memory copy may predate
-/// an edit made in the settings window, and writing it back would undo that
-/// edit.
-///
-/// Takes the pieces by reference and is deliberately **not** async: the
-/// borrows must not cross an `.await`, or `manager_task`'s `L`/`S` would have
-/// to be `Sync` — the same constraint the comment above `rediscover`
-/// describes for the discovery closure.
-fn apply_renames<L, S>(
-    renames: &[(String, String)],
-    config_tx: &watch::Sender<Config>,
-    load_config: &L,
-    save_config: &S,
-) where
-    L: Fn() -> Config,
-    S: Fn(&Config) -> anyhow::Result<()>,
-{
-    if renames.is_empty() {
-        return;
-    }
-    let mut cfg = load_config();
-    let mut changed = false;
-    for (from, to) in renames {
-        changed |= crate::config::rename_device(&mut cfg, from, to);
-    }
-    if !changed {
-        return;
-    }
-    match save_config(&cfg) {
-        Ok(()) => {
-            let _ = config_tx.send(cfg);
-        }
-        Err(e) => tracing::warn!("failed to save config after a device rename: {e:#}"),
-    }
 }
 
 fn spawn_source_task(
@@ -912,12 +792,9 @@ fn spawn_source_task(
     let mut waiter = ctx.refresh.waiter();
 
     let handle = tokio::spawn(async move {
-        // Counts failures in a row so a permanently absent device (a mouse left
-        // switched off) reports its reason once at `warn` instead of every interval
-        // forever. Local to the task: the registry's own failure count drives
-        // presence, not diagnostics, and is not visible from here.
+        // So a permanently absent device (a mouse left switched off) logs its
+        // reason once at `warn` instead of every interval forever.
         let mut failures_in_a_row: u32 = 0;
-
         let mut pushed: Option<BatteryReading> = None;
 
         loop {
@@ -964,37 +841,43 @@ fn spawn_source_task(
             if tx.send(msg).await.is_err() {
                 return;
             }
-
-            // effective_poll_interval_secs clamps to >= 1, so a hostile 0 in
-            // config.json cannot spin this loop. The borrow ends in the
-            // closure: a watch::Ref must never be held across an .await.
-            let polled_at = Instant::now();
-            let next_poll = |config_rx: &watch::Receiver<Config>| {
-                polled_at
-                    + Duration::from_secs(config_rx.borrow().effective_poll_interval_secs(&name))
-            };
-            let mut due = next_poll(&config_rx);
-            let mut config_open = true;
-
-            loop {
-                tokio::select! {
-                    _ = sleep_until(due) => break,
-                    _ = waiter.wait() => break,
-                    // Only this device's interval moves the next poll; a
-                    // palette or language change polls nothing.
-                    r = config_rx.changed(), if config_open => match r {
-                        Ok(()) => due = next_poll(&config_rx),
-                        Err(_) => config_open = false,
-                    },
-                    r = src.pushed() => {
-                        pushed = Some(r);
-                        break;
-                    }
-                }
-            }
+            pushed = wait_for_next_poll(src.as_mut(), &mut config_rx, &mut waiter, &name).await;
         }
     });
     handle.abort_handle()
+}
+
+/// Waits out this device's poll interval, or until a refresh. Returns the
+/// reading the device pushed meanwhile, if it did.
+async fn wait_for_next_poll(
+    src: &mut dyn BatterySource,
+    config_rx: &mut watch::Receiver<Config>,
+    waiter: &mut RefreshWaiter,
+    name: &str,
+) -> Option<BatteryReading> {
+    // effective_poll_interval_secs clamps to >= 1, so a hostile 0 in
+    // config.json cannot spin the poll loop. The borrow ends in the
+    // closure: a watch::Ref must never be held across an .await.
+    let polled_at = Instant::now();
+    let next_poll = |config_rx: &watch::Receiver<Config>| {
+        polled_at + Duration::from_secs(config_rx.borrow().effective_poll_interval_secs(name))
+    };
+    let mut due = next_poll(config_rx);
+    let mut config_open = true;
+
+    loop {
+        tokio::select! {
+            _ = sleep_until(due) => return None,
+            _ = waiter.wait() => return None,
+            // Only this device's interval moves the next poll; a
+            // palette or language change polls nothing.
+            r = config_rx.changed(), if config_open => match r {
+                Ok(()) => due = next_poll(config_rx),
+                Err(_) => config_open = false,
+            },
+            r = src.pushed() => return Some(r),
+        }
+    }
 }
 
 /// Notifies receivers only when the published state differs from the last.
@@ -1046,6 +929,7 @@ mod tests {
             no_migration_load,
             no_migration_save,
             None,
+            ConfigRole::Owner,
         )
     }
 
@@ -1297,7 +1181,7 @@ mod tests {
         registry: &mut DeviceRegistry,
         ctx: &SourceCtx,
         sources: Vec<Box<dyn BatterySource>>,
-    ) -> Vec<(String, String)> {
+    ) -> Vec<Rename> {
         registry
             .reconcile(vec![ok_sweep("sysfs", sources)], ctx)
             .await
@@ -1820,6 +1704,7 @@ mod tests {
                 Ok(())
             },
             None,
+            ConfigRole::Owner,
         );
 
         // The migration's config_tx.send is the channel's only publisher in
@@ -1833,6 +1718,32 @@ mod tests {
         assert_eq!(migrated.hidden_devices, vec!["b".to_string()]);
         assert!(migrated.shown_devices.is_empty());
         assert_eq!(saved.try_iter().last().as_ref(), Some(&migrated));
+    }
+
+    #[tokio::test]
+    async fn a_reader_never_converts_shown_devices() {
+        let (tx, config_rx) = watch::channel(Config::default());
+        let (saved_tx, saved) = std::sync::mpsc::channel::<Config>();
+
+        let (mut rx, _refresh) = Supervisor::spawn_with(
+            tx,
+            || found(vec![ok(&device("a"), 50), ok(&device("b"), 50)]),
+            || Config {
+                shown_devices: vec!["a".to_string()],
+                ..Config::default()
+            },
+            move |cfg: &Config| {
+                saved_tx.send(cfg.clone()).expect("test receiver alive");
+                Ok(())
+            },
+            None,
+            ConfigRole::Reader,
+        );
+        // A reading is applied only after the first sweep's conversion attempt.
+        wait_for_connected(&mut rx).await;
+
+        assert_eq!(saved.try_iter().count(), 0);
+        assert!(!config_rx.has_changed().expect("config channel open"));
     }
 
     // Every test above passes no store; these open one in a scratch
@@ -1886,7 +1797,10 @@ mod tests {
 
         assert_eq!(
             renames,
-            vec![("MX Anywhere 3".to_string(), "Work mouse".to_string())]
+            vec![Rename {
+                from: "MX Anywhere 3".to_string(),
+                to: "Work mouse".to_string(),
+            }]
         );
         let devices = store.list_devices().await.expect("listing devices");
         assert_eq!(devices.len(), 1);
@@ -1909,23 +1823,20 @@ mod tests {
             primary_device: Some("MX Anywhere 3".to_string()),
             ..Config::default()
         };
-        let (config_tx, config_rx) = watch::channel(on_disk.clone());
-
-        let load = {
-            let on_disk = on_disk.clone();
-            move || on_disk.clone()
+        let (tx, config_rx) = watch::channel(on_disk.clone());
+        let config = ConfigIo {
+            tx,
+            load: move || on_disk.clone(),
+            save: move |cfg: &Config| {
+                saved_tx.send(cfg.clone()).expect("test receiver alive");
+                Ok(())
+            },
         };
-        let save = move |cfg: &Config| {
-            saved_tx.send(cfg.clone()).expect("test receiver alive");
-            Ok(())
-        };
 
-        apply_renames(
-            &[("MX Anywhere 3".to_string(), "Work mouse".to_string())],
-            &config_tx,
-            &load,
-            &save,
-        );
+        config.apply_renames(&[Rename {
+            from: "MX Anywhere 3".to_string(),
+            to: "Work mouse".to_string(),
+        }]);
 
         let published = config_rx.borrow().clone();
         assert_eq!(published.hidden_devices, vec!["Work mouse".to_string()]);
@@ -2018,6 +1929,7 @@ mod tests {
             no_migration_load,
             no_migration_save,
             Some(store),
+            ConfigRole::Owner,
         );
         let state = wait_for_devices(&mut rx).await;
 

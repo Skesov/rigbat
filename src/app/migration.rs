@@ -1,54 +1,40 @@
-//! One-time conversion of a pre-T33 `shown_devices` whitelist into
-//! `hidden_devices`, given the device names `discovered` by the supervisor's
-//! sweeps — the only roster this conversion is allowed to depend on.
+//! One-time conversion of a legacy `shown_devices` whitelist into
+//! `hidden_devices`, against the device names the supervisor's sweeps
+//! discovered — the only roster it may depend on.
 //!
-//! A device absent from `discovered` (offline during that one sweep) is
-//! unknowable and defaults to shown, same as an unlisted device did under
-//! the old empty-means-all-shown rule; this is not lossless, only the best a
-//! roster captured once allows. `hidden_devices` already on the config is
-//! unioned in, not replaced, so a value this version wrote before a
-//! downgrade and re-upgrade is not lost. Because the returned config always
-//! clears `shown_devices`, feeding that returned config back in — as the
-//! caller's own reload before its next save will — makes a repeat call a
-//! no-op regardless of what `discovered` grows to.
+//! A device absent from that roster is unknowable and stays shown: not
+//! lossless, only the best one roster allows. Existing `hidden_devices` are
+//! unioned in, so a value written before a downgrade and re-upgrade survives.
+//! The result always clears `shown_devices`, so a repeat call is a no-op
+//! whatever the roster grows to.
 
 use tokio::sync::watch;
 
 use crate::config::Config;
 
-/// How many discovery sweeps the conversion will wait for a roster that
-/// accounts for every name in the legacy whitelist. At `DISCOVERY_INTERVAL`
-/// this is a few minutes — long enough for Bluetooth peripherals to finish
-/// enumerating after login, short enough that a whitelist naming a device the
-/// user has since sold does not defer the conversion forever.
+/// Sweeps to wait for a roster that accounts for every listed name: a few
+/// minutes at `DISCOVERY_INTERVAL`, long enough for Bluetooth peripherals to
+/// enumerate after login, short enough that a sold device does not defer the
+/// conversion forever.
 const MIGRATION_MAX_SWEEPS: u32 = 10;
 
-/// The outcome of inspecting a legacy `shown_devices` whitelist against the
-/// devices discovered so far.
 #[derive(Debug, PartialEq, Eq)]
 enum Migration {
     /// No legacy whitelist to convert.
     NotNeeded,
-    /// The roster does not yet account for every name the user listed, so it
-    /// cannot say which devices they meant to hide. Converting now would write
-    /// a wrong answer that can never be corrected, because clearing
-    /// `shown_devices` is what stops the conversion running again.
-    Defer { missing: Vec<String> },
-    /// Converted config, plus the names moved into `hidden_devices`.
-    Ready(Box<Config>, Vec<String>),
+    /// Converting now would write a wrong answer that can never be corrected,
+    /// because clearing `shown_devices` is what stops the conversion running
+    /// again.
+    Defer {
+        missing: Vec<String>,
+    },
+    Ready,
 }
 
-/// Converts the legacy "show exactly these" whitelist into the "hide these"
-/// list, given the devices discovered so far.
-///
-/// The conversion is only sound when the roster is complete enough: the
-/// whitelist records what to *show*, so what to hide can only be derived from
-/// the devices actually seen. A sweep taken before Bluetooth peripherals have
-/// enumerated sees few devices, finds nothing to hide, and would clear the
-/// whitelist — destroying the user's choices with a log line reading
-/// `hidden=[]`, which looks like "nothing needed hiding" rather than "could
-/// not tell". The caller therefore defers until every listed name has been
-/// seen, or until `MIGRATION_MAX_SWEEPS` sweeps have passed.
+/// Whether the whitelist can be converted yet. What to hide can only be
+/// derived from the devices seen: a sweep taken before Bluetooth peripherals
+/// enumerate finds nothing to hide and would clear the whitelist, destroying
+/// the user's choices behind a log line that reads `hidden=[]`.
 fn migrate_shown_devices(cfg: &Config, discovered: &[String]) -> Migration {
     if cfg.shown_devices.is_empty() {
         return Migration::NotNeeded;
@@ -59,29 +45,17 @@ fn migrate_shown_devices(cfg: &Config, discovered: &[String]) -> Migration {
         .filter(|name| !discovered.contains(name))
         .cloned()
         .collect();
-    if !missing.is_empty() {
-        return Migration::Defer { missing };
+    if missing.is_empty() {
+        Migration::Ready
+    } else {
+        Migration::Defer { missing }
     }
-    Migration::Ready(
-        Box::new(converted(cfg, discovered)),
-        moved_names(cfg, discovered),
-    )
 }
 
-/// The same conversion without the completeness check, for the deadline case.
-fn converted(cfg: &Config, discovered: &[String]) -> Config {
-    let mut migrated = cfg.clone();
-    migrated.hidden_devices = cfg.hidden_devices.clone();
-    for name in moved_names(cfg, discovered) {
-        migrated.hidden_devices.push(name);
-    }
-    migrated.shown_devices = Vec::new();
-    migrated
-}
-
-/// Names discovered but absent from the whitelist, i.e. the ones to hide.
-fn moved_names(cfg: &Config, discovered: &[String]) -> Vec<String> {
-    let mut moved = Vec::new();
+/// The converted config, and the names it moved into `hidden_devices`: those
+/// discovered but neither listed nor already hidden.
+fn converted(cfg: &Config, discovered: &[String]) -> (Config, Vec<String>) {
+    let mut moved: Vec<String> = Vec::new();
     for name in discovered {
         if !cfg.shown_devices.contains(name)
             && !cfg.hidden_devices.contains(name)
@@ -90,21 +64,16 @@ fn moved_names(cfg: &Config, discovered: &[String]) -> Vec<String> {
             moved.push(name.clone());
         }
     }
-    moved
+    let mut migrated = cfg.clone();
+    migrated.hidden_devices.extend(moved.iter().cloned());
+    migrated.shown_devices = Vec::new();
+    (migrated, moved)
 }
 
-/// Runs `migrate_shown_devices` once, right after the very first discovery
-/// sweep — the earliest point a full device roster exists. `config::load`
-/// cannot perform this conversion itself: it never sees a device list.
-///
-/// Calls `load_config` instead of trusting `config_tx`'s current value: the
-/// settings window is a separate process (`settings::run`) that can write a
-/// newer config between this process's startup and this point, and
-/// `SettingsApp::persist` defends against the same staleness by re-reading
-/// immediately before its own save — this mirrors that. `load_config`/
-/// `save_config` are parameters (not `crate::config::load`/`save` called
-/// directly) so tests can point this at a temporary file instead of the
-/// real `config::config_path()`.
+/// Converts once the roster accounts for every listed name, or at the
+/// deadline; `true` once nothing is left to do. Reads the config with
+/// `load_config`, not `config_tx`'s value: the settings window, a separate
+/// process, may have saved a newer one since this process started.
 pub(super) fn migrate_shown_devices_once<L, S>(
     discovered: &[String],
     config_tx: &watch::Sender<Config>,
@@ -117,30 +86,26 @@ where
     S: Fn(&Config) -> anyhow::Result<()>,
 {
     let cfg = load_config();
-    let (migrated, moved) = match migrate_shown_devices(&cfg, discovered) {
+    match migrate_shown_devices(&cfg, discovered) {
         Migration::NotNeeded => return true,
-        Migration::Defer { missing } => {
-            if sweeps < MIGRATION_MAX_SWEEPS {
-                tracing::debug!(
-                    ?missing,
-                    sweeps,
-                    "deferring shown_devices conversion until the roster accounts for every listed device"
-                );
-                return false;
-            }
-            // Deadline reached. Convert with what we have and say plainly which
-            // devices were never seen, so a wrong outcome is diagnosable rather
-            // than silent.
-            tracing::warn!(
-                never_seen = ?missing,
-                "converting shown_devices after {MIGRATION_MAX_SWEEPS} sweeps without seeing every listed device; \
-                 those devices will show until hidden again"
+        Migration::Defer { missing } if sweeps < MIGRATION_MAX_SWEEPS => {
+            tracing::debug!(
+                ?missing,
+                sweeps,
+                "deferring shown_devices conversion until the roster accounts for every listed device"
             );
-            let moved = moved_names(&cfg, discovered);
-            (converted(&cfg, discovered), moved)
+            return false;
         }
-        Migration::Ready(migrated, moved) => (*migrated, moved),
-    };
+        // Converts with what it has and names the devices never seen, so a
+        // wrong outcome is diagnosable rather than silent.
+        Migration::Defer { missing } => tracing::warn!(
+            never_seen = ?missing,
+            "converting shown_devices after {MIGRATION_MAX_SWEEPS} sweeps without seeing every listed device; \
+             those devices will show until hidden again"
+        ),
+        Migration::Ready => {}
+    }
+    let (migrated, moved) = converted(&cfg, discovered);
 
     match save_config(&migrated) {
         Ok(()) => {
@@ -158,96 +123,125 @@ where
     }
 }
 
+/// Retried once per sweep until it converts or gives up, then never again in
+/// this process, so a device connecting later cannot retrigger it. Counted
+/// per sweep, not per reading: readings would burn the deadline in seconds.
+pub(super) struct ShownDevicesMigration {
+    sweeps: u32,
+    done: bool,
+}
+
+impl ShownDevicesMigration {
+    /// `enabled` is false in a process that does not own `config.json`.
+    pub(super) fn new(enabled: bool) -> Self {
+        Self {
+            sweeps: 0,
+            done: !enabled,
+        }
+    }
+
+    pub(super) fn attempt<L, S>(
+        &mut self,
+        discovered: &[String],
+        config_tx: &watch::Sender<Config>,
+        load_config: &L,
+        save_config: &S,
+    ) where
+        L: Fn() -> Config,
+        S: Fn(&Config) -> anyhow::Result<()>,
+    {
+        if self.done {
+            return;
+        }
+        self.done = migrate_shown_devices_once(
+            discovered,
+            config_tx,
+            load_config,
+            save_config,
+            self.sweeps,
+        );
+        self.sweeps = self.sweeps.saturating_add(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn ready(cfg: &Config, discovered: &[&str]) -> (Config, Vec<String>) {
-        let names: Vec<String> = discovered.iter().map(|s| (*s).to_string()).collect();
-        match migrate_shown_devices(cfg, &names) {
-            Migration::Ready(migrated, moved) => Some((*migrated, moved)),
-            _ => None,
+    fn cfg_shown(names: &[&str]) -> Config {
+        Config {
+            shown_devices: names_of(names),
+            ..Config::default()
         }
-        .expect("expected Migration::Ready")
+    }
+
+    fn names_of(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn ready(cfg: &Config, discovered: &[&str]) -> (Config, Vec<String>) {
+        let discovered = names_of(discovered);
+        assert_eq!(migrate_shown_devices(cfg, &discovered), Migration::Ready);
+        converted(cfg, &discovered)
     }
 
     #[test]
     fn migrate_shown_devices_converts_absent_names_to_hidden() {
-        let cfg = Config {
-            shown_devices: vec!["a".to_string()],
-            ..Config::default()
-        };
-        let (migrated, moved) = ready(&cfg, &["a", "b"]);
-        assert_eq!(migrated.hidden_devices, vec!["b".to_string()]);
+        let (migrated, moved) = ready(&cfg_shown(&["a"]), &["a", "b"]);
+        assert_eq!(migrated.hidden_devices, names_of(&["b"]));
         assert!(migrated.shown_devices.is_empty());
-        assert_eq!(moved, vec!["b".to_string()]);
+        assert_eq!(moved, names_of(&["b"]));
     }
 
     #[test]
     fn migrate_shown_devices_empty_shown_is_noop() {
-        let cfg = Config::default();
         assert_eq!(
-            migrate_shown_devices(&cfg, &["a".to_string(), "b".to_string()]),
+            migrate_shown_devices(&Config::default(), &names_of(&["a", "b"])),
             Migration::NotNeeded
         );
     }
 
-    /// A sweep taken before Bluetooth peripherals enumerate sees a partial
-    /// roster. Converting then would clear the whitelist while finding
-    /// nothing to hide, and a cleared whitelist is what stops the conversion
-    /// running again — so the loss would be permanent.
+    /// A partial roster would clear the whitelist while finding nothing to
+    /// hide, and the cleared whitelist stops the conversion for good.
     #[test]
     fn migrate_shown_devices_defers_while_a_listed_device_is_unseen() {
-        let cfg = Config {
-            shown_devices: vec!["mouse".to_string(), "keyboard".to_string()],
-            ..Config::default()
-        };
         assert_eq!(
-            migrate_shown_devices(&cfg, &["mouse".to_string()]),
+            migrate_shown_devices(&cfg_shown(&["mouse", "keyboard"]), &names_of(&["mouse"])),
             Migration::Defer {
-                missing: vec!["keyboard".to_string()]
+                missing: names_of(&["keyboard"])
             }
         );
     }
 
     #[test]
     fn migrate_shown_devices_ready_once_every_listed_device_is_seen() {
-        let cfg = Config {
-            shown_devices: vec!["mouse".to_string(), "keyboard".to_string()],
-            ..Config::default()
-        };
-        let (migrated, moved) = ready(&cfg, &["mouse", "keyboard", "dupe"]);
-        assert_eq!(migrated.hidden_devices, vec!["dupe".to_string()]);
-        assert_eq!(moved, vec!["dupe".to_string()]);
+        let (migrated, moved) = ready(
+            &cfg_shown(&["mouse", "keyboard"]),
+            &["mouse", "keyboard", "dupe"],
+        );
+        assert_eq!(migrated.hidden_devices, names_of(&["dupe"]));
+        assert_eq!(moved, names_of(&["dupe"]));
     }
 
-    /// The deadline path: `converted` is what the caller falls back to once
+    /// The deadline path: what the caller falls back to once
     /// `MIGRATION_MAX_SWEEPS` sweeps have passed without a complete roster.
     #[test]
     fn converted_hides_only_what_was_actually_seen() {
-        let cfg = Config {
-            shown_devices: vec!["mouse".to_string(), "sold-headset".to_string()],
-            ..Config::default()
-        };
-        let migrated = converted(&cfg, &["mouse".to_string(), "dupe".to_string()]);
-        assert_eq!(migrated.hidden_devices, vec!["dupe".to_string()]);
+        let (migrated, _) = converted(
+            &cfg_shown(&["mouse", "sold-headset"]),
+            &names_of(&["mouse", "dupe"]),
+        );
+        assert_eq!(migrated.hidden_devices, names_of(&["dupe"]));
         assert!(migrated.shown_devices.is_empty());
     }
 
-    /// The "runs once" guarantee: the already-converted config has an empty
-    /// whitelist, so a later sweep with a larger roster cannot hide a device
-    /// retroactively.
     #[test]
     fn migrate_shown_devices_second_call_with_larger_roster_adds_nothing() {
-        let cfg = Config {
-            shown_devices: vec!["a".to_string()],
-            ..Config::default()
-        };
-        let (migrated, _) = ready(&cfg, &["a"]);
+        let (migrated, _) = ready(&cfg_shown(&["a"]), &["a"]);
         assert!(migrated.hidden_devices.is_empty());
 
         assert_eq!(
-            migrate_shown_devices(&migrated, &["a".to_string(), "b".to_string()]),
+            migrate_shown_devices(&migrated, &names_of(&["a", "b"])),
             Migration::NotNeeded
         );
     }
@@ -255,15 +249,11 @@ mod tests {
     #[test]
     fn migrate_shown_devices_unions_existing_hidden_devices() {
         let cfg = Config {
-            shown_devices: vec!["a".to_string()],
-            hidden_devices: vec!["headset".to_string()],
-            ..Config::default()
+            hidden_devices: names_of(&["headset"]),
+            ..cfg_shown(&["a"])
         };
         let (migrated, moved) = ready(&cfg, &["a", "b"]);
-        assert_eq!(
-            migrated.hidden_devices,
-            vec!["headset".to_string(), "b".to_string()]
-        );
-        assert_eq!(moved, vec!["b".to_string()]);
+        assert_eq!(migrated.hidden_devices, names_of(&["headset", "b"]));
+        assert_eq!(moved, names_of(&["b"]));
     }
 }
