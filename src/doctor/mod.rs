@@ -90,28 +90,26 @@ pub struct Startup {
 /// Session-bus names that decide whether a tray icon can appear.
 #[derive(Debug, Clone, Copy)]
 struct SessionFacts {
-    pub tray_host: bool,
-    pub tray_running: bool,
+    tray_host: bool,
+    tray_running: bool,
 }
 
 /// The udev rule in effect and the `(vendor, product)` pairs it grants;
 /// `ids` is `None` when the file could not be read.
 #[derive(Debug)]
 struct InstalledRule {
-    pub path: PathBuf,
-    pub ids: Option<BTreeSet<(u16, u16)>>,
+    path: PathBuf,
+    ids: Option<BTreeSet<(u16, u16)>>,
 }
 
 /// One supported device's hidraw node and the outcome of opening it read-write.
 #[derive(Debug)]
 struct NodeProbe {
-    pub device: String,
-    pub usb_id: (u16, u16),
-    pub dev_path: PathBuf,
-    pub open: std::io::Result<()>,
+    device: String,
+    usb_id: (u16, u16),
+    dev_path: PathBuf,
+    open: std::io::Result<()>,
 }
-
-// ── Decisions ────────────────────────────────────────────────────────────────
 
 fn session_checks(session: anyhow::Result<SessionFacts>, startup: Startup) -> Vec<Check> {
     let facts = match session {
@@ -278,8 +276,9 @@ fn udev_attr(line: &str, key: &str) -> Option<u16> {
 }
 
 /// `config` is `config::read`'s result: `Ok(false)` for no file yet.
-fn config_check(path: Option<&Path>, config: anyhow::Result<bool>) -> Check {
-    let Some(path) = path else {
+/// `None` without a config directory; otherwise its path and whether a file parsed there.
+fn config_check(probe: Option<(&Path, anyhow::Result<bool>)>) -> Check {
+    let Some((path, config)) = probe else {
         return Check::warn(
             "no config directory (HOME unset?); settings cannot be saved",
             "set HOME or XDG_CONFIG_HOME",
@@ -298,8 +297,8 @@ fn config_check(path: Option<&Path>, config: anyhow::Result<bool>) -> Check {
     }
 }
 
-fn state_check(path: Option<&Path>, store: anyhow::Result<()>) -> Check {
-    let Some(path) = path else {
+fn state_check(probe: Option<(&Path, anyhow::Result<()>)>) -> Check {
+    let Some((path, store)) = probe else {
         return Check::warn(
             "no state directory (HOME unset?); device inventory and history are off",
             "set HOME or XDG_STATE_HOME",
@@ -335,8 +334,6 @@ pub fn render(checks: &[Check]) -> String {
 fn exit_code(checks: &[Check]) -> i32 {
     i32::from(checks.iter().any(|c| c.status == Status::Fail))
 }
-
-// ── Probes ───────────────────────────────────────────────────────────────────
 
 async fn with_timeout<T>(
     limit: Duration,
@@ -422,22 +419,18 @@ async fn gather() -> Vec<Check> {
     ));
 
     let config_path = crate::config::config_path();
-    let config = config_path
-        .as_deref()
-        .map(|p| crate::config::read(p).map(|c| c.is_some()));
-    checks.push(match config {
-        Some(result) => config_check(config_path.as_deref(), result),
-        None => config_check(None, Ok(false)),
-    });
+    checks.push(config_check(
+        config_path
+            .as_deref()
+            .map(|p| (p, crate::config::read(p).map(|c| c.is_some()))),
+    ));
 
     let db_path = state::db_path();
-    let store = db_path
-        .as_deref()
-        .map(|p| state::SqliteStore::open(p).map(drop));
-    checks.push(match store {
-        Some(result) => state_check(db_path.as_deref(), result),
-        None => state_check(None, Ok(())),
-    });
+    checks.push(state_check(
+        db_path
+            .as_deref()
+            .map(|p| (p, state::SqliteStore::open(p).map(drop))),
+    ));
     checks
 }
 
@@ -696,11 +689,11 @@ mod tests {
     #[test]
     fn broken_config_fails_and_missing_config_is_ok() {
         let path = Path::new("/home/u/.config/rigbat/config.json");
-        assert_eq!(config_check(Some(path), Ok(true)).status, Status::Ok);
-        let missing = config_check(Some(path), Ok(false));
+        assert_eq!(config_check(Some((path, Ok(true)))).status, Status::Ok);
+        let missing = config_check(Some((path, Ok(false))));
         assert_eq!(missing.status, Status::Ok);
         assert!(missing.summary.contains("defaults"));
-        let broken = config_check(Some(path), Err(anyhow::anyhow!("expected value")));
+        let broken = config_check(Some((path, Err(anyhow::anyhow!("expected value")))));
         assert_eq!(broken.status, Status::Fail);
         assert!(
             broken.summary.contains("expected value"),
@@ -718,14 +711,14 @@ mod tests {
     #[test]
     fn unusable_state_database_only_warns() {
         let path = Path::new("/home/u/.local/state/rigbat/rigbat.db");
-        let ok = state_check(Some(path), Ok(()));
+        let ok = state_check(Some((path, Ok(()))));
         assert_eq!(ok.status, Status::Ok);
         assert!(ok.summary.contains("rigbat.db"));
         assert_eq!(
-            state_check(Some(path), Err(anyhow::anyhow!("corrupt"))).status,
+            state_check(Some((path, Err(anyhow::anyhow!("corrupt"))))).status,
             Status::Warn
         );
-        assert_eq!(state_check(None, Ok(())).status, Status::Warn);
+        assert_eq!(state_check(None).status, Status::Warn);
     }
 
     #[tokio::test]
