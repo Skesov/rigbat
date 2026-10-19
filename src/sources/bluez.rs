@@ -1,26 +1,26 @@
-/// BlueZ Battery1 backend — reads the charge level of Bluetooth devices via D-Bus (zbus).
-///
-/// Protocol:
-/// - Service: `org.bluez`, system bus.
-/// - ObjectManager at `/` → `GetManagedObjects` → all objects.
-/// - An object is of interest if it has the `org.bluez.Device1` interface with `Connected == true`
-///   and the `org.bluez.Battery1` interface is present.
-/// - Name: `Device1.Alias` → `Device1.Name` → address from the object path.
-/// - Charge: `Battery1.Percentage` (u8).
-/// - No charging info in Battery1 → always `ChargeState::Discharging`.
+//! BlueZ `Battery1` backend: the charge of connected Bluetooth devices over D-Bus.
+//! `Battery1` carries no charging state, so a reading is always `Discharging`.
+//! A device is named `Alias`, else `Name`, else its address.
+
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
 use futures_util::StreamExt as _;
 use tokio::time::Instant;
-use zbus::zvariant::OwnedObjectPath;
+use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 use crate::domain::{BatteryReading, ChargeState, DeviceInfo, Transport, guess_kind};
 use crate::refresh::RefreshSignal;
 
 use super::supervise::supervise;
 use super::{BatteryBackend, BatterySource, Context};
+
+const BLUEZ: &str = "org.bluez";
+const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
+const DEVICE_IFACE: &str = "org.bluez.Device1";
+const BATTERY_IFACE: &str = "org.bluez.Battery1";
 
 /// BlueZ emits a burst of signals for one physical event (several interfaces
 /// added at once when a device connects); coalescing runs one discovery sweep
@@ -54,92 +54,76 @@ impl BatteryBackend for BluezBackend {
     }
 
     async fn discover(&self, ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
-        discover_inner(ctx).await
+        let conn = ctx.system_bus().await?;
+        let objects = object_manager(&conn)
+            .await?
+            .get_managed_objects()
+            .await
+            .context("GetManagedObjects on org.bluez")?;
+        Ok(objects
+            .into_iter()
+            .filter_map(|(path, interfaces)| {
+                let info = device_from_object(path.as_str(), &interfaces)?;
+                Some(Box::new(BluezSource {
+                    info,
+                    path,
+                    ctx: ctx.clone(),
+                    changes: None,
+                }) as Box<dyn BatterySource>)
+            })
+            .collect())
     }
 }
 
-async fn discover_inner(ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
-    let conn = ctx.system_bus().await?;
-
-    let om = zbus::fdo::ObjectManagerProxy::builder(&conn)
-        .destination("org.bluez")
+async fn object_manager(
+    conn: &zbus::Connection,
+) -> anyhow::Result<zbus::fdo::ObjectManagerProxy<'static>> {
+    zbus::fdo::ObjectManagerProxy::builder(conn)
+        .destination(BLUEZ)
         .context("setting destination")?
         .path("/")
         .context("setting path")?
         .build()
         .await
-        .context("building ObjectManagerProxy")?;
+        .context("building ObjectManagerProxy")
+}
 
-    let objects = om
-        .get_managed_objects()
-        .await
-        .context("GetManagedObjects on org.bluez")?;
-
-    let mut sources: Vec<Box<dyn BatterySource>> = Vec::new();
-
-    for (path, interfaces) in objects {
-        let Some(device_iface) = interfaces.get("org.bluez.Device1") else {
-            continue;
-        };
-
-        if !interfaces.contains_key("org.bluez.Battery1") {
-            continue;
-        }
-
-        // Check Connected property
-        let connected = device_iface
-            .get("Connected")
-            .and_then(|v| bool::try_from(v.clone()).ok())
-            .unwrap_or(false);
-
-        if !connected {
-            continue;
-        }
-
-        let alias = device_iface
-            .get("Alias")
-            .and_then(|v| String::try_from(v.clone()).ok());
-
-        let name_prop = device_iface
-            .get("Name")
-            .and_then(|v| String::try_from(v.clone()).ok());
-
-        // Address as a fallback name: the last path component
-        // BlueZ encodes the address in the path: /org/bluez/hciX/dev_XX_XX_XX_XX_XX_XX
-        let addr_fallback = path
-            .as_str()
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .replace('_', ":");
-
-        // The bare MAC, greppable in bluetoothctl: strip the `dev:` prefix left
-        // over from the object-path component `dev_XX_XX_…`. It is both the
-        // locator and the name fallback — a device with neither Alias nor Name
-        // used to read as `dev:AA:BB:…` in the tray and the device table.
-        let locator = addr_fallback
-            .strip_prefix("dev:")
-            .unwrap_or(&addr_fallback)
-            .to_owned();
-
-        let display_name = device_name(alias.as_deref(), name_prop.as_deref(), &locator);
-
-        let info = DeviceInfo {
-            kind: guess_kind(&display_name),
-            name: display_name,
-            transport: Transport::Bluetooth,
-            locator: Some(locator),
-        };
-
-        sources.push(Box::new(BluezSource {
-            info,
-            path: path.clone(),
-            ctx: ctx.clone(),
-            changes: None,
-        }));
+/// The device at `path` when it is connected and has a battery.
+fn device_from_object(
+    path: &str,
+    interfaces: &HashMap<zbus::names::OwnedInterfaceName, HashMap<String, OwnedValue>>,
+) -> Option<DeviceInfo> {
+    let device = interfaces.get(DEVICE_IFACE)?;
+    if !interfaces.contains_key(BATTERY_IFACE) {
+        return None;
     }
+    let connected = device
+        .get("Connected")
+        .and_then(|v| bool::try_from(v.clone()).ok())
+        .unwrap_or(false);
+    if !connected {
+        return None;
+    }
+    let text = |key: &str| {
+        device
+            .get(key)
+            .and_then(|v| String::try_from(v.clone()).ok())
+    };
+    let locator = address_of(path);
+    let name = device_name(text("Alias").as_deref(), text("Name").as_deref(), &locator);
+    Some(DeviceInfo {
+        kind: guess_kind(&name),
+        name,
+        transport: Transport::Bluetooth,
+        locator: Some(locator),
+    })
+}
 
-    Ok(sources)
+/// The MAC BlueZ encodes in the object path (`/org/bluez/hci0/dev_AA_BB_…`),
+/// colon-separated as `bluetoothctl` prints it.
+fn address_of(path: &str) -> String {
+    let tail = path.rsplit('/').next().unwrap_or("");
+    tail.strip_prefix("dev_").unwrap_or(tail).replace('_', ":")
 }
 
 /// Subscribes to BlueZ D-Bus signals and asks `refresh` to re-discover when a
@@ -171,14 +155,7 @@ struct Subscriptions {
 /// current BlueZ. Called once at startup and again whenever `NameOwnerChanged`
 /// reports a new owner for `org.bluez`.
 async fn subscribe(conn: &zbus::Connection) -> anyhow::Result<Subscriptions> {
-    let om = zbus::fdo::ObjectManagerProxy::builder(conn)
-        .destination("org.bluez")
-        .context("setting destination")?
-        .path("/")
-        .context("setting path")?
-        .build()
-        .await
-        .context("building ObjectManagerProxy")?;
+    let om = object_manager(conn).await?;
 
     let interfaces_added = om
         .receive_interfaces_added()
@@ -205,9 +182,9 @@ async fn subscribe(conn: &zbus::Connection) -> anyhow::Result<Subscriptions> {
     // BlueZ's owner changes, rather than relying on this filter alone.
     let rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
-        .sender("org.bluez")
+        .sender(BLUEZ)
         .context("setting sender filter")?
-        .interface("org.freedesktop.DBus.Properties")
+        .interface(PROPERTIES_IFACE)
         .context("setting interface filter")?
         .member("PropertiesChanged")
         .context("setting member filter")?
@@ -233,7 +210,7 @@ async fn watch_events_inner(
         .await
         .context("building DBusProxy")?;
     let mut name_owner_changed = dbus
-        .receive_name_owner_changed_with_args(&[(0, "org.bluez")])
+        .receive_name_owner_changed_with_args(&[(0, BLUEZ)])
         .await
         .context("subscribing to NameOwnerChanged for org.bluez")?;
 
@@ -308,7 +285,7 @@ async fn watch_events_inner(
                         }
                     }
                     // Devices may have connected while BlueZ was down; the
-                    // 30 s sweep would catch it, a sweep now closes the gap.
+                    // periodic sweep would catch it, a sweep now closes the gap.
                     refresh.rediscover();
                 } else {
                     tracing::warn!(
@@ -391,7 +368,7 @@ impl BatterySource for BluezSource {
     async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
         let conn = self.ctx.system_bus().await?;
         let props_device = zbus::fdo::PropertiesProxy::builder(&conn)
-            .destination("org.bluez")
+            .destination(BLUEZ)
             .context("setting destination for Device1")?
             .path(self.path.as_ref())
             .context("setting path for Device1")?
@@ -453,9 +430,6 @@ impl BatterySource for BluezSource {
     }
 }
 
-const DEVICE_IFACE: &str = "org.bluez.Device1";
-const BATTERY_IFACE: &str = "org.bluez.Battery1";
-
 /// `PropertiesChanged` of `Battery1` at one device's object path.
 async fn battery_changes(
     ctx: &Context,
@@ -464,9 +438,9 @@ async fn battery_changes(
     let conn = ctx.system_bus().await?;
     let rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
-        .sender("org.bluez")?
+        .sender(BLUEZ)?
         .path(path.as_ref())?
-        .interface("org.freedesktop.DBus.Properties")?
+        .interface(PROPERTIES_IFACE)?
         .member("PropertiesChanged")?
         .arg(0, BATTERY_IFACE)?
         .build();
@@ -495,9 +469,55 @@ fn percentage_reading(value: &zbus::zvariant::Value<'_>) -> anyhow::Result<Batte
 
 #[cfg(test)]
 mod tests {
-    use super::{Debouncer, SIGNAL_DEBOUNCE, device_name, is_relevant_properties_change};
+    use super::{
+        Debouncer, SIGNAL_DEBOUNCE, address_of, device_from_object, device_name,
+        is_relevant_properties_change,
+    };
+    use std::collections::HashMap;
     use std::time::Duration;
     use tokio::time::Instant;
+    use zbus::names::OwnedInterfaceName;
+    use zbus::zvariant::{OwnedValue, Str};
+
+    const PATH: &str = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF";
+
+    fn object(
+        connected: bool,
+        alias: &str,
+        battery: bool,
+    ) -> HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>> {
+        let device = HashMap::from([
+            ("Connected".to_owned(), OwnedValue::from(connected)),
+            ("Alias".to_owned(), OwnedValue::from(Str::from(alias))),
+        ]);
+        let mut interfaces = HashMap::from([(
+            OwnedInterfaceName::try_from("org.bluez.Device1").unwrap(),
+            device,
+        )]);
+        if battery {
+            interfaces.insert(
+                OwnedInterfaceName::try_from("org.bluez.Battery1").unwrap(),
+                HashMap::new(),
+            );
+        }
+        interfaces
+    }
+
+    #[test]
+    fn address_of_reads_the_mac_from_the_object_path() {
+        assert_eq!(address_of(PATH), "AA:BB:CC:DD:EE:FF");
+    }
+
+    #[test]
+    fn device_from_object_takes_a_connected_device_with_a_battery() {
+        let info = device_from_object(PATH, &object(true, "MX Keys", true)).unwrap();
+        assert_eq!(info.name, "MX Keys");
+        assert_eq!(info.locator.as_deref(), Some("AA:BB:CC:DD:EE:FF"));
+        let unnamed = device_from_object(PATH, &object(true, "", true)).unwrap();
+        assert_eq!(unnamed.name, "AA:BB:CC:DD:EE:FF");
+        assert!(device_from_object(PATH, &object(false, "MX Keys", true)).is_none());
+        assert!(device_from_object(PATH, &object(true, "MX Keys", false)).is_none());
+    }
 
     #[test]
     fn debouncer_first_call_fires() {
