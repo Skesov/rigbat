@@ -1,5 +1,6 @@
 pub mod display;
 pub mod estimate;
+pub mod kind;
 pub mod primary;
 pub mod roster;
 pub mod text;
@@ -9,6 +10,7 @@ pub mod version;
 
 pub use display::*;
 pub use estimate::*;
+pub use kind::*;
 pub use primary::*;
 pub use roster::*;
 pub use text::*;
