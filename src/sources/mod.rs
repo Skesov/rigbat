@@ -4,6 +4,7 @@ use crate::domain::{BatteryReading, DeviceInfo};
 
 pub mod bluez;
 pub mod context;
+pub mod corsair;
 pub mod eightbitdo;
 pub mod headsets;
 pub mod hidraw;

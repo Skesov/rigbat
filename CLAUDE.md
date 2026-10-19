@@ -5,7 +5,7 @@ System tray battery monitor for gaming peripherals (Linux), written in Rust.
 ## Status
 
 Working: `rigbat list` / `--json` / `--wide` / `--waybar` / `tray` / `settings`. Sources: sysfs,
-bluez, steelseries, eightbitdo, headsets, kysona (via `discovery::discover_all`, re-discovered live so hotplugged
+bluez, steelseries, eightbitdo, headsets, kysona, corsair (via `discovery::discover_all`, re-discovered live so hotplugged
 devices appear; BlueZ signals debounced, and a backend whose sweep _fails_ does not retire its
 devices — an empty result and an error are different things). Devices retain their last reading
 across drops (`Presence`: Online/Unreachable/Disconnected/NoAccess) and render dimmed while unreachable,
@@ -109,7 +109,7 @@ src/
 ├── clock.rs       # clock::now(): domain::BootTime from CLOCK_BOOTTIME (counts suspend)
 ├── sources/       # BatterySource + BatteryBackend + Context (shared system bus) +
 │                 # supervise (bus-watcher retry); sysfs/bluez/steelseries/eightbitdo/
-│                 # headsets/kysona
+│                 # headsets/kysona/corsair
 ├── discovery/     # discover_all + registry::backends()
 ├── cli/           # output adapter: table / --json / --wide; waybar.rs: --waybar line + loop
 ├── tray/          # manager.rs (icon set + run loop), item.rs (SNI item + menu),

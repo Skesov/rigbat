@@ -1,6 +1,6 @@
 use crate::sources::{
-    BatteryBackend, bluez::BluezBackend, eightbitdo::EightBitDoBackend, headsets,
-    hidraw::HidrawFamily, kysona::KysonaBackend, steelseries::SteelSeriesBackend,
+    BatteryBackend, bluez::BluezBackend, corsair::CorsairBackend, eightbitdo::EightBitDoBackend,
+    headsets, hidraw::HidrawFamily, kysona::KysonaBackend, steelseries::SteelSeriesBackend,
     sysfs::SysfsBackend,
 };
 
@@ -17,6 +17,7 @@ pub fn backends() -> Vec<Box<dyn BatteryBackend>> {
         Box::new(headsets::CORSAIR_VOID),
         Box::new(headsets::LOGITECH_G533),
         Box::new(KysonaBackend),
+        Box::new(CorsairBackend),
     ]
 }
 
@@ -48,6 +49,7 @@ mod tests {
                 "corsair-void",
                 "logitech-g533",
                 "kysona",
+                "corsair",
             ]
         );
     }
@@ -72,6 +74,7 @@ mod tests {
                 vec![0x1B1C],
                 vec![0x046D],
                 vec![0x3554, 0x373B],
+                vec![0x1B1C],
             ]
         );
     }

@@ -56,6 +56,13 @@ The rest speak a vendor protocol over `/dev/hidraw`, and those need the device t
   (shown as "Pulsar Mouse"), ATK VXE R1 SE+, Kysona M600, VXE Dragonfly R1 Pro. Where the kernel
   already reports the mouse's battery, the sysfs backend shows it instead. Protocol notes:
   [docs/kysona.md](docs/kysona.md).
+- **Corsair wireless mice and keyboards** — untested, reports welcome: through a Slipstream
+  receiver, or on the cable: Ironclaw RGB Wireless / Wireless SE, Harpoon RGB Wireless / V2
+  Wireless, Dark Core RGB Pro / Pro SE, Darkstar RGB Wireless, M65 RGB Ultra Wireless, M75 / M75
+  Air Wireless, Nightsabre Wireless, Sabre RGB Pro Wireless, Scimitar RGB Elite Wireless / Elite
+  Wireless SE, K57 RGB Wireless, K65 Plus Wireless, K70 Core TKL Wireless. A receiver shows as one
+  device with the battery of its first connected paired device. Protocol notes and the models left
+  out: [docs/corsair.md](docs/corsair.md).
 
 Adding a device to either table is a small, well-scoped change: see
 [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/adding-a-device.md](docs/adding-a-device.md).
