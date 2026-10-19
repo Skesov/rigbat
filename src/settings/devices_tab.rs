@@ -1233,7 +1233,6 @@ mod tests {
         ctx.fonts_mut(|fonts| assert!(crate::egui_test::has_glyphs(fonts, &font, RESET)));
     }
 
-    /// Defaults of 20 % and 60 s.
     fn defaults() -> Config {
         Config {
             low_threshold: 20,
