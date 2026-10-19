@@ -71,8 +71,10 @@ Start from `src/sources/steelseries.rs` (request/response) or `src/sources/eight
   and product id, and the battery interface (`None` for a single-interface device),
 - `hidraw_family()` returning it, and `discover()` calling `hidraw::discover(&FAMILY)`, which
   walks `/sys/class/hidraw` off the async runtime and matches vendor/product/interface,
-- `poll()` that opens the node through `hidraw::open_verified` with `O_NONBLOCK`, waits with
-  `nix::poll` (so it never hangs), and parses the report,
+- reading through the shared hidraw I/O, which opens the node through `hidraw::open_verified`
+  with `O_NONBLOCK` and waits with a deadline (so it never hangs): a request/response device
+  implements `hidraw::ReadBattery` with `hidraw::exchange` and is served by
+  `hidraw::HandleSource`; a stream-only device reads with `hidraw::next_report` in its own `poll()`,
 - a handle policy chosen from the protocol: a request/response device keeps its handle for the
   source's lifetime, a stream-only device opens per poll,
 - pure `parse_*` functions with unit tests.
