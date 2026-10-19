@@ -793,7 +793,8 @@ mod own_runtime_tests {
     /// node behind, however deep the task that holds it was spawned.
     #[tokio::test]
     async fn dropping_the_own_runtime_stops_every_task_and_closes_its_handles() {
-        let node = std::env::temp_dir().join(format!("rigbat-own-runtime-{}", std::process::id()));
+        let scratch = crate::test_support::ScratchDir::new("own-runtime");
+        let node = scratch.join("node");
         std::fs::write(&node, b"").unwrap();
         let (alive_tx, mut alive_rx) = tokio::sync::mpsc::channel::<()>(1);
         let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
@@ -822,6 +823,5 @@ mod own_runtime_tests {
         let closed = tokio::time::timeout(Duration::from_secs(5), alive_rx.recv()).await;
         assert_eq!(closed, Ok(None), "a task outlived the runtime");
         assert_eq!(open_fds_to(&node), 0, "the device handle stayed open");
-        std::fs::remove_file(&node).unwrap();
     }
 }
