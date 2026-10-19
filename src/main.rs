@@ -77,16 +77,13 @@ fn parse_args(args: &[String]) -> Invocation {
     }
 
     let wide = args.iter().any(|a| a == "--wide");
-    // --json and --waybar are legacy flag-style mode selectors, not subcommand
-    // names.
     let json = args.iter().any(|a| a == "--json");
     let waybar = args.iter().any(|a| a == "--waybar");
     if json && waybar {
         return Invocation::UsageError("--json and --waybar are mutually exclusive".to_string());
     }
 
-    // Unknown flags are rejected before any mode is chosen. Returning on
-    // --json first would swallow them: `rigbat --oops --json` printed JSON.
+    // Unknown flags are rejected before any mode is chosen, wherever they appear.
     if let Some(unknown_flag) = args
         .iter()
         .find(|a| a.starts_with('-') && !MODE_FLAGS.contains(&a.as_str()))
@@ -100,9 +97,7 @@ fn parse_args(args: &[String]) -> Invocation {
         Some(tok) => tok.as_str(),
     };
 
-    // A mode selector only makes sense for the one-shot reading. Pairing it
-    // with a subcommand used to win silently, so `rigbat tray --json` printed
-    // one JSON line and exited 0 instead of starting the daemon.
+    // A mode selector only makes sense for the one-shot reading.
     if (json || waybar) && mode != "list" {
         let flag = if json { "--json" } else { "--waybar" };
         return Invocation::UsageError(format!("{flag} cannot be combined with `{mode}`"));
@@ -233,9 +228,9 @@ fn init_logging(invocation: &Invocation) {
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
-/// The logging defaults an `Invocation` maps to: the daemons (`tray`,
-/// `settings`, and now the long-lived `--waybar` module) run chatty, one-shot
-/// CLI output stays quiet.
+/// The logging defaults an `Invocation` maps to: the long-running processes
+/// (`tray`, `settings`, `dashboard`, `--waybar`) run chatty, one-shot CLI
+/// output stays quiet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogProfile {
     Daemon,
@@ -284,16 +279,7 @@ fn resolve_filter_directive(
         .unwrap_or_else(|| default_filter_level(profile).to_owned())
 }
 
-struct CliOpts {
-    wide: bool,
-}
-
 async fn async_main(invocation: Invocation) {
-    let opts = match &invocation {
-        Invocation::List { wide } => CliOpts { wide: *wide },
-        _ => CliOpts { wide: false },
-    };
-
     if invocation == Invocation::Tray {
         run_tray().await;
         return;
@@ -311,7 +297,7 @@ async fn async_main(invocation: Invocation) {
 
     if invocation == Invocation::Json {
         cli::print_json(&rows);
-    } else if opts.wide {
+    } else if invocation == (Invocation::List { wide: true }) {
         cli::print_table_wide(&rows);
     } else {
         cli::print_table(&rows);
@@ -460,12 +446,8 @@ async fn run_waybar() {
     let (state_tx, state_rx) = tokio::sync::watch::channel(domain::TrayState { devices: vec![] });
     let mut source = waybar_source(conn.as_ref(), tray_running, &state_tx, &config_tx).await;
 
-    // A receiver of our own, so a primary_device/hidden_devices edit is
-    // picked up even between two TrayState publications. config_tx must
-    // outlive the loop for the same reason run_tray keeps its config_tx
-    // alive: it is the sole sender, and dropping it makes every source task's
-    // config_rx.changed() resolve with an error, spinning that task's select
-    // loop.
+    // A receiver of our own, so a primary_device/hidden_devices edit is picked
+    // up between two TrayState publications; config_tx outlives the loop, as in run_tray.
     let module = cli::waybar::run(state_rx, config_tx.subscribe());
     tokio::pin!(module);
     loop {
@@ -596,39 +578,22 @@ mod tests {
     }
 
     #[test]
-    fn wide_flag_after_subcommand() {
-        let args = s(&["list", "--wide"]);
-        assert_eq!(parse_args(&args), Invocation::List { wide: true });
-    }
-
-    #[test]
-    fn wide_flag_before_subcommand() {
-        let args = s(&["--wide", "list"]);
-        assert_eq!(parse_args(&args), Invocation::List { wide: true });
-    }
-
-    #[test]
-    fn wide_flag_alone() {
-        let args = s(&["--wide"]);
-        assert_eq!(parse_args(&args), Invocation::List { wide: true });
-    }
-
-    #[test]
-    fn no_wide_flag_default() {
-        let args = s(&["list"]);
-        assert_eq!(parse_args(&args), Invocation::List { wide: false });
+    fn wide_flag_anywhere_selects_the_wide_list() {
+        for (argv, wide) in [
+            (vec!["list", "--wide"], true),
+            (vec!["--wide", "list"], true),
+            (vec!["--wide"], true),
+            (vec!["list"], false),
+            (vec![], false),
+        ] {
+            assert_eq!(parse_args(&s(&argv)), Invocation::List { wide }, "{argv:?}");
+        }
     }
 
     #[test]
     fn mode_tray_no_wide() {
         let args = s(&["tray"]);
         assert_eq!(parse_args(&args), Invocation::Tray);
-    }
-
-    #[test]
-    fn no_args_defaults_to_list() {
-        let args = s(&[]);
-        assert_eq!(parse_args(&args), Invocation::List { wide: false });
     }
 
     #[test]
@@ -651,8 +616,7 @@ mod tests {
     }
 
     /// `--json` is a mode, so pairing it with a subcommand is a contradiction,
-    /// not a preference. It used to win silently: `rigbat tray --json` printed
-    /// one reading and exited 0 instead of starting the daemon.
+    /// not a preference.
     #[test]
     fn mode_flag_with_a_subcommand_is_a_usage_error() {
         for (argv, expected) in [
@@ -683,8 +647,6 @@ mod tests {
         assert_eq!(parse_args(&s(&["list", "--waybar"])), Invocation::Waybar);
     }
 
-    /// An unknown flag was swallowed whenever a mode flag sat beside it,
-    /// because the mode returned before anything validated the rest.
     #[test]
     fn unknown_flag_is_reported_even_beside_a_mode_flag() {
         assert_eq!(
@@ -743,45 +705,17 @@ mod tests {
     }
 
     #[test]
-    fn default_filter_level_tray_is_info() {
-        assert_eq!(
-            default_filter_level(LogProfile::from(&Invocation::Tray)),
-            "info"
-        );
-    }
-
-    #[test]
-    fn default_filter_level_settings_is_info() {
-        assert_eq!(
-            default_filter_level(LogProfile::from(&Invocation::Settings(
-                settings::Tab::General
-            ))),
-            "info"
-        );
-    }
-
-    #[test]
-    fn default_filter_level_list_is_warn() {
-        assert_eq!(
-            default_filter_level(LogProfile::from(&Invocation::List { wide: false })),
-            "warn"
-        );
-    }
-
-    #[test]
-    fn default_filter_level_json_is_warn() {
-        assert_eq!(
-            default_filter_level(LogProfile::from(&Invocation::Json)),
-            "warn"
-        );
-    }
-
-    #[test]
-    fn default_filter_level_waybar_is_info() {
-        assert_eq!(
-            default_filter_level(LogProfile::from(&Invocation::Waybar)),
-            "info"
-        );
+    fn long_running_modes_log_info_and_one_shot_modes_warn() {
+        for (invocation, level) in [
+            (Invocation::Tray, "info"),
+            (Invocation::Settings(settings::Tab::General), "info"),
+            (Invocation::Waybar, "info"),
+            (Invocation::List { wide: false }, "warn"),
+            (Invocation::Json, "warn"),
+        ] {
+            let level_of = default_filter_level(LogProfile::from(&invocation));
+            assert_eq!(level_of, level, "{invocation:?}");
+        }
     }
 
     #[test]
