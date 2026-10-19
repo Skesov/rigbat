@@ -64,7 +64,7 @@ Add a file `src/sources/<vendor>.rs`, implement `BatteryBackend` + `BatterySourc
 Pick the granularity that fits the protocol:
 
 - **Self-describing** (the protocol reports its own capabilities) — one backend covers
-  many devices with no per-device code. Reference: `src/sources/bluez.rs` (BlueZ Battery1).
+  many devices with no per-device code. Reference: `src/sources/bluez/mod.rs` (BlueZ Battery1).
 - **Device table** (devices differ, matched by USB vendor/product id) — declare a
   `HidrawFamily` and keep per-device quirks in the backend. Reference: `src/sources/steelseries.rs`.
 
