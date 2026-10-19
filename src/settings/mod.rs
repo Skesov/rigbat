@@ -252,6 +252,13 @@ impl SettingsApp {
         }
     }
 
+    /// Drops the banner of an earlier failure when the same action runs again.
+    fn clear_problem(&mut self, same_action: impl Fn(&ActionProblem) -> bool) {
+        if self.action_problem.as_ref().is_some_and(same_action) {
+            self.action_problem = None;
+        }
+    }
+
     /// Scans unless a scan is in flight, and re-reads the inventory. Without a
     /// tray this polls every device; it runs only on window open or a Refresh
     /// click, so the wake-up it costs is one the user asked for.

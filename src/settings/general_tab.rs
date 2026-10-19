@@ -205,9 +205,7 @@ impl SettingsApp {
         }
         let on = self.autostart_enabled;
         let result = (self.set_autostart)(on);
-        if matches!(self.action_problem, Some(ActionProblem::Autostart { .. })) {
-            self.action_problem = None;
-        }
+        self.clear_problem(|p| matches!(p, ActionProblem::Autostart { .. }));
         if let Err(e) = result {
             tracing::warn!("failed to update autostart: {e:#}");
             self.action_problem = Some(ActionProblem::Autostart {

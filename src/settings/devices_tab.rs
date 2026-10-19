@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 use eframe::egui;
@@ -6,7 +5,7 @@ use eframe::egui;
 use super::devices::{self, DeleteCell, DeleteState, DeviceRow, Dismissible, EscapeAction};
 use super::general_tab::{interval_combo, interval_label, threshold_slider};
 use super::{ActionProblem, SettingsApp, Tab, open_uri, scan, widgets};
-use crate::config::DeviceSettings;
+use crate::config::{Config, DeviceSettings};
 use crate::domain::{
     DeviceId, INSTALL_UDEV_RULE, Presence, PrimaryStatus, TrayMode, charge_value, classify,
     status_note,
@@ -181,7 +180,7 @@ impl SettingsApp {
         });
         if let Some(shown) = shown {
             let name = name.to_owned();
-            self.persist(move |target| toggle_hidden(&mut target.hidden_devices, &name, shown));
+            self.persist(move |target| set_shown(&mut target.hidden_devices, &name, shown));
         }
         if response.clicked() {
             self.toggle_expanded(&row.device);
@@ -214,12 +213,7 @@ impl SettingsApp {
                 None,
             );
         }
-        let threshold = self
-            .config
-            .device_overrides
-            .get(&row.device.name)
-            .and_then(|d| d.low_threshold)
-            .unwrap_or(self.config.low_threshold);
+        let threshold = self.config.effective_low_threshold(&row.device.name);
         let status = classify(row.charge, threshold);
         let text = charge_value(
             row.presence,
@@ -252,12 +246,27 @@ impl SettingsApp {
 
     fn render_device_settings(&mut self, rows: &mut widgets::Rows<'_>, row: &DeviceRow) {
         let lang = self.config.lang();
-        let l = loader(lang);
-        let name = row.device.name.as_str();
-
         let about = device_about(row, lang);
-        rows.row(&fl!(l, "device-about"), widgets::subtitle(&about), |_| ());
+        rows.row(
+            &fl!(loader(lang), "device-about"),
+            widgets::subtitle(&about),
+            |_| (),
+        );
+        self.render_pin_row(rows, &row.device);
+        let own = self
+            .config
+            .device_overrides
+            .get(&row.device.name)
+            .cloned()
+            .unwrap_or_default();
+        self.render_threshold_row(rows, &row.device.name, &own);
+        self.render_interval_row(rows, &row.device, &own);
+        self.render_remove_row(rows, row);
+    }
 
+    fn render_pin_row(&mut self, rows: &mut widgets::Rows<'_>, device: &DeviceId) {
+        let l = loader(self.config.lang());
+        let name = device.name.as_str();
         let title = fl!(l, "device-pin");
         let hint =
             (self.config.tray_mode == TrayMode::PerDevice).then(|| fl!(l, "device-pin-hint"));
@@ -270,31 +279,27 @@ impl SettingsApp {
                 }
             },
             |ui| {
-                widgets::switch(
-                    ui,
-                    device_switch_id("pin", &row.device),
-                    &mut pinned,
-                    &title,
-                )
-                .changed()
+                widgets::switch(ui, device_switch_id("pin", device), &mut pinned, &title).changed()
             },
         );
         if toggled {
             let name = name.to_owned();
             self.persist(move |target| toggle_primary(&mut target.primary_device, &name, pinned));
         }
+    }
 
-        let own = self
-            .config
-            .device_overrides
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
+    fn render_threshold_row(
+        &mut self,
+        rows: &mut widgets::Rows<'_>,
+        name: &str,
+        own: &DeviceSettings,
+    ) {
+        let lang = self.config.lang();
         let default_threshold = self.config.low_threshold;
         let mut threshold = own.low_threshold.unwrap_or(default_threshold);
         let mut reset = false;
         let committed = rows.row(
-            &fl!(l, "default-low-threshold"),
+            &fl!(loader(lang), "default-low-threshold"),
             |ui| {
                 reset = default_subtitle(
                     ui,
@@ -306,29 +311,35 @@ impl SettingsApp {
             |ui| threshold_slider(ui, &mut threshold),
         );
         if reset {
-            self.save_threshold_override(name, None);
+            self.save_override(name, |own| own.low_threshold = None);
         } else if committed {
-            self.save_threshold_override(name, Some(threshold));
+            self.save_override(name, |own| own.low_threshold = Some(threshold));
         }
+    }
 
+    fn render_interval_row(
+        &mut self,
+        rows: &mut widgets::Rows<'_>,
+        device: &DeviceId,
+        own: &DeviceSettings,
+    ) {
+        let lang = self.config.lang();
         let default_interval = self.config.poll_interval_secs;
         let current = own.poll_interval_secs.unwrap_or(default_interval);
         let mut reset = false;
         let chosen = rows.row(
-            &fl!(l, "default-poll-interval"),
+            &fl!(loader(lang), "default-poll-interval"),
             |ui| {
                 let default = interval_label(default_interval, lang);
                 reset = default_subtitle(ui, own.poll_interval_secs.is_some(), &default, lang);
             },
-            |ui| interval_combo(ui, ("device-interval", &row.device), current, lang),
+            |ui| interval_combo(ui, ("device-interval", device), current, lang),
         );
         if reset {
-            self.save_interval_override(name, None);
+            self.save_override(&device.name, |own| own.poll_interval_secs = None);
         } else if let Some(interval) = chosen {
-            self.save_interval_override(name, Some(interval));
+            self.save_override(&device.name, |own| own.poll_interval_secs = Some(interval));
         }
-
-        self.render_remove_row(rows, row);
     }
 
     /// `Remove…` arms, then `Remove` deletes: never on the first click.
@@ -375,53 +386,12 @@ impl SettingsApp {
         }
     }
 
-    /// Writes one device's threshold override, leaving its interval override
-    /// as the on-disk config has it — the two controls are rendered
-    /// separately, so neither may write the other's field from a snapshot.
-    fn save_threshold_override(&mut self, name: &str, threshold: Option<u8>) {
+    /// Edits one field of a device's overrides in the config being written:
+    /// the other field and the defaults come from the on-disk config, which
+    /// may have changed since this window opened.
+    fn save_override(&mut self, name: &str, edit: impl FnOnce(&mut DeviceSettings)) {
         let name = name.to_string();
-        self.persist(move |target| {
-            // Defaults come from `target`, the config being written, not from
-            // the window's snapshot: `apply_device_override` drops an override
-            // equal to the current default, and a second settings window (there
-            // is no single-instance guard) can have changed that default since
-            // this one opened.
-            let default_threshold = target.low_threshold;
-            let default_interval = target.poll_interval_secs;
-            let interval = target
-                .device_overrides
-                .get(&name)
-                .and_then(|d| d.poll_interval_secs);
-            apply_device_override(
-                &mut target.device_overrides,
-                &name,
-                threshold,
-                interval,
-                default_threshold,
-                default_interval,
-            );
-        });
-    }
-
-    /// The interval half of `save_threshold_override`.
-    fn save_interval_override(&mut self, name: &str, interval: Option<u64>) {
-        let name = name.to_string();
-        self.persist(move |target| {
-            let default_threshold = target.low_threshold;
-            let default_interval = target.poll_interval_secs;
-            let threshold = target
-                .device_overrides
-                .get(&name)
-                .and_then(|d| d.low_threshold);
-            apply_device_override(
-                &mut target.device_overrides,
-                &name,
-                threshold,
-                interval,
-                default_threshold,
-                default_interval,
-            );
-        });
+        self.persist(move |target| apply_device_override(target, &name, edit));
     }
 
     /// Deletes the inventory row and readings, the `hidden_devices` entry and
@@ -438,9 +408,7 @@ impl SettingsApp {
     /// Forgets the device once the inventory dropped it; says so in the window when it did not.
     fn finish_delete(&mut self, store_id: i64, device: &DeviceId, deleted: anyhow::Result<()>) {
         let name = device.name.as_str();
-        if matches!(self.action_problem, Some(ActionProblem::Remove { .. })) {
-            self.action_problem = None;
-        }
+        self.clear_problem(|p| matches!(p, ActionProblem::Remove { .. }));
         if let Err(e) = deleted {
             tracing::error!("failed to delete device {name:?} from inventory: {e:#}");
             self.action_problem = Some(ActionProblem::Remove {
@@ -453,7 +421,7 @@ impl SettingsApp {
 
         let forgotten = name.to_string();
         self.persist(move |target| {
-            toggle_hidden(&mut target.hidden_devices, &forgotten, true);
+            set_shown(&mut target.hidden_devices, &forgotten, true);
             toggle_primary(&mut target.primary_device, &forgotten, false);
         });
         devices::remove_row(&mut self.device_rows, store_id);
@@ -525,41 +493,32 @@ fn device_switch_id(purpose: &str, device: &DeviceId) -> egui::Id {
     egui::Id::new(("device-switch", purpose, device))
 }
 
-/// Applies a device's desired threshold/interval override to `overrides`.
-///
-/// A `None` field means "no override for that field"; a value equal to its
-/// global default is treated the same as `None` so the config never carries a
-/// redundant override. The device's entry is removed once both fields resolve
-/// to "no override", keeping `device_overrides` free of empty placeholders.
-fn apply_device_override(
-    overrides: &mut HashMap<String, DeviceSettings>,
-    name: &str,
-    threshold: Option<u8>,
-    interval: Option<u64>,
-    default_threshold: u8,
-    default_interval: u64,
-) {
-    let threshold = threshold.filter(|&t| t != default_threshold);
-    let interval = interval.filter(|&i| i != default_interval);
-    if threshold.is_none() && interval.is_none() {
-        overrides.remove(name);
+/// Applies `edit` to `name`'s overrides in `config`. A field equal to its
+/// global default is no override, and an entry left with neither is removed,
+/// so the config never carries a redundant override.
+fn apply_device_override(config: &mut Config, name: &str, edit: impl FnOnce(&mut DeviceSettings)) {
+    let mut own = config
+        .device_overrides
+        .get(name)
+        .cloned()
+        .unwrap_or_default();
+    edit(&mut own);
+    own.low_threshold = own.low_threshold.filter(|&t| t != config.low_threshold);
+    own.poll_interval_secs = own
+        .poll_interval_secs
+        .filter(|&i| i != config.poll_interval_secs);
+    if own == DeviceSettings::default() {
+        config.device_overrides.remove(name);
     } else {
-        overrides.insert(
-            name.to_string(),
-            DeviceSettings {
-                poll_interval_secs: interval,
-                low_threshold: threshold,
-            },
-        );
+        config.device_overrides.insert(name.to_string(), own);
     }
 }
 
-/// Toggles whether `name` is hidden: `show = true` removes it from
-/// `hidden_devices` (if present), `show = false` adds it (if absent).
-/// Exactly one entry changes; every other entry — including one for a device
-/// that is not in the currently-discovered list — is left untouched.
-fn toggle_hidden(hidden_devices: &mut Vec<String>, name: &str, show: bool) {
-    if show {
+/// Exactly one entry changes: `shown` removes `name` from `hidden_devices`,
+/// else adds it; every other entry — including one for a device that is not
+/// in the currently-discovered list — is left untouched.
+fn set_shown(hidden_devices: &mut Vec<String>, name: &str, shown: bool) {
+    if shown {
         hidden_devices.retain(|n| n != name);
     } else if !hidden_devices.iter().any(|n| n == name) {
         hidden_devices.push(name.to_string());
@@ -584,7 +543,7 @@ fn toggle_primary(primary_device: &mut Option<String>, name: &str, make_primary:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{self, Config};
+    use crate::config;
     use crate::domain::{
         BatteryReading, CHARGING_SIGN, ChargeState, DeviceKind, LOW_SIGN, Transport, format_age,
         format_coarse, state_label,
@@ -595,6 +554,7 @@ mod tests {
     };
     use crate::settings::WINDOW_MIN_SIZE;
     use crate::settings::tests::{app_saving_to, settings_app_with, tab_size};
+    use std::collections::HashMap;
 
     /// The narrowest the window gets, tall enough that nothing scrolls.
     const TEST_SIZE: [f32; 2] = [WINDOW_MIN_SIZE[0], 1400.0];
@@ -1283,12 +1243,28 @@ mod tests {
         ctx.fonts_mut(|fonts| assert!(crate::egui_test::has_glyphs(fonts, &font, RESET)));
     }
 
+    /// Defaults of 20 % and 60 s.
+    fn defaults() -> Config {
+        Config {
+            low_threshold: 20,
+            poll_interval_secs: 60,
+            ..Config::default()
+        }
+    }
+
+    fn set(threshold: Option<u8>, interval: Option<u64>) -> impl FnOnce(&mut DeviceSettings) {
+        move |own| {
+            own.low_threshold = threshold;
+            own.poll_interval_secs = interval;
+        }
+    }
+
     #[test]
     fn apply_device_override_sets_both_fields() {
-        let mut overrides = HashMap::new();
-        apply_device_override(&mut overrides, "mouse", Some(10), Some(30), 20, 60);
+        let mut config = defaults();
+        apply_device_override(&mut config, "mouse", set(Some(10), Some(30)));
         assert_eq!(
-            overrides.get("mouse"),
+            config.device_overrides.get("mouse"),
             Some(&DeviceSettings {
                 poll_interval_secs: Some(30),
                 low_threshold: Some(10),
@@ -1298,31 +1274,31 @@ mod tests {
 
     #[test]
     fn apply_device_override_clearing_removes_key() {
-        let mut overrides = HashMap::new();
-        overrides.insert(
+        let mut config = defaults();
+        config.device_overrides.insert(
             "mouse".to_string(),
             DeviceSettings {
                 poll_interval_secs: Some(30),
                 low_threshold: Some(10),
             },
         );
-        apply_device_override(&mut overrides, "mouse", None, None, 20, 60);
-        assert!(!overrides.contains_key("mouse"));
+        apply_device_override(&mut config, "mouse", set(None, None));
+        assert!(!config.device_overrides.contains_key("mouse"));
     }
 
     #[test]
     fn apply_device_override_equal_to_default_removes_key() {
-        let mut overrides = HashMap::new();
-        apply_device_override(&mut overrides, "mouse", Some(20), Some(60), 20, 60);
-        assert!(!overrides.contains_key("mouse"));
+        let mut config = defaults();
+        apply_device_override(&mut config, "mouse", set(Some(20), Some(60)));
+        assert!(!config.device_overrides.contains_key("mouse"));
     }
 
     #[test]
     fn apply_device_override_partial_keeps_only_non_default_field() {
-        let mut overrides = HashMap::new();
-        apply_device_override(&mut overrides, "mouse", Some(15), Some(60), 20, 60);
+        let mut config = defaults();
+        apply_device_override(&mut config, "mouse", set(Some(15), Some(60)));
         assert_eq!(
-            overrides.get("mouse"),
+            config.device_overrides.get("mouse"),
             Some(&DeviceSettings {
                 poll_interval_secs: None,
                 low_threshold: Some(15),
@@ -1331,9 +1307,23 @@ mod tests {
     }
 
     #[test]
-    fn toggle_hidden_unchecking_adds_entry() {
+    fn apply_device_override_edits_one_field_and_keeps_the_other() {
+        let mut config = defaults();
+        apply_device_override(&mut config, "mouse", set(Some(10), Some(30)));
+        apply_device_override(&mut config, "mouse", |own| own.low_threshold = None);
+        assert_eq!(
+            config.device_overrides.get("mouse"),
+            Some(&DeviceSettings {
+                poll_interval_secs: Some(30),
+                low_threshold: None,
+            })
+        );
+    }
+
+    #[test]
+    fn set_shown_unchecking_adds_entry() {
         let mut hidden = Vec::new();
-        toggle_hidden(&mut hidden, "mouse", false);
+        set_shown(&mut hidden, "mouse", false);
         assert_eq!(hidden, vec!["mouse".to_string()]);
     }
 
@@ -1368,36 +1358,36 @@ mod tests {
     }
 
     #[test]
-    fn toggle_hidden_checking_removes_entry() {
+    fn set_shown_checking_removes_entry() {
         let mut hidden = vec!["mouse".to_string()];
-        toggle_hidden(&mut hidden, "mouse", true);
+        set_shown(&mut hidden, "mouse", true);
         assert!(hidden.is_empty());
     }
 
     #[test]
-    fn toggle_hidden_leaves_unrelated_entries_untouched() {
+    fn set_shown_leaves_unrelated_entries_untouched() {
         // An entry for a device that is not in the roster survives a toggle.
         let mut hidden = vec!["offline-device".to_string()];
-        toggle_hidden(&mut hidden, "mouse", false);
+        set_shown(&mut hidden, "mouse", false);
         assert_eq!(
             hidden,
             vec!["offline-device".to_string(), "mouse".to_string()]
         );
-        toggle_hidden(&mut hidden, "mouse", true);
+        set_shown(&mut hidden, "mouse", true);
         assert_eq!(hidden, vec!["offline-device".to_string()]);
     }
 
     #[test]
-    fn toggle_hidden_checking_already_shown_is_noop() {
+    fn set_shown_checking_already_shown_is_noop() {
         let mut hidden = vec!["keyboard".to_string()];
-        toggle_hidden(&mut hidden, "mouse", true);
+        set_shown(&mut hidden, "mouse", true);
         assert_eq!(hidden, vec!["keyboard".to_string()]);
     }
 
     #[test]
-    fn toggle_hidden_unchecking_already_hidden_is_noop() {
+    fn set_shown_unchecking_already_hidden_is_noop() {
         let mut hidden = vec!["mouse".to_string()];
-        toggle_hidden(&mut hidden, "mouse", false);
+        set_shown(&mut hidden, "mouse", false);
         assert_eq!(hidden, vec!["mouse".to_string()]);
     }
 }
