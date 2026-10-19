@@ -9,13 +9,13 @@
 //! A node whose HID device already carries a kernel `power_supply` is skipped:
 //! the sysfs backend reports that mouse.
 
-use std::fs::File;
+use std::{fs::File, path::Path};
 
 use crate::domain::{BatteryReading, ChargeState, DeviceKind};
 
 use super::{
     BatteryBackend, BatterySource, Context,
-    hidraw::{self, HandleSource, HidrawFamily, HidrawModel, ReadBattery, Verdict},
+    hidraw::{self, HandleSource, HidrawDevice, HidrawFamily, HidrawModel, ReadBattery, Verdict},
 };
 
 const MOUSE_OFF: &str = "mouse is asleep or off (dongle reported it offline)";
@@ -65,12 +65,16 @@ impl BatteryBackend for KysonaBackend {
     }
 
     async fn discover(&self, _ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
-        Ok(hidraw::discover_unclaimed(&FAMILY)
+        Ok(hidraw::on_live_sysfs(discover_in)
             .await?
             .into_iter()
             .map(|device| HandleSource::boxed(device, KysonaMouse))
             .collect())
     }
+}
+
+fn discover_in(sysfs_root: &Path) -> anyhow::Result<Vec<HidrawDevice>> {
+    FAMILY.discover_unclaimed_in(sysfs_root)
 }
 
 #[derive(Clone)]
@@ -201,6 +205,8 @@ fn classify_battery(report: &[u8]) -> Reply<BatteryReading> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sources::hidraw::fake_sysfs::FakeSysfs;
+    use std::path::PathBuf;
 
     /// A reply to `command` with `payload` from byte 6 on and a valid checksum.
     fn reply(command: Command, payload: &[u8]) -> [u8; REPORT_LEN] {
@@ -313,6 +319,45 @@ mod tests {
         for model in FAMILY.models {
             assert_eq!(model.kind, DeviceKind::Mouse, "{}", model.name);
         }
+    }
+
+    // Discovery against a fake sysfs tree
+
+    #[test]
+    fn discover_in_finds_both_vendor_ids_on_interface_1() {
+        let sysfs = FakeSysfs::new("kysona-vendors");
+        sysfs.add("hidraw0", 0, KYSONA, 0xF508, "");
+        sysfs.add("hidraw1", 1, KYSONA, 0xF508, "");
+        sysfs.add("hidraw2", 1, ATK_DONGLE, 0x1085, "");
+        sysfs.add("hidraw3", 1, ATK_DONGLE, 0xF508, "");
+        let devices = discover_in(&sysfs.class()).unwrap();
+        assert!(devices.iter().all(|d| d.info.kind == DeviceKind::Mouse));
+        let mut found: Vec<_> = devices
+            .into_iter()
+            .map(|d| (d.dev_path, d.info.name))
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                (PathBuf::from("/dev/hidraw1"), "Pulsar Mouse".to_owned()),
+                (PathBuf::from("/dev/hidraw2"), "ATK VXE R1 SE+".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn discover_in_leaves_a_kernel_reported_mouse_to_sysfs() {
+        let sysfs = FakeSysfs::new("kysona-kernel");
+        sysfs.add("hidraw1", 1, KYSONA, 0xF57C, "");
+        sysfs.add("hidraw2", 1, KYSONA, 0xF58A, "");
+        sysfs.add("hidraw3", 1, KYSONA, 0xF507, "");
+        sysfs.add_power_supply("hidraw1", "kysona-hidraw1-battery");
+        std::fs::create_dir_all(sysfs.class().join("hidraw3/device/power_supply")).unwrap();
+        let found = discover_in(&sysfs.class()).unwrap();
+        let mut names: Vec<_> = found.iter().map(|d| d.info.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["Pulsar Mouse", "VXE Dragonfly R1 Pro"]);
     }
 
     mod props {

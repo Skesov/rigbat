@@ -9,7 +9,7 @@
 //! A node whose HID device already carries a kernel `power_supply` is skipped:
 //! the sysfs backend reports that headset.
 
-use std::fs::File;
+use std::{fs::File, path::Path};
 
 use anyhow::Context as _;
 
@@ -18,7 +18,7 @@ use crate::domain::{BatteryReading, ChargeState, DeviceKind};
 use super::{
     BatteryBackend, BatterySource, Context,
     hidraw::{
-        self, HandleSource, HidrawFamily, HidrawModel, ReadBattery, VENDOR_CORSAIR,
+        self, HandleSource, HidrawDevice, HidrawFamily, HidrawModel, ReadBattery, VENDOR_CORSAIR,
         VENDOR_STEELSERIES, Verdict,
     },
 };
@@ -182,8 +182,8 @@ impl BatteryBackend for HeadsetBackend {
     }
 
     async fn discover(&self, _ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
-        let protocol = self.protocol;
-        Ok(hidraw::discover_unclaimed(self.family)
+        let (family, protocol) = (self.family, self.protocol);
+        Ok(hidraw::on_live_sysfs(move |root| discover_in(family, root))
             .await?
             .into_iter()
             .map(|device| {
@@ -192,6 +192,10 @@ impl BatteryBackend for HeadsetBackend {
             })
             .collect())
     }
+}
+
+fn discover_in(family: &HidrawFamily, sysfs_root: &Path) -> anyhow::Result<Vec<HidrawDevice>> {
+    family.discover_unclaimed_in(sysfs_root)
 }
 
 // ── Source ───────────────────────────────────────────────────────────────────
@@ -484,6 +488,8 @@ fn voltage_to_percent(millivolts: u16) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sources::hidraw::fake_sysfs::FakeSysfs;
+    use std::path::PathBuf;
 
     const ALL: [HeadsetBackend; 4] = [ARCTIS_1, ARCTIS_NOVA, CORSAIR_VOID, LOGITECH_G533];
 
@@ -526,6 +532,64 @@ mod tests {
     fn nova_scale_follows_the_product() {
         assert_eq!(nova_scale(0x2202), NovaScale::Steps);
         assert_eq!(nova_scale(0x22A1), NovaScale::Percent);
+    }
+
+    // Discovery against a fake sysfs tree
+
+    #[test]
+    fn discover_in_finds_each_family_on_its_battery_interface() {
+        let sysfs = FakeSysfs::new("headsets-families");
+        for (i, backend) in ALL.iter().enumerate() {
+            let model = &backend.family.models[0];
+            sysfs.add(
+                &format!("hidraw{}", 2 * i),
+                3,
+                model.vendor,
+                model.product,
+                "",
+            );
+            sysfs.add(
+                &format!("hidraw{}", 2 * i + 1),
+                0,
+                model.vendor,
+                model.product,
+                "",
+            );
+        }
+        for (i, backend) in ALL.iter().enumerate() {
+            let found = discover_in(backend.family, &sysfs.class()).unwrap();
+            assert_eq!(found.len(), 1, "{}", backend.name);
+            assert_eq!(
+                found[0].dev_path,
+                PathBuf::from(format!("/dev/hidraw{}", 2 * i))
+            );
+            assert_eq!(found[0].info.name, backend.family.models[0].name);
+            assert_eq!(found[0].info.kind, DeviceKind::Headset);
+        }
+    }
+
+    #[test]
+    fn discover_in_leaves_a_kernel_reported_headset_to_sysfs() {
+        let sysfs = FakeSysfs::new("headsets-kernel");
+        sysfs.add("hidraw1", 3, VENDOR_STEELSERIES, 0x12B6, "");
+        sysfs.add("hidraw2", 3, VENDOR_STEELSERIES, 0x12B3, "");
+        sysfs.add_power_supply("hidraw1", "steelseries_headset_battery_hidraw1");
+        let found = discover_in(&ARCTIS_1_FAMILY, &sysfs.class()).unwrap();
+        let names: Vec<_> = found.iter().map(|d| d.info.name.as_str()).collect();
+        assert_eq!(names, ["SteelSeries Arctis 1 Wireless"]);
+    }
+
+    #[test]
+    fn an_empty_power_supply_directory_is_not_a_kernel_battery() {
+        let sysfs = FakeSysfs::new("headsets-empty-supply");
+        sysfs.add("hidraw1", 3, VENDOR_CORSAIR, 0x0A14, "");
+        std::fs::create_dir_all(sysfs.class().join("hidraw1/device/power_supply")).unwrap();
+        assert_eq!(
+            discover_in(&CORSAIR_VOID_FAMILY, &sysfs.class())
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     // Arctis 1

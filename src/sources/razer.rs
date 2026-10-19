@@ -773,6 +773,30 @@ mod tests {
 
     // Discovery against a fake sysfs tree
 
+    #[test]
+    fn discover_in_takes_interface_0_of_known_products() {
+        let sysfs = FakeSysfs::new("razer-interface");
+        sysfs.add("hidraw0", 0, RAZER, 0x00B7, "");
+        sysfs.add("hidraw1", 1, RAZER, 0x00B7, "");
+        sysfs.add("hidraw2", 2, RAZER, 0x00B7, "");
+        sysfs.add("hidraw3", 0, RAZER, 0x0099, "");
+        sysfs.add("hidraw4", 0, 0x1038, 0x00B7, "");
+        let found: Vec<_> = FAMILY
+            .discover_in(&sysfs.class())
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.dev_path, d.info.name, d.info.kind))
+            .collect();
+        assert_eq!(
+            found,
+            [(
+                PathBuf::from("/dev/hidraw0"),
+                "Razer DeathAdder V3 Pro".to_owned(),
+                DeviceKind::Mouse
+            )]
+        );
+    }
+
     /// Rebinds `node`'s HID device to `driver`, as `razer_mount` does.
     fn bind(sysfs: &FakeSysfs, node: &str, driver: &str) -> PathBuf {
         let hid = std::fs::canonicalize(sysfs.class().join(node).join("device")).unwrap();

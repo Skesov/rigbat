@@ -290,6 +290,8 @@ fn charge_state(status: Option<u32>) -> ChargeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sources::hidraw::fake_sysfs::FakeSysfs;
+    use std::path::PathBuf;
 
     fn reply(first: u8, error: u8, value: &[u8]) -> [u8; REPORT_LEN] {
         let mut report = [0u8; REPORT_LEN];
@@ -429,6 +431,52 @@ mod tests {
                 model.name
             );
         }
+    }
+
+    // Discovery against a fake sysfs tree
+
+    #[test]
+    fn discover_in_finds_receivers_and_cables_on_interface_1() {
+        let sysfs = FakeSysfs::new("corsair-rows");
+        sysfs.add("hidraw0", 0, VENDOR_CORSAIR, 0x1BDC, "");
+        sysfs.add("hidraw1", 1, VENDOR_CORSAIR, 0x1BDC, "");
+        sysfs.add("hidraw2", 2, VENDOR_CORSAIR, 0x1BDC, "");
+        sysfs.add("hidraw3", 1, VENDOR_CORSAIR, 0x1B4C, "");
+        sysfs.add("hidraw4", 1, VENDOR_CORSAIR, 0x2B07, "");
+        sysfs.add("hidraw5", 1, VENDOR_CORSAIR, 0x0A14, "");
+        let mut found: Vec<_> = FAMILY
+            .discover_in(&sysfs.class())
+            .unwrap()
+            .into_iter()
+            .map(|d| {
+                let attachment = attachment_of(d.identity.product);
+                (d.dev_path, d.info.name, d.info.kind, attachment)
+            })
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            found,
+            [
+                (
+                    PathBuf::from("/dev/hidraw1"),
+                    "Corsair Slipstream Receiver".to_owned(),
+                    DeviceKind::Mouse,
+                    Attachment::Receiver,
+                ),
+                (
+                    PathBuf::from("/dev/hidraw3"),
+                    "Corsair Ironclaw RGB Wireless".to_owned(),
+                    DeviceKind::Mouse,
+                    Attachment::Cable,
+                ),
+                (
+                    PathBuf::from("/dev/hidraw4"),
+                    "Corsair K65 Plus Wireless".to_owned(),
+                    DeviceKind::Keyboard,
+                    Attachment::Receiver,
+                ),
+            ]
+        );
     }
 
     #[test]

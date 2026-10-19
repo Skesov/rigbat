@@ -151,18 +151,16 @@ impl HidrawFamily {
     }
 }
 
-/// [`HidrawFamily::discover_in`] on the live sysfs, off the async runtime: the walk is blocking `std::fs`.
+/// [`HidrawFamily::discover_in`] on the live sysfs, off the async runtime.
 pub async fn discover(family: &'static HidrawFamily) -> anyhow::Result<Vec<HidrawDevice>> {
-    tokio::task::spawn_blocking(|| family.discover_in(Path::new(SYSFS_HIDRAW)))
-        .await
-        .context("spawn_blocking")?
+    on_live_sysfs(|root| family.discover_in(root)).await
 }
 
-/// [`HidrawFamily::discover_unclaimed_in`] on the live sysfs, off the async runtime.
-pub async fn discover_unclaimed(
-    family: &'static HidrawFamily,
+/// Runs a discovery `walk` against the live sysfs, off the async runtime: the walk is blocking `std::fs`.
+pub async fn on_live_sysfs(
+    walk: impl FnOnce(&Path) -> anyhow::Result<Vec<HidrawDevice>> + Send + 'static,
 ) -> anyhow::Result<Vec<HidrawDevice>> {
-    tokio::task::spawn_blocking(|| family.discover_unclaimed_in(Path::new(SYSFS_HIDRAW)))
+    tokio::task::spawn_blocking(|| walk(Path::new(SYSFS_HIDRAW)))
         .await
         .context("spawn_blocking")?
 }
