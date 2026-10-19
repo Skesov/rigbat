@@ -17,7 +17,10 @@ use crate::domain::{BatteryReading, ChargeState, DeviceKind};
 
 use super::{
     BatteryBackend, BatterySource, Context,
-    hidraw::{self, HandleSource, HidrawFamily, HidrawModel, ReadBattery, Verdict},
+    hidraw::{
+        self, HandleSource, HidrawFamily, HidrawModel, ReadBattery, VENDOR_CORSAIR,
+        VENDOR_STEELSERIES, Verdict,
+    },
 };
 
 const HEADSET_OFF: &str =
@@ -25,8 +28,6 @@ const HEADSET_OFF: &str =
 
 // ── Device tables ────────────────────────────────────────────────────────────
 
-const STEELSERIES: u16 = 0x1038;
-const CORSAIR: u16 = 0x1B1C;
 const LOGITECH: u16 = 0x046D;
 
 const fn headset(vendor: u16, product: u16, name: &'static str) -> HidrawModel {
@@ -40,10 +41,14 @@ const fn headset(vendor: u16, product: u16, name: &'static str) -> HidrawModel {
 
 static ARCTIS_1_FAMILY: HidrawFamily = HidrawFamily {
     models: &[
-        headset(STEELSERIES, 0x12B3, "SteelSeries Arctis 1 Wireless"),
-        headset(STEELSERIES, 0x12B6, "SteelSeries Arctis 1 Wireless Xbox"),
-        headset(STEELSERIES, 0x12D7, "SteelSeries Arctis 7X"),
-        headset(STEELSERIES, 0x12D5, "SteelSeries Arctis 7P"),
+        headset(VENDOR_STEELSERIES, 0x12B3, "SteelSeries Arctis 1 Wireless"),
+        headset(
+            VENDOR_STEELSERIES,
+            0x12B6,
+            "SteelSeries Arctis 1 Wireless Xbox",
+        ),
+        headset(VENDOR_STEELSERIES, 0x12D7, "SteelSeries Arctis 7X"),
+        headset(VENDOR_STEELSERIES, 0x12D5, "SteelSeries Arctis 7P"),
     ],
     interface: Some(3),
 };
@@ -52,21 +57,49 @@ static ARCTIS_1_FAMILY: HidrawFamily = HidrawFamily {
 /// one name so the device keeps its identity.
 static ARCTIS_NOVA_FAMILY: HidrawFamily = HidrawFamily {
     models: &[
-        headset(STEELSERIES, 0x2202, "SteelSeries Arctis Nova 7"),
-        headset(STEELSERIES, 0x22A1, "SteelSeries Arctis Nova 7"),
-        headset(STEELSERIES, 0x227E, "SteelSeries Arctis Nova 7 Gen 2"),
-        headset(STEELSERIES, 0x2206, "SteelSeries Arctis Nova 7X"),
-        headset(STEELSERIES, 0x22A4, "SteelSeries Arctis Nova 7X"),
-        headset(STEELSERIES, 0x22A5, "SteelSeries Arctis Nova 7X"),
-        headset(STEELSERIES, 0x2258, "SteelSeries Arctis Nova 7X Gen 2"),
-        headset(STEELSERIES, 0x229E, "SteelSeries Arctis Nova 7X Gen 2"),
-        headset(STEELSERIES, 0x22AD, "SteelSeries Arctis Nova 7X Gen 2"),
-        headset(STEELSERIES, 0x223A, "SteelSeries Arctis Nova 7 Diablo IV"),
-        headset(STEELSERIES, 0x22A9, "SteelSeries Arctis Nova 7 Diablo IV"),
-        headset(STEELSERIES, 0x227A, "SteelSeries Arctis Nova 7 WoW Edition"),
-        headset(STEELSERIES, 0x220A, "SteelSeries Arctis Nova 7P"),
-        headset(STEELSERIES, 0x22A7, "SteelSeries Arctis Nova 7P"),
-        headset(STEELSERIES, 0x2298, "SteelSeries Arctis Nova 7P"),
+        headset(VENDOR_STEELSERIES, 0x2202, "SteelSeries Arctis Nova 7"),
+        headset(VENDOR_STEELSERIES, 0x22A1, "SteelSeries Arctis Nova 7"),
+        headset(
+            VENDOR_STEELSERIES,
+            0x227E,
+            "SteelSeries Arctis Nova 7 Gen 2",
+        ),
+        headset(VENDOR_STEELSERIES, 0x2206, "SteelSeries Arctis Nova 7X"),
+        headset(VENDOR_STEELSERIES, 0x22A4, "SteelSeries Arctis Nova 7X"),
+        headset(VENDOR_STEELSERIES, 0x22A5, "SteelSeries Arctis Nova 7X"),
+        headset(
+            VENDOR_STEELSERIES,
+            0x2258,
+            "SteelSeries Arctis Nova 7X Gen 2",
+        ),
+        headset(
+            VENDOR_STEELSERIES,
+            0x229E,
+            "SteelSeries Arctis Nova 7X Gen 2",
+        ),
+        headset(
+            VENDOR_STEELSERIES,
+            0x22AD,
+            "SteelSeries Arctis Nova 7X Gen 2",
+        ),
+        headset(
+            VENDOR_STEELSERIES,
+            0x223A,
+            "SteelSeries Arctis Nova 7 Diablo IV",
+        ),
+        headset(
+            VENDOR_STEELSERIES,
+            0x22A9,
+            "SteelSeries Arctis Nova 7 Diablo IV",
+        ),
+        headset(
+            VENDOR_STEELSERIES,
+            0x227A,
+            "SteelSeries Arctis Nova 7 WoW Edition",
+        ),
+        headset(VENDOR_STEELSERIES, 0x220A, "SteelSeries Arctis Nova 7P"),
+        headset(VENDOR_STEELSERIES, 0x22A7, "SteelSeries Arctis Nova 7P"),
+        headset(VENDOR_STEELSERIES, 0x2298, "SteelSeries Arctis Nova 7P"),
     ],
     interface: Some(3),
 };
@@ -76,17 +109,17 @@ const NOVA_STEP_PRODUCTS: &[u16] = &[0x2202, 0x2206, 0x220A, 0x223A, 0x227A, 0x2
 
 static CORSAIR_VOID_FAMILY: HidrawFamily = HidrawFamily {
     models: &[
-        headset(CORSAIR, 0x0A0C, "Corsair Void Wireless"),
-        headset(CORSAIR, 0x0A2B, "Corsair Void Wireless"),
-        headset(CORSAIR, 0x1B23, "Corsair Void Wireless"),
-        headset(CORSAIR, 0x1B25, "Corsair Void Wireless"),
-        headset(CORSAIR, 0x1B27, "Corsair Void Wireless"),
-        headset(CORSAIR, 0x0A14, "Corsair Void Pro Wireless"),
-        headset(CORSAIR, 0x0A16, "Corsair Void Pro Wireless"),
-        headset(CORSAIR, 0x0A1A, "Corsair Void Pro Wireless"),
-        headset(CORSAIR, 0x0A51, "Corsair Void Elite Wireless"),
-        headset(CORSAIR, 0x0A55, "Corsair Void Elite Wireless"),
-        headset(CORSAIR, 0x0A75, "Corsair Void Elite Wireless"),
+        headset(VENDOR_CORSAIR, 0x0A0C, "Corsair Void Wireless"),
+        headset(VENDOR_CORSAIR, 0x0A2B, "Corsair Void Wireless"),
+        headset(VENDOR_CORSAIR, 0x1B23, "Corsair Void Wireless"),
+        headset(VENDOR_CORSAIR, 0x1B25, "Corsair Void Wireless"),
+        headset(VENDOR_CORSAIR, 0x1B27, "Corsair Void Wireless"),
+        headset(VENDOR_CORSAIR, 0x0A14, "Corsair Void Pro Wireless"),
+        headset(VENDOR_CORSAIR, 0x0A16, "Corsair Void Pro Wireless"),
+        headset(VENDOR_CORSAIR, 0x0A1A, "Corsair Void Pro Wireless"),
+        headset(VENDOR_CORSAIR, 0x0A51, "Corsair Void Elite Wireless"),
+        headset(VENDOR_CORSAIR, 0x0A55, "Corsair Void Elite Wireless"),
+        headset(VENDOR_CORSAIR, 0x0A75, "Corsair Void Elite Wireless"),
     ],
     interface: Some(3),
 };

@@ -27,6 +27,9 @@ use crate::sources::{AccessDenied, BatterySource};
 
 pub const SYSFS_HIDRAW: &str = "/sys/class/hidraw";
 
+pub const VENDOR_STEELSERIES: u16 = 0x1038;
+pub const VENDOR_CORSAIR: u16 = 0x1B1C;
+
 /// A `/dev/hidraw*` node a backend recognised as one of its devices.
 pub struct HidrawDevice {
     pub info: DeviceInfo,

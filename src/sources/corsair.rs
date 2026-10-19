@@ -15,7 +15,7 @@ use crate::domain::{BatteryReading, ChargeState, DeviceKind};
 
 use super::{
     BatteryBackend, BatterySource, Context,
-    hidraw::{self, HandleSource, HidrawFamily, HidrawModel, ReadBattery, Verdict},
+    hidraw::{self, HandleSource, HidrawFamily, HidrawModel, ReadBattery, VENDOR_CORSAIR, Verdict},
 };
 
 const NONE_CONNECTED: &str = "device is asleep or off (receiver lists no connected device)";
@@ -23,11 +23,9 @@ const PAIRED_ERROR: &str = "device is asleep or off (receiver reported an error 
 
 // ── Device table ─────────────────────────────────────────────────────────────
 
-const CORSAIR: u16 = 0x1B1C;
-
 const fn mouse(product: u16, name: &'static str) -> HidrawModel {
     HidrawModel {
-        vendor: CORSAIR,
+        vendor: VENDOR_CORSAIR,
         product,
         name,
         kind: DeviceKind::Mouse,
@@ -36,7 +34,7 @@ const fn mouse(product: u16, name: &'static str) -> HidrawModel {
 
 const fn keyboard(product: u16, name: &'static str) -> HidrawModel {
     HidrawModel {
-        vendor: CORSAIR,
+        vendor: VENDOR_CORSAIR,
         product,
         name,
         kind: DeviceKind::Keyboard,
@@ -424,7 +422,7 @@ mod tests {
             );
         }
         for model in FAMILY.models {
-            assert_eq!(model.vendor, CORSAIR, "{}", model.name);
+            assert_eq!(model.vendor, VENDOR_CORSAIR, "{}", model.name);
             assert!(
                 matches!(model.kind, DeviceKind::Mouse | DeviceKind::Keyboard),
                 "{}",

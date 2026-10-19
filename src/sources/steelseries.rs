@@ -39,7 +39,7 @@ const OUTPUT_REPORT_LEN: usize = 64;
 /// protocol needs more than a row here.
 pub static FAMILY: hidraw::HidrawFamily = hidraw::HidrawFamily {
     models: &[hidraw::HidrawModel {
-        vendor: 0x1038,
+        vendor: hidraw::VENDOR_STEELSERIES,
         product: 0x1852,
         name: "SteelSeries Aerox 5 Wireless",
         kind: DeviceKind::Mouse,
