@@ -4,21 +4,19 @@
 //! while powering on undocked). XInput mode (`2dc8:310b`, the default) and Switch
 //! mode report no usable battery — see `docs/adding-a-device.md` / `README.md`.
 //!
-//! Unlike `steelseries.rs`, this device is read-only and streaming: input report
-//! id `0x01`, 34 bytes, pushed continuously at 1000 Hz. There is no query to write
-//! and no response to wait for — a poll reads reports off the wire until the battery one.
+//! The device is read-only and streaming: input report id `0x01`, 34 bytes,
+//! pushed continuously at 1000 Hz. There is no query to write and no response
+//! to wait for — a poll reads reports off the wire until the battery one.
 //! Battery sits in byte 14: bit 7 is the charging flag, bits 0-6 are the
-//! percentage directly (not bucketed). Firmware v1.02 sends 12-byte reports with
-//! no battery data; v1.03+ sends 34 — a short report means old firmware, not a
-//! broken device.
+//! percentage directly. Firmware v1.02 sends 12-byte reports with no battery
+//! data; v1.03+ sends 34 — a short report means old firmware, not a broken
+//! device.
 //!
-//! This is the stream-only case of `CLAUDE.md`'s handle policy (see "Key
-//! decisions" there), not the request/response case `steelseries.rs` follows:
-//! open, read until the battery report, close — do not hold the handle across polls.
+//! A poll opens the node, reads until the battery report and closes it: a
+//! handle held between polls would only queue reports in the kernel.
 //!
-//! Discovery: [`FAMILY`] through `hidraw::discover`. DInput exposes a single HID
-//! interface, so no interface filter is applied — unlike SteelSeries, which has
-//! several interfaces on the same device and must pick the battery-reporting one.
+//! Discovery: [`FAMILY`] through `hidraw::discover`. DInput exposes a single
+//! HID interface, so no interface filter is applied.
 
 use std::io::Read;
 use std::os::fd::AsFd;
@@ -28,7 +26,6 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use nix::libc;
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
 
@@ -111,10 +108,6 @@ impl BatterySource for EightBitDoSource {
         let path = self.dev_path.clone();
         let identity = self.identity.clone();
 
-        // Blocking I/O: nix::poll() parks the thread, so run it off the async
-        // runtime. Nothing is written to the device, so an aborted task leaves
-        // no handle behind that needs to survive to the next poll (unlike
-        // steelseries.rs, which passes an open handle in and back out).
         let reading = tokio::task::spawn_blocking(move || poll_device(&path, &identity))
             .await
             .context("spawn_blocking")??;
@@ -124,9 +117,6 @@ impl BatterySource for EightBitDoSource {
     }
 }
 
-/// Opens the node, reads until the battery report, and closes the handle
-/// again — see the module doc comment for why this does not hold the handle
-/// open across polls.
 fn poll_device(
     dev_path: &std::path::Path,
     identity: &hidraw::NodeIdentity,
@@ -152,39 +142,22 @@ fn read_battery_report<D: Read + AsFd>(
     let deadline = std::time::Instant::now() + timeout;
     let mut short_battery_report = false;
     let mut buf = [0u8; 64];
-    loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let ms = u16::try_from(remaining.as_millis()).unwrap_or(u16::MAX);
-        let revents = {
-            let mut poll_fds = [PollFd::new(dev.as_fd(), PollFlags::POLLIN)];
-            if poll(&mut poll_fds, PollTimeout::from(ms)).context("poll()")? == 0 {
-                if short_battery_report {
-                    anyhow::bail!(
-                        "no 34-byte battery report (old firmware sends 12-byte reports with no battery data)"
-                    );
-                }
-                anyhow::bail!(
-                    "controller is off or out of range (no battery report within {}ms)",
-                    timeout.as_millis()
-                );
-            }
-            poll_fds[0].revents().unwrap_or(PollFlags::empty())
-        };
-        if !revents.contains(PollFlags::POLLIN) {
-            anyhow::bail!("unexpected poll events {revents:?}");
-        }
-        let n = match dev.read(&mut buf) {
-            Ok(0) => anyhow::bail!("EOF"),
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e).context("reading hidraw report"),
-        };
-        let report = &buf[..n];
+    while let Some(n) = hidraw::next_report(dev, deadline, &mut buf)? {
+        let report = buf.get(..n).unwrap_or_default();
         if let Some(reading) = parse_battery_report(report) {
             return Ok(reading);
         }
         short_battery_report |= report.first() == Some(&REPORT_ID);
     }
+    if short_battery_report {
+        anyhow::bail!(
+            "no 34-byte battery report (old firmware sends 12-byte reports with no battery data)"
+        );
+    }
+    anyhow::bail!(
+        "controller is off or out of range (no battery report within {}ms)",
+        timeout.as_millis()
+    )
 }
 
 // ── Pure functions ────────────────────────────────────────────────────────────
@@ -193,8 +166,8 @@ fn read_battery_report<D: Read + AsFd>(
 ///
 /// Requires `buf[0] == REPORT_ID` and `buf.len() >= MIN_REPORT_LEN`; a shorter
 /// or differently-tagged report yields `None` rather than a guessed reading.
-/// `buf[14]` bit 7 is the charging flag, bits 0-6 are the percentage directly
-/// (not bucketed like SteelSeries' 5%-step protocol). A fully charged
+/// `buf[14]` bit 7 is the charging flag, bits 0-6 are the percentage directly.
+/// A fully charged
 /// controller still sitting in the dock reports 100% with the charging bit
 /// set; that maps to `ChargeState::Charging`, not `Discharging` (which would
 /// be a lie) or `Full` (which would imply it is not connected).
@@ -222,30 +195,9 @@ fn parse_battery_report(buf: &[u8]) -> Option<BatteryReading> {
 mod tests {
     use super::*;
 
+    use crate::sources::hidraw::fake_device::device_sending;
+
     // read_battery_report
-
-    /// Keeps report boundaries, as a hidraw node does.
-    struct Datagrams(std::os::unix::net::UnixDatagram);
-
-    impl Read for Datagrams {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.0.recv(buf)
-        }
-    }
-
-    impl AsFd for Datagrams {
-        fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
-            self.0.as_fd()
-        }
-    }
-
-    fn device_sending(reports: &[&[u8]]) -> (std::os::unix::net::UnixDatagram, Datagrams) {
-        let (device, host) = std::os::unix::net::UnixDatagram::pair().unwrap();
-        for report in reports {
-            device.send(report).unwrap();
-        }
-        (device, Datagrams(host))
-    }
 
     #[test]
     fn a_report_of_another_id_is_skipped_until_the_battery_report() {

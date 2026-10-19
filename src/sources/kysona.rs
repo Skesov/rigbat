@@ -9,29 +9,14 @@
 //! A node whose HID device already carries a kernel `power_supply` is skipped:
 //! the sysfs backend reports that mouse.
 
-use std::{
-    fs::File,
-    io::{ErrorKind, Read as _, Write as _},
-    os::{fd::AsFd as _, unix::fs::OpenOptionsExt as _},
-    path::{Path, PathBuf},
-    time::{Duration, Instant},
-};
+use std::fs::File;
 
-use anyhow::Context as _;
-use nix::libc;
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-
-use crate::domain::{BatteryReading, ChargeState, DeviceInfo, DeviceKind};
+use crate::domain::{BatteryReading, ChargeState, DeviceKind};
 
 use super::{
     BatteryBackend, BatterySource, Context,
-    hidraw::{self, HidrawDevice, HidrawFamily, HidrawModel},
+    hidraw::{self, HandleSource, HidrawFamily, HidrawModel, ReadBattery, Verdict},
 };
-
-const ANSWER_TIMEOUT: Duration = Duration::from_millis(1000);
-const READ_BUF_LEN: usize = 64;
-/// Bounds the discard loop against a device that floods reports.
-const MAX_QUEUED_REPORTS: usize = 256;
 
 const MOUSE_OFF: &str = "mouse is asleep or off (dongle reported it offline)";
 
@@ -80,158 +65,28 @@ impl BatteryBackend for KysonaBackend {
     }
 
     async fn discover(&self, _ctx: &Context) -> anyhow::Result<Vec<Box<dyn BatterySource>>> {
-        let devices =
-            tokio::task::spawn_blocking(|| discover_in(&FAMILY, Path::new(hidraw::SYSFS_HIDRAW)))
-                .await
-                .context("spawn_blocking")??;
-        Ok(devices
+        Ok(hidraw::discover_unclaimed(&FAMILY)
+            .await?
             .into_iter()
-            .map(|device| -> Box<dyn BatterySource> {
-                Box::new(KysonaSource {
-                    info: device.info,
-                    dev_path: device.dev_path,
-                    identity: device.identity,
-                    handle: None,
-                })
-            })
+            .map(|device| HandleSource::boxed(device, KysonaMouse))
             .collect())
     }
 }
 
-fn discover_in(family: &HidrawFamily, sysfs_root: &Path) -> anyhow::Result<Vec<HidrawDevice>> {
-    let mut devices = family.discover_in(sysfs_root)?;
-    devices.retain(|device| {
-        let kernel = hidraw::kernel_reports_battery(sysfs_root, &device.dev_path);
-        if kernel {
-            tracing::debug!(
-                node = %device.dev_path.display(),
-                "a kernel driver reports this mouse's battery; left to the sysfs backend"
-            );
-        }
-        !kernel
-    });
-    Ok(devices)
-}
+#[derive(Clone)]
+struct KysonaMouse;
 
-// ── Source ───────────────────────────────────────────────────────────────────
+impl ReadBattery for KysonaMouse {
+    type Handle = File;
 
-struct KysonaSource {
-    info: DeviceInfo,
-    dev_path: PathBuf,
-    identity: hidraw::NodeIdentity,
-    /// Kept across polls; dropped on any error so the next poll reopens by node name.
-    handle: Option<File>,
-}
-
-#[async_trait::async_trait]
-impl BatterySource for KysonaSource {
-    fn device(&self) -> &DeviceInfo {
-        &self.info
-    }
-
-    async fn poll(&mut self) -> anyhow::Result<BatteryReading> {
-        let dev_path = self.dev_path.clone();
-        let identity = self.identity.clone();
-        let handle = self.handle.take();
-
-        let (result, handle) = tokio::task::spawn_blocking(move || {
-            let mut handle = handle;
-            let result = poll_device(&dev_path, &identity, &mut handle);
-            if result.is_err() {
-                handle = None;
-            }
-            (result, handle)
+    fn read(&self, file: &mut File) -> anyhow::Result<BatteryReading> {
+        hidraw::exchange(file, &request(Command::Online), |report| {
+            classify_online(report).into()
+        })?;
+        hidraw::exchange(file, &request(Command::Battery), |report| {
+            classify_battery(report).into()
         })
-        .await
-        .context("spawn_blocking")?;
-
-        self.handle = handle;
-        if let Ok(reading) = &result {
-            tracing::debug!(device = %self.info.name, percent = reading.percent, "kysona poll");
-        }
-        result
     }
-}
-
-fn poll_device(
-    dev_path: &Path,
-    identity: &hidraw::NodeIdentity,
-    handle: &mut Option<File>,
-) -> anyhow::Result<BatteryReading> {
-    if handle.is_none() {
-        let file = hidraw::open_verified(
-            Path::new(hidraw::SYSFS_HIDRAW),
-            dev_path,
-            identity,
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK),
-        )?;
-        *handle = Some(file);
-    }
-    let file = handle
-        .as_mut()
-        .context("handle unexpectedly empty after open")?;
-
-    exchange(file, Command::Online, classify_online)?;
-    exchange(file, Command::Battery, classify_battery)
-}
-
-/// Writes the request for `command` and reads until `classify` recognises the answer.
-fn exchange<T>(
-    file: &mut File,
-    command: Command,
-    classify: impl Fn(&[u8]) -> Reply<T>,
-) -> anyhow::Result<T> {
-    discard_queued(file)?;
-    file.write_all(&request(command))
-        .context("writing request")?;
-
-    let deadline = Instant::now() + ANSWER_TIMEOUT;
-    let mut buf = [0u8; READ_BUF_LEN];
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let remaining_ms = u16::try_from(remaining.as_millis()).unwrap_or(u16::MAX);
-        if remaining_ms == 0 {
-            anyhow::bail!("timeout waiting for the mouse's answer");
-        }
-        let mut fds = [PollFd::new(file.as_fd(), PollFlags::POLLIN)];
-        if poll(&mut fds, PollTimeout::from(remaining_ms)).context("poll()")? == 0 {
-            anyhow::bail!("timeout waiting for the mouse's answer");
-        }
-        let revents = fds[0].revents().unwrap_or(PollFlags::empty());
-        if !revents.contains(PollFlags::POLLIN) {
-            anyhow::bail!("unexpected poll events {revents:?}");
-        }
-        let n = match file.read(&mut buf) {
-            Ok(0) => anyhow::bail!("EOF reading hidraw"),
-            Ok(n) => n,
-            Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e).context("reading hidraw"),
-        };
-        match classify(buf.get(..n).unwrap_or_default()) {
-            Reply::Answer(answer) => return Ok(answer),
-            Reply::MouseOff => anyhow::bail!(MOUSE_OFF),
-            Reply::Invalid(reason) => anyhow::bail!("invalid reply: {reason}"),
-            Reply::Unrelated => {}
-        }
-    }
-}
-
-/// Reads and drops input queued since the last exchange, so a stale report is
-/// not taken for the answer.
-fn discard_queued(file: &mut File) -> anyhow::Result<()> {
-    let mut buf = [0u8; READ_BUF_LEN];
-    for _ in 0..MAX_QUEUED_REPORTS {
-        match file.read(&mut buf) {
-            Ok(0) => anyhow::bail!("EOF reading hidraw"),
-            Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
-            Err(e) => return Err(e).context("discarding queued reports"),
-        }
-    }
-    Ok(())
 }
 
 // ── Protocol (pure) ──────────────────────────────────────────────────────────
@@ -274,6 +129,17 @@ impl<T> Reply<T> {
             Self::MouseOff => Reply::MouseOff,
             Self::Invalid(reason) => Reply::Invalid(reason),
             Self::Unrelated => Reply::Unrelated,
+        }
+    }
+}
+
+impl<T> From<Reply<T>> for Verdict<T> {
+    fn from(reply: Reply<T>) -> Self {
+        match reply {
+            Reply::Answer(answer) => Self::Answer(answer),
+            Reply::MouseOff => Self::Reject(anyhow::anyhow!(MOUSE_OFF)),
+            Reply::Invalid(reason) => Self::Reject(anyhow::anyhow!("invalid reply: {reason}")),
+            Reply::Unrelated => Self::Unrelated,
         }
     }
 }
@@ -335,7 +201,6 @@ fn classify_battery(report: &[u8]) -> Reply<BatteryReading> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sources::hidraw::fake_sysfs::FakeSysfs;
 
     /// A reply to `command` with `payload` from byte 6 on and a valid checksum.
     fn reply(command: Command, payload: &[u8]) -> [u8; REPORT_LEN] {
@@ -448,42 +313,6 @@ mod tests {
         for model in FAMILY.models {
             assert_eq!(model.kind, DeviceKind::Mouse, "{}", model.name);
         }
-    }
-
-    // Discovery against a fake sysfs tree
-
-    #[test]
-    fn discover_in_finds_both_vendor_ids_on_interface_1() {
-        let sysfs = FakeSysfs::new("kysona-vendors");
-        sysfs.add("hidraw0", 0, KYSONA, 0xF508, "");
-        sysfs.add("hidraw1", 1, KYSONA, 0xF508, "");
-        sysfs.add("hidraw2", 1, ATK_DONGLE, 0x1085, "");
-        sysfs.add("hidraw3", 1, ATK_DONGLE, 0xF508, "");
-        let devices = discover_in(&FAMILY, &sysfs.class()).unwrap();
-        assert!(devices.iter().all(|d| d.info.kind == DeviceKind::Mouse));
-        let mut found: Vec<_> = devices
-            .into_iter()
-            .map(|d| (d.dev_path, d.info.name))
-            .collect();
-        found.sort();
-        assert_eq!(
-            found,
-            [
-                (PathBuf::from("/dev/hidraw1"), "Pulsar Mouse".to_owned()),
-                (PathBuf::from("/dev/hidraw2"), "ATK VXE R1 SE+".to_owned()),
-            ]
-        );
-    }
-
-    #[test]
-    fn discover_in_leaves_a_kernel_reported_mouse_to_sysfs() {
-        let sysfs = FakeSysfs::new("kysona-kernel");
-        sysfs.add("hidraw1", 1, KYSONA, 0xF57C, "");
-        sysfs.add("hidraw2", 1, KYSONA, 0xF58A, "");
-        sysfs.add_power_supply("hidraw1", "kysona-hidraw1-battery");
-        let found = discover_in(&FAMILY, &sysfs.class()).unwrap();
-        let names: Vec<_> = found.iter().map(|d| d.info.name.as_str()).collect();
-        assert_eq!(names, ["VXE Dragonfly R1 Pro"]);
     }
 
     mod props {
