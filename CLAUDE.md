@@ -111,7 +111,7 @@ src/
 │                 # supervise (bus-watcher retry); sysfs/bluez/steelseries/eightbitdo/
 │                 # headsets/kysona/corsair/razer
 ├── discovery/     # discover_all + registry::backends()
-├── cli/           # output adapter: table / --json / --wide; waybar.rs: --waybar line + loop
+├── cli/           # output adapter: table / --json / --wide; waybar/: --waybar line + loop
 ├── tray/          # manager.rs (icon set + run loop), item.rs (SNI item + menu),
 │                 # resolve.rs (device per icon), state service for the dashboard
 ├── icon/          # IconRenderer (tiny-skia), status marks, kind silhouettes, digits (skrifa)

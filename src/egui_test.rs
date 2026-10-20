@@ -190,7 +190,6 @@ fn collect_text(
 /// The text scales every window is tested at: the default and WCAG 1.4.4's 200 %.
 pub const TEXT_SCALES: [f32; 2] = [1.0, 2.0];
 
-/// Every language at every text scale.
 pub fn lang_scales() -> impl Iterator<Item = (Lang, f32)> {
     Lang::ALL
         .into_iter()

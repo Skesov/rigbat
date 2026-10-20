@@ -411,8 +411,6 @@ async fn run_tray() {
     .await;
 }
 
-/// Runs `--waybar` (`cli::waybar::serve`); with no tray running it polls
-/// through a `Supervisor` of its own.
 async fn run_waybar() {
     cli::waybar::serve(|tx, config_tx| {
         let ctx = std::sync::Arc::new(sources::Context::new());

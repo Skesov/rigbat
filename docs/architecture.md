@@ -14,10 +14,10 @@ a shared headless core:
   survives a device going unreachable the same way it does in the tray. With a tray running it
   follows the tray's `org.rigbat.Tray1` state instead of polling the hardware a second time;
   only without one does it hold its own `Supervisor`. A `Supervisor` has no stop of its own, so
-  that one runs on a separate tokio runtime (`OwnRuntime` in `cli/waybar/source.rs`): when a tray appears the
-  runtime is shut down, which drops every task spawned on it — source tasks with their hidraw
-  handles, the BlueZ and resume watchers, the system-bus connection — and the module follows the
-  tray; when the tray stops it starts a fresh one.
+  that one runs on a separate tokio runtime (`OwnRuntime` in `cli/waybar/source.rs`): when a
+  tray appears the runtime is shut down, which drops every task spawned on it — source tasks
+  with their hidraw handles, the BlueZ and resume watchers, the system-bus connection — and the
+  module follows the tray; when the tray stops it starts a fresh one.
 - **Tray** — `rigbat tray`: a long-running StatusNotifierItem daemon.
 - **Settings** — `rigbat settings`: a small GUI window, launched as a separate process.
 - **Dashboard** — `rigbat dashboard`: the tray icon's left click, a row per shown device.
@@ -108,9 +108,9 @@ anyhow::Result<Vec<Box<dyn BatterySource>>>`. Finds devices and constructs sourc
   slot: a `BluezSource` keeps one and asks it for the connection on every poll and subscription,
   so a source outlives a reconnect instead of polling a closed connection. A backend that needs
   no infrastructure ignores the parameter.
-- **`IconRenderer`** (`icon`): `render(status, kind, theme, mode, stale) -> Vec<ksni::Icon>`. The
-  tray depends on this trait, not on the renderer, and reaches it through `icon::IconCache`, which
-  renders each distinct `IconKey` (those five inputs) once and keeps only the keys an icon shows.
+- **`IconRenderer`** (`icon`): `render(&IconKey) -> Vec<ksni::Icon>`. The tray
+  depends on this trait, not on the renderer, and reaches it through `icon::IconCache`, which
+  renders each distinct `IconKey` once and keeps only the keys an icon shows.
   The implementation is `tiny-skia`, with the digits filled from League Gothic outlines (`skrifa`,
   fonts embedded from `assets/fonts/`); an SVG/resvg renderer would be a new implementation behind
   the same port.
@@ -367,9 +367,9 @@ same way: Chrome keeps `Preferences` as JSON beside `History` as SQLite.
   backend that owns a device is recorded on its task (`SourceTask::backend`), not its entry, so
   an entry without a task has nothing for the retire and crash checks to consult.
 - Retention: `state::spawn_retention` prunes readings older than `RETENTION_SECS` (14 days) every
-  `RETENTION_INTERVAL` (1 h), and drops readings orphaned by a deleted device. Inventory rows are
-  never pruned on age — a device you own but have not switched on for a month must still be in the
-  table you manage it from. Storing change points rather than samples is what keeps 14 days small:
+  `RETENTION_INTERVAL` (1 h); a deleted device takes its readings with it (`ON DELETE CASCADE`).
+  Inventory rows are never pruned on age — a device you own but have not switched on for a month
+  must still be in the table you manage it from. Storing change points rather than samples is what keeps 14 days small:
   a device at a steady 80% writes one row, not one per poll. A reading is stored only when its
   percent or charge state differs from the device's last stored row, or that row is an hour old
   (`READING_HEARTBEAT_SECS`); a heartbeat repeats the percent, so the `LAG()` collapse drops it

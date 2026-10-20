@@ -460,14 +460,11 @@ impl Db {
     }
 
     pub(super) fn prune(&mut self, now: i64) -> anyhow::Result<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .context("beginning prune transaction")?;
         let cutoff = now.saturating_sub(RETENTION_SECS);
-        tx.execute("DELETE FROM readings WHERE at < ?1", params![cutoff])
+        self.conn
+            .execute("DELETE FROM readings WHERE at < ?1", params![cutoff])
             .context("pruning old readings")?;
-        tx.commit().context("committing prune transaction")
+        Ok(())
     }
 }
 
