@@ -2,7 +2,7 @@ use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{MenuItem, ToolTip, Tray};
 use tokio::sync::watch;
 
-use super::resolve::{resolve_for, visible};
+use super::resolve::resolve_for;
 use crate::appearance::ColorScheme;
 use crate::config::Config;
 use crate::domain::{
@@ -96,7 +96,7 @@ impl View {
     ) -> Self {
         let lang = cfg.lang();
         let l = loader(lang);
-        let roster = visible(state, cfg, now);
+        let roster = cfg.roster(&state.devices, now);
         // `None` when the icon has nothing to show: no devices, or the keyed one is gone or hidden.
         let resolved = resolve_for(key, &roster, cfg);
         let title = match (key, &resolved) {

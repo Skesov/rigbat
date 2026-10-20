@@ -3,7 +3,6 @@
 use tokio::sync::watch;
 use zbus::object_server::SignalEmitter;
 
-use super::resolve::visible;
 use crate::config::Config;
 use crate::domain::{BootTime, DeviceState, TrayMode, TrayState, device_status};
 use crate::ipc::{DeviceCard, Snapshot, TRAY_PATH};
@@ -11,7 +10,7 @@ use crate::refresh::RefreshSignal;
 
 /// Every device, classified exactly as its tray icon is; hidden ones apart.
 pub fn snapshot(state: &TrayState, cfg: &Config, now: BootTime) -> Snapshot {
-    let roster = visible(state, cfg, now);
+    let roster = cfg.roster(&state.devices, now);
     let featured = roster.featured(cfg.primary_device.as_deref());
     let card = |d: &DeviceState, in_tray: bool| {
         let (status, stale) = device_status(d, cfg.effective_low_threshold(&d.info.name));

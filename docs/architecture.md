@@ -195,7 +195,7 @@ minute, and a worker per core only adds idle wakeups. `TOKIO_WORKER_THREADS` sti
   outline that has never meant anything. Display only: the device stays in the roster, keeps being
   polled, and reappears on its next successful reading. The tray icons, the menu, the aggregate
   icon's pick, the dashboard's "in tray" mark and `--waybar` all go through one predicate
-  (`domain::is_visible`, via `Roster::visible`) with the period from config, so they cannot
+  (`domain::is_visible`, via `Config::roster`) with the period from config, so they cannot
   disagree about which devices exist. The tray applies a changed period on the config watch.
 - **Estimate**: on every reading the manager derives a time-remaining estimate
   (`domain::estimate`) from the device's percent-change history. Only a discharging, non-coarse

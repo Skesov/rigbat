@@ -4,7 +4,6 @@ use ksni::TrayMethods;
 use tokio::sync::watch;
 
 use super::item::{RigbatTray, SaveConfig, View};
-use super::resolve::visible;
 use crate::appearance::ColorScheme;
 use crate::config::Config;
 use crate::domain::{BootTime, DeviceId, TrayMode, TrayState};
@@ -25,7 +24,7 @@ fn desired_keys(mode: TrayMode, shown: &[DeviceId]) -> Vec<Option<DeviceId>> {
 /// The tray-visible devices, in roster order, one entry per `DeviceId`.
 fn shown_ids(state: &TrayState, cfg: &Config, now: BootTime) -> Vec<DeviceId> {
     let mut shown: Vec<DeviceId> = Vec::new();
-    for d in visible(state, cfg, now).devices() {
+    for d in cfg.roster(&state.devices, now).devices() {
         let id = d.info.id();
         if !shown.contains(&id) {
             shown.push(id);
@@ -221,7 +220,7 @@ mod tests {
     use crate::domain::{DeviceInfo, Presence, Transport, TrayMode};
     use crate::tray::fixtures::{key, retained, same_name_two_transports};
     use crate::tray::item::sni_id;
-    use crate::tray::resolve::{resolve_for, visible};
+    use crate::tray::resolve::resolve_for;
 
     #[test]
     fn desired_keys_primary_only_returns_one_none() {
@@ -274,7 +273,7 @@ mod tests {
         let percents: Vec<(Transport, Option<u8>)> = keys
             .iter()
             .map(|k| {
-                let r = resolve_for(k.as_ref(), &visible(&state, &cfg, now), &cfg).unwrap();
+                let r = resolve_for(k.as_ref(), &cfg.roster(&state.devices, now), &cfg).unwrap();
                 (
                     r.device.info.transport,
                     r.device.last_reading.map(|r| r.percent),

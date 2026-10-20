@@ -4,15 +4,6 @@ use crate::config::Config;
 use crate::domain::{BatteryStatus, BootTime, DeviceState, Roster, device_line, device_status};
 use crate::i18n::Lang;
 
-fn roster<'a>(states: &'a [DeviceState], cfg: &Config, now: BootTime) -> Roster<'a> {
-    Roster::visible(
-        states,
-        |name| cfg.is_shown(name),
-        now,
-        cfg.hide_offline_after(),
-    )
-}
-
 /// The device the waybar module features and its status: the aggregate tray
 /// icon's pick and classification, from the same `domain` policy.
 pub fn featured<'a>(
@@ -20,7 +11,7 @@ pub fn featured<'a>(
     cfg: &Config,
     now: BootTime,
 ) -> Option<(&'a DeviceState, BatteryStatus)> {
-    featured_in(&roster(states, cfg, now), cfg)
+    featured_in(&cfg.roster(states, now), cfg)
 }
 
 fn featured_in<'a>(roster: &Roster<'a>, cfg: &Config) -> Option<(&'a DeviceState, BatteryStatus)> {
@@ -41,7 +32,7 @@ fn featured_in<'a>(roster: &Roster<'a>, cfg: &Config) -> Option<(&'a DeviceState
 /// `charging`, `low`, `ok`, `offline`. `percentage` is omitted, not `0`, when
 /// there is no reading to report.
 pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: BootTime) -> Value {
-    let roster = roster(states, cfg, now);
+    let roster = cfg.roster(states, now);
 
     let tooltip = if roster.devices().is_empty() {
         "No devices".to_owned()

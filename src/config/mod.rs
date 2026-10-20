@@ -6,7 +6,8 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    DisplayMode, OFFLINE_SHELF_LIFE_MAX, OFFLINE_SHELF_LIFE_MIN, Palette, TrayMode, WindowTheme,
+    BootTime, DeviceState, DisplayMode, OFFLINE_SHELF_LIFE_MAX, OFFLINE_SHELF_LIFE_MIN, Palette,
+    Roster, TrayMode, WindowTheme,
 };
 use crate::i18n::{self, Lang};
 
@@ -145,6 +146,16 @@ impl Config {
     pub fn hide_offline_after(&self) -> Duration {
         Duration::from_secs(u64::from(self.hide_offline_after_mins) * 60)
             .clamp(OFFLINE_SHELF_LIFE_MIN, OFFLINE_SHELF_LIFE_MAX)
+    }
+
+    /// The devices a status surface shows, in display order.
+    pub fn roster<'a>(&self, devices: &'a [DeviceState], now: BootTime) -> Roster<'a> {
+        Roster::visible(
+            devices,
+            |name| self.is_shown(name),
+            now,
+            self.hide_offline_after(),
+        )
     }
 }
 

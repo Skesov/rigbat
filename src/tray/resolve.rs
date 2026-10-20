@@ -1,17 +1,5 @@
 use crate::config::Config;
-use crate::domain::{
-    BatteryStatus, BootTime, DeviceId, DeviceState, Roster, TrayState, device_status,
-};
-
-/// The devices the tray shows, in roster order.
-pub(crate) fn visible<'a>(state: &'a TrayState, cfg: &Config, now: BootTime) -> Roster<'a> {
-    Roster::visible(
-        &state.devices,
-        |name| cfg.is_shown(name),
-        now,
-        cfg.hide_offline_after(),
-    )
-}
+use crate::domain::{BatteryStatus, DeviceId, DeviceState, Roster, device_status};
 
 /// The device a tray icon stands for, resolved against the current state and config.
 pub(crate) struct Resolved {
@@ -55,7 +43,7 @@ pub(crate) fn resolve_for(
 mod tests {
     use std::time::Duration;
 
-    use super::{Resolved, visible};
+    use super::Resolved;
     use crate::config::Config;
     use crate::domain::{BatteryReading, BootTime, ChargeState, DeviceId, DeviceInfo};
     use crate::domain::{BatteryStatus, DeviceState, Presence, Transport, TrayState};
@@ -65,7 +53,7 @@ mod tests {
     };
 
     fn featured_id(state: &TrayState, cfg: &Config, now: BootTime) -> Option<DeviceId> {
-        visible(state, cfg, now)
+        cfg.roster(&state.devices, now)
             .featured(cfg.primary_device.as_deref())
             .map(|d| d.info.id())
     }
@@ -76,7 +64,7 @@ mod tests {
         cfg: &Config,
         now: BootTime,
     ) -> Option<Resolved> {
-        super::resolve_for(key, &visible(state, cfg, now), cfg)
+        super::resolve_for(key, &cfg.roster(&state.devices, now), cfg)
     }
 
     fn unreachable(reading: Option<BatteryReading>) -> TrayState {

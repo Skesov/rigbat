@@ -483,12 +483,9 @@ mod featured_tests {
                 primary_device: primary.map(str::to_owned),
                 ..Config::default()
             };
-            let tray = crate::tray::resolve::resolve_for(
-                None,
-                &crate::tray::resolve::visible(&state, &cfg, now),
-                &cfg,
-            )
-            .expect("the tray features a device");
+            let tray =
+                crate::tray::resolve::resolve_for(None, &cfg.roster(&state.devices, now), &cfg)
+                    .expect("the tray features a device");
             let (waybar, waybar_status) =
                 crate::cli::waybar::featured(&state.devices, &cfg, now).expect("waybar too");
             assert_eq!(waybar.info.id(), tray.device.info.id(), "pin {primary:?}");
