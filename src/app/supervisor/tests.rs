@@ -853,8 +853,7 @@ async fn a_reader_never_converts_shown_devices() {
 
 fn open_scratch_store(test_name: &str) -> (state::Store, ScratchDir) {
     let scratch = ScratchDir::new(test_name);
-    let db =
-        state::SqliteStore::open(&scratch.join("state.db")).expect("opening scratch state store");
+    let db = state::Db::open(&scratch.join("state.db")).expect("opening scratch state store");
     let store = state::Store::start(db).expect("starting the store thread");
     (store, scratch)
 }

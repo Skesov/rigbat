@@ -36,11 +36,11 @@ const JOURNAL_SIZE_LIMIT_BYTES: i64 = 2 * 1024 * 1024;
 /// without waiting out a stuck writer forever.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub struct SqliteStore {
+pub struct Db {
     conn: Connection,
 }
 
-impl SqliteStore {
+impl Db {
     /// Opens (creating if absent) the database at `path` and its parent
     /// directory, applies pragmas, and runs the schema migration.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
@@ -298,7 +298,7 @@ fn upsert_seen(
     }
 }
 
-impl SqliteStore {
+impl Db {
     /// Records one discovery sweep's devices in a single transaction.
     pub(super) fn record_seen(
         &mut self,
@@ -484,13 +484,13 @@ mod tests {
         }
     }
 
-    fn seen(store: &mut SqliteStore, id: &DeviceId, kind: DeviceKind, now: i64) -> Seen {
+    fn seen(store: &mut Db, id: &DeviceId, kind: DeviceKind, now: i64) -> Seen {
         let mut outcomes = store.record_seen(&[(id.clone(), kind)], now).unwrap();
         assert_eq!(outcomes.len(), 1);
         outcomes.remove(0)
     }
 
-    fn stored_readings(store: &SqliteStore) -> Vec<(i64, i64, String)> {
+    fn stored_readings(store: &Db) -> Vec<(i64, i64, String)> {
         store
             .conn
             .prepare("SELECT at, percent, state FROM readings ORDER BY at")
@@ -506,12 +506,12 @@ mod tests {
         let scratch = ScratchDir::new("idempotent");
         let path = scratch.join("state.db");
         {
-            let mut store = SqliteStore::open(&path).unwrap();
+            let mut store = Db::open(&path).unwrap();
             let a = id("mouse", Transport::Sysfs, Some("a"));
             seen(&mut store, &a, DeviceKind::Mouse, 1000);
         }
 
-        let store = SqliteStore::open(&path).unwrap();
+        let store = Db::open(&path).unwrap();
         assert_eq!(schema_version(&store.conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(store.list_devices().unwrap().len(), 1);
     }
@@ -522,7 +522,7 @@ mod tests {
     fn record_seen_adopts_a_corrected_kind() {
         let scratch = ScratchDir::new("kind-update");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let id = id("8BitDo Ultimate 2", Transport::Hidraw, Some("A1B2C3D4E5"));
 
         seen(&mut store, &id, DeviceKind::Other, 1000);
@@ -542,7 +542,7 @@ mod tests {
         let scratch = ScratchDir::new("v2-migration");
         let path = scratch.join("state.db");
         {
-            let mut store = SqliteStore::open(&path).unwrap();
+            let mut store = Db::open(&path).unwrap();
             let node_keyed = id("8BitDo Ultimate 2", Transport::Hidraw, Some("hidraw13"));
             seen(&mut store, &node_keyed, DeviceKind::Controller, 1000);
             let serial_keyed = id("8BitDo Ultimate 2", Transport::Hidraw, Some("A1B2C3D4E5"));
@@ -556,7 +556,7 @@ mod tests {
             store.conn.execute_batch("PRAGMA user_version = 1").unwrap();
         }
 
-        let store = SqliteStore::open(&path).unwrap();
+        let store = Db::open(&path).unwrap();
         let mut names: Vec<String> = store
             .list_devices()
             .unwrap()
@@ -574,7 +574,7 @@ mod tests {
     fn record_seen_renames_a_row_that_kept_its_locator() {
         let scratch = ScratchDir::new("rename");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let before = id("MX Anywhere 3", Transport::Sysfs, Some("00:00:5e:00:53:01"));
         assert_eq!(
             seen(&mut store, &before, DeviceKind::Mouse, 1000),
@@ -610,7 +610,7 @@ mod tests {
     fn record_seen_never_renames_a_row_with_no_locator() {
         let scratch = ScratchDir::new("rename-null-locator");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let before = id("headset", Transport::Bluetooth, None);
         seen(&mut store, &before, DeviceKind::Headset, 1000);
 
@@ -630,7 +630,7 @@ mod tests {
         let scratch = ScratchDir::new("v3-migration");
         let path = scratch.join("state.db");
         {
-            let mut store = SqliteStore::open(&path).unwrap();
+            let mut store = Db::open(&path).unwrap();
             let sysfs = id("MX Anywhere 3", Transport::Sysfs, Some("hidpp_battery_6"));
             seen(&mut store, &sysfs, DeviceKind::Mouse, 1000);
             let bluetooth = id(
@@ -642,7 +642,7 @@ mod tests {
             store.conn.execute_batch("PRAGMA user_version = 2").unwrap();
         }
 
-        let store = SqliteStore::open(&path).unwrap();
+        let store = Db::open(&path).unwrap();
         let devices = store.list_devices().unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].device.transport, Transport::Bluetooth);
@@ -652,7 +652,7 @@ mod tests {
     fn record_seen_upserts_preserving_first_seen_and_advancing_last_seen() {
         let scratch = ScratchDir::new("upsert");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
 
         seen(&mut store, &a, DeviceKind::Mouse, 1000);
@@ -673,7 +673,7 @@ mod tests {
     fn record_seen_dedups_none_locator_and_last_seen_never_regresses() {
         let scratch = ScratchDir::new("null-locator");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let a = id("headset", Transport::Bluetooth, None);
 
         seen(&mut store, &a, DeviceKind::Headset, 5000);
@@ -690,7 +690,7 @@ mod tests {
     fn list_devices_round_trips_every_kind_and_transport() {
         let scratch = ScratchDir::new("roundtrip-all");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let mut expected = Vec::new();
         for transport in Transport::ALL {
             for kind in DeviceKind::ALL {
@@ -721,7 +721,7 @@ mod tests {
     fn list_devices_skips_a_row_it_cannot_decode() {
         let scratch = ScratchDir::new("unknown-enum");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let known = id("kbd", Transport::Bluetooth, None);
         seen(&mut store, &known, DeviceKind::Keyboard, 42);
         store
@@ -742,7 +742,7 @@ mod tests {
     fn delete_device_cascades_to_readings() {
         let scratch = ScratchDir::new("cascade");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
 
         seen(&mut store, &a, DeviceKind::Mouse, 1000);
@@ -765,7 +765,7 @@ mod tests {
     fn prune_deletes_rows_past_the_window_and_keeps_rows_inside_it() {
         let scratch = ScratchDir::new("retention");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
         let now = 100_000_000;
         seen(&mut store, &a, DeviceKind::Mouse, now);
@@ -804,7 +804,7 @@ mod tests {
     fn recent_readings_collapses_repeated_percent_to_change_points() {
         let scratch = ScratchDir::new("dedup");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
         seen(&mut store, &a, DeviceKind::Mouse, 0);
 
@@ -827,7 +827,7 @@ mod tests {
         let path = scratch.join("state.db");
         let a = id("mouse", Transport::Sysfs, Some("a"));
         {
-            let mut store = SqliteStore::open(&path).unwrap();
+            let mut store = Db::open(&path).unwrap();
             seen(&mut store, &a, DeviceKind::Mouse, 0);
             for (i, percent) in [80u8, 79, 78, 77, 76, 75].into_iter().enumerate() {
                 store
@@ -842,7 +842,7 @@ mod tests {
 
         // Reopen — history must survive a restart, not just live in the
         // handle that wrote it.
-        let store = SqliteStore::open(&path).unwrap();
+        let store = Db::open(&path).unwrap();
         let capped = store.recent_readings(&a, 3).unwrap();
         assert_eq!(capped, vec![(500, 75), (400, 76), (300, 77)]);
     }
@@ -851,7 +851,7 @@ mod tests {
     fn latest_reading_is_the_newest_row_heartbeat_included() {
         let scratch = ScratchDir::new("latest");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
         let b = id("keyboard", Transport::Sysfs, Some("b"));
         seen(&mut store, &a, DeviceKind::Mouse, 0);
@@ -874,7 +874,7 @@ mod tests {
     fn repeated_identical_readings_store_one_row_plus_hourly_heartbeats() {
         let scratch = ScratchDir::new("heartbeat");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
         seen(&mut store, &a, DeviceKind::Mouse, 0);
 
@@ -895,7 +895,7 @@ mod tests {
     fn a_changed_percent_or_state_is_stored_at_once() {
         let scratch = ScratchDir::new("change");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
         seen(&mut store, &a, DeviceKind::Mouse, 0);
 
@@ -925,9 +925,9 @@ mod tests {
     fn last_seen_moves_only_past_its_resolution_but_kind_always_updates() {
         let scratch = ScratchDir::new("seen-resolution");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
-        let last_seen = |store: &SqliteStore| store.list_devices().unwrap()[0].last_seen;
+        let last_seen = |store: &Db| store.list_devices().unwrap()[0].last_seen;
 
         seen(&mut store, &a, DeviceKind::Other, 1000);
         seen(&mut store, &a, DeviceKind::Other, 1030);
@@ -949,7 +949,7 @@ mod tests {
     fn record_seen_reports_each_device_of_a_sweep_in_order() {
         let scratch = ScratchDir::new("seen-batch");
         let path = scratch.join("state.db");
-        let mut store = SqliteStore::open(&path).unwrap();
+        let mut store = Db::open(&path).unwrap();
         let a = id("mouse", Transport::Sysfs, Some("a"));
         let b = id("keyboard", Transport::Bluetooth, Some("b"));
         seen(&mut store, &a, DeviceKind::Mouse, 1000);
@@ -984,7 +984,7 @@ mod tests {
             .unwrap();
         }
 
-        let store = SqliteStore::open(&path).unwrap();
+        let store = Db::open(&path).unwrap();
         assert_eq!(schema_version(&store.conn).unwrap(), 4);
         let plan: String = store
             .conn
@@ -1009,7 +1009,7 @@ mod tests {
     fn every_connection_syncs_at_normal_and_caps_the_wal() {
         let scratch = ScratchDir::new("pragmas");
         let path = scratch.join("state.db");
-        let store = SqliteStore::open(&path).unwrap();
+        let store = Db::open(&path).unwrap();
         let pragma = |name: &str| -> i64 {
             store
                 .conn

@@ -12,7 +12,7 @@
 
 mod store;
 
-pub use store::SqliteStore;
+pub use store::Db;
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -37,7 +37,7 @@ pub struct DeviceRecord {
     /// Unix seconds, UTC.
     pub first_seen: i64,
     /// Unix seconds, UTC. Never moves backward even if the wall clock does
-    /// — see `SqliteStore::record_seen`.
+    /// — see `Db::record_seen`.
     pub last_seen: i64,
 }
 
@@ -55,7 +55,7 @@ pub enum Seen {
     Renamed { from: String },
 }
 
-type Job = Box<dyn FnOnce(&mut SqliteStore) + Send>;
+type Job = Box<dyn FnOnce(&mut Db) + Send>;
 
 /// A handle to the device inventory and reading history. One dedicated thread
 /// owns the SQLite connection and runs requests in the order they were sent;
@@ -69,7 +69,7 @@ pub struct Store {
 impl Store {
     /// Moves `db` onto its own thread, which exits once every handle is dropped.
     /// A job that panics fails only its own caller (its reply is dropped).
-    pub fn start(mut db: SqliteStore) -> anyhow::Result<Self> {
+    pub fn start(mut db: Db) -> anyhow::Result<Self> {
         let (jobs, queue) = std::sync::mpsc::channel::<Job>();
         std::thread::Builder::new()
             .name("rigbat-state".into())
@@ -87,7 +87,7 @@ impl Store {
 
     fn send<T: Send + 'static>(
         &self,
-        op: impl FnOnce(&mut SqliteStore) -> anyhow::Result<T> + Send + 'static,
+        op: impl FnOnce(&mut Db) -> anyhow::Result<T> + Send + 'static,
     ) -> anyhow::Result<oneshot::Receiver<anyhow::Result<T>>> {
         let (reply, answer) = oneshot::channel();
         self.jobs
@@ -101,7 +101,7 @@ impl Store {
 
     async fn call<T: Send + 'static>(
         &self,
-        op: impl FnOnce(&mut SqliteStore) -> anyhow::Result<T> + Send + 'static,
+        op: impl FnOnce(&mut Db) -> anyhow::Result<T> + Send + 'static,
     ) -> anyhow::Result<T> {
         self.send(op)?.await.map_err(|_| stopped_mid_request())?
     }
@@ -197,7 +197,7 @@ pub fn open() -> Option<Store> {
         );
         return None;
     };
-    match SqliteStore::open(&path).and_then(Store::start) {
+    match Db::open(&path).and_then(Store::start) {
         Ok(store) => Some(store),
         Err(e) => {
             tracing::warn!(
@@ -253,7 +253,7 @@ mod tests {
     async fn a_locked_database_does_not_stall_the_runtime() {
         let scratch = ScratchDir::new("locked");
         let path = scratch.join("state.db");
-        let store = Store::start(SqliteStore::open(&path).unwrap()).unwrap();
+        let store = Store::start(Db::open(&path).unwrap()).unwrap();
         let other_process = rusqlite::Connection::open(&path).unwrap();
         other_process.execute_batch("BEGIN IMMEDIATE").unwrap();
 
@@ -280,7 +280,7 @@ mod tests {
     async fn requests_run_in_the_order_they_were_sent() {
         let scratch = ScratchDir::new("ordered");
         let path = scratch.join("state.db");
-        let store = Store::start(SqliteStore::open(&path).unwrap()).unwrap();
+        let store = Store::start(Db::open(&path).unwrap()).unwrap();
         store
             .record_seen(vec![(mouse(), DeviceKind::Mouse)], 1000)
             .await
@@ -298,12 +298,12 @@ mod tests {
     #[tokio::test]
     async fn a_panicking_job_fails_its_caller_and_the_store_keeps_serving() {
         #[expect(clippy::panic, reason = "simulates a bug inside a store job")]
-        fn explode(_: &mut SqliteStore) -> anyhow::Result<()> {
+        fn explode(_: &mut Db) -> anyhow::Result<()> {
             panic!("simulated store bug")
         }
         let scratch = ScratchDir::new("panic");
         let path = scratch.join("state.db");
-        let store = Store::start(SqliteStore::open(&path).unwrap()).unwrap();
+        let store = Store::start(Db::open(&path).unwrap()).unwrap();
 
         assert!(store.call(explode).await.is_err());
         let seen = store

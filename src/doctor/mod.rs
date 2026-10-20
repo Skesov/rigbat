@@ -429,7 +429,7 @@ async fn gather() -> Vec<Check> {
     checks.push(state_check(
         db_path
             .as_deref()
-            .map(|p| (p, state::SqliteStore::open(p).map(drop))),
+            .map(|p| (p, state::Db::open(p).map(drop))),
     ));
     checks
 }
