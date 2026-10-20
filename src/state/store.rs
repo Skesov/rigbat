@@ -467,13 +467,6 @@ impl SqliteStore {
         let cutoff = now.saturating_sub(RETENTION_SECS);
         tx.execute("DELETE FROM readings WHERE at < ?1", params![cutoff])
             .context("pruning old readings")?;
-        // ON DELETE CASCADE covers this on every connection `configure` set
-        // up; this catches rows written through one that did not.
-        tx.execute(
-            "DELETE FROM readings WHERE device_id NOT IN (SELECT id FROM devices)",
-            [],
-        )
-        .context("pruning orphaned readings")?;
         tx.commit().context("committing prune transaction")
     }
 }
@@ -765,6 +758,7 @@ mod tests {
 
         assert!(store.list_devices().unwrap().is_empty());
         assert!(store.recent_readings(&a, 10).unwrap().is_empty());
+        assert!(stored_readings(&store).is_empty());
     }
 
     #[test]

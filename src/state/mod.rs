@@ -170,7 +170,7 @@ impl Store {
             .map_err(|_| stopped_mid_request())?
     }
 
-    /// Deletes `readings` rows past the retention window, and orphaned ones.
+    /// Deletes `readings` rows past the retention window.
     async fn prune(&self, now: i64) -> anyhow::Result<()> {
         self.call(move |db| db.prune(now)).await
     }
