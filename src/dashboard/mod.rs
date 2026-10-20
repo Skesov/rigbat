@@ -936,7 +936,7 @@ mod tests {
 
     #[test]
     fn every_kind_paints_its_emoji_whole() {
-        let cards = crate::egui_test::KINDS
+        let cards = DeviceKind::ALL
             .into_iter()
             .enumerate()
             .map(|(i, kind)| DeviceCard {
@@ -948,7 +948,7 @@ mod tests {
         let ctx = egui::Context::default();
         let output = run_frame(&ctx, d.wanted_size(), Vec::new(), |ui| d.show(ui));
         let painted = crate::egui_test::painted(&output);
-        for kind in crate::egui_test::KINDS {
+        for kind in DeviceKind::ALL {
             let glyph: Vec<_> = painted
                 .iter()
                 .filter(|p| p.text == kind_glyph(kind))
@@ -1012,7 +1012,7 @@ mod tests {
             for sign in [CHARGING_SIGN, LOW_SIGN] {
                 assert!(has_glyph(fonts, &font, sign), "{sign:?}");
             }
-            for glyph in crate::egui_test::KINDS.map(kind_glyph) {
+            for glyph in DeviceKind::ALL.map(kind_glyph) {
                 assert!(has_glyphs(fonts, &glyph_font, glyph), "{glyph:?}");
             }
         });

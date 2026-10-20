@@ -3,7 +3,6 @@
 
 use eframe::egui;
 
-use crate::domain::DeviceKind;
 use crate::i18n::Lang;
 
 /// The narrowest a string may be drawn and still count as readable.
@@ -225,8 +224,6 @@ pub fn assert_no_overlap(painted: &[Painted]) {
         }
     }
 }
-
-pub const KINDS: [DeviceKind; 5] = DeviceKind::ALL;
 
 /// One node of a frame's AccessKit tree; the context must have AccessKit on.
 #[derive(Debug, Clone)]

@@ -1182,7 +1182,7 @@ mod tests {
     #[test]
     fn every_kind_paints_its_emoji_whole() {
         let mut app = app_in(Lang::En, Config::default());
-        app.device_rows = crate::egui_test::KINDS
+        app.device_rows = DeviceKind::ALL
             .into_iter()
             .enumerate()
             .map(|(i, kind)| {
@@ -1199,7 +1199,7 @@ mod tests {
             }));
         }
         let painted = crate::egui_test::painted(&output.expect("a frame"));
-        for (i, kind) in crate::egui_test::KINDS.into_iter().enumerate() {
+        for (i, kind) in DeviceKind::ALL.into_iter().enumerate() {
             let find = |text: &str| {
                 let found: Vec<_> = painted.iter().filter(|p| p.text == text).collect();
                 assert_eq!(found.len(), 1, "{kind:?} {text:?}: {painted:?}");
