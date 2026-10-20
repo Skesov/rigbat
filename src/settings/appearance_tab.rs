@@ -265,10 +265,9 @@ mod tests {
     use crate::appearance::Appearance;
     use crate::config::{self, Config};
     use crate::egui_test::{
-        TEXT_SCALES, assert_whole, click_at, fully_painted_text_at, painted, run_frame,
+        assert_whole, click_at, fully_painted_text_at, lang_scales, painted, run_frame,
     };
     use crate::gui;
-    use crate::i18n::Lang;
     use crate::settings::WINDOW_MIN_SIZE;
     use crate::settings::tests::{app_saving_to, settings_app_with, tab_size};
 
@@ -277,9 +276,7 @@ mod tests {
 
     #[test]
     fn appearance_tab_text_is_whole_in_every_language_and_text_scale() {
-        for (lang, scale, theme) in Lang::ALL
-            .into_iter()
-            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
+        for (lang, scale, theme) in lang_scales()
             .flat_map(|(lang, scale)| WindowTheme::ALL.map(|theme| (lang, scale, theme)))
         {
             let mut app = settings_app_with(Config {

@@ -539,7 +539,7 @@ mod tests {
         format_coarse, state_label,
     };
     use crate::egui_test::{
-        TEXT_SCALES, assert_no_overlap, assert_whole, click_at, fully_painted_text_at,
+        assert_no_overlap, assert_whole, click_at, fully_painted_text_at, lang_scales,
         painted_text_at, run_frame,
     };
     use crate::settings::WINDOW_MIN_SIZE;
@@ -663,10 +663,7 @@ mod tests {
 
     #[test]
     fn device_rows_are_whole_in_every_language_and_text_scale() {
-        for (lang, scale) in Lang::ALL
-            .into_iter()
-            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
-        {
+        for (lang, scale) in lang_scales() {
             let mut app = app_in(lang, Config::default());
 
             let size = tab_size(scale, TEST_SIZE[1]);
@@ -704,10 +701,8 @@ mod tests {
 
     #[test]
     fn an_expanded_row_paints_its_settings_in_every_language_and_text_scale() {
-        for (lang, scale, armed) in Lang::ALL
-            .into_iter()
-            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
-            .flat_map(|(lang, scale)| [false, true].map(|armed| (lang, scale, armed)))
+        for (lang, scale, armed) in
+            lang_scales().flat_map(|(lang, scale)| [false, true].map(|armed| (lang, scale, armed)))
         {
             let mut overrides = HashMap::new();
             overrides.insert(
@@ -801,10 +796,7 @@ mod tests {
     /// and a link to the README, not only "run rigbat doctor".
     #[test]
     fn no_access_shows_the_fix_command_and_the_docs_in_every_language_and_text_scale() {
-        for (lang, scale) in Lang::ALL
-            .into_iter()
-            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
-        {
+        for (lang, scale) in lang_scales() {
             let mut app = app_in(lang, Config::default());
             let size = tab_size(scale, 2000.0);
             let painted = fully_painted_text_at(size, |ui| app.render_devices_tab(ui));

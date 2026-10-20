@@ -182,11 +182,8 @@ pub(super) mod tests {
     /// Both texts of the hash slot, in every language and text scale, fit whole.
     #[test]
     fn the_footer_is_whole_in_every_language_and_text_scale() {
-        use crate::i18n::{Lang, fl, loader};
-        for (lang, scale) in Lang::ALL
-            .into_iter()
-            .flat_map(|lang| crate::egui_test::TEXT_SCALES.map(|scale| (lang, scale)))
-        {
+        use crate::i18n::{fl, loader};
+        for (lang, scale) in crate::egui_test::lang_scales() {
             let l = loader(lang);
             let (copied, label) = (fl!(l, "about-commit-copied"), fl!(l, "about-commit-copy"));
             let github = fl!(l, "about-github");

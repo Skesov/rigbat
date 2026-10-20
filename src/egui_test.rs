@@ -4,6 +4,7 @@
 use eframe::egui;
 
 use crate::domain::DeviceKind;
+use crate::i18n::Lang;
 
 /// The narrowest a string may be drawn and still count as readable.
 const MIN_READABLE_WIDTH: f32 = 24.0;
@@ -189,6 +190,13 @@ fn collect_text(
 
 /// The text scales every window is tested at: the default and WCAG 1.4.4's 200 %.
 pub const TEXT_SCALES: [f32; 2] = [1.0, 2.0];
+
+/// Every language at every text scale.
+pub fn lang_scales() -> impl Iterator<Item = (Lang, f32)> {
+    Lang::ALL
+        .into_iter()
+        .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
+}
 
 /// Fails when an `expected` string is not painted whole, or two strings
 /// overlap. A string may wrap: translations are never shortened to fit.

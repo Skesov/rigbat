@@ -357,8 +357,8 @@ mod tests {
     use super::*;
     use crate::config::{self, Config};
     use crate::egui_test::{
-        TEXT_SCALES, assert_no_overlap, assert_targets_at_least, assert_whole, click_at,
-        fully_painted_text_at, painted_text_at, run_frame, targets_at,
+        assert_no_overlap, assert_targets_at_least, assert_whole, click_at, fully_painted_text_at,
+        lang_scales, painted_text_at, run_frame, targets_at,
     };
     use crate::settings::WINDOW_MIN_SIZE;
     use crate::settings::tests::{app_saving_to, settings_app_with, tab_size};
@@ -389,9 +389,7 @@ mod tests {
     /// clear of every other string at the narrowest window, at every text scale.
     #[test]
     fn general_tab_text_is_whole_in_every_language_and_text_scale() {
-        for (lang, scale, per_device) in Lang::ALL
-            .into_iter()
-            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
+        for (lang, scale, per_device) in lang_scales()
             .flat_map(|(lang, scale)| [false, true].map(|per_device| (lang, scale, per_device)))
         {
             let mut app = settings_app_with(Config {
@@ -679,10 +677,7 @@ mod tests {
                     .to_owned(),
             },
         ];
-        for (lang, scale) in Lang::ALL
-            .into_iter()
-            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
-        {
+        for (lang, scale) in lang_scales() {
             for problem in &problems {
                 let mut app = settings_app_with(Config {
                     language: Some(lang.tag().to_owned()),

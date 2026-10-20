@@ -674,7 +674,7 @@ mod tests {
         format_coarse, state_label,
     };
     use crate::egui_test::{
-        TEXT_SCALES, assert_no_overlap, assert_whole, fully_painted_text_at, run_frame,
+        TEXT_SCALES, assert_no_overlap, assert_whole, fully_painted_text_at, lang_scales, run_frame,
     };
 
     fn card(name: &str, presence: Presence, percent: Option<u8>) -> DeviceCard {
@@ -790,10 +790,7 @@ mod tests {
 
     #[test]
     fn every_row_state_renders_whole_in_every_language_and_text_scale() {
-        for (lang, scale) in Lang::ALL
-            .into_iter()
-            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
-        {
+        for (lang, scale) in lang_scales() {
             let mut d = dashboard(every_state(), lang);
             let painted = painted_at(&mut d, scale);
             let l = loader(lang);
@@ -901,10 +898,7 @@ mod tests {
 
     #[test]
     fn without_a_tray_or_devices_it_says_why_and_what_to_do_in_every_language() {
-        for (lang, scale) in Lang::ALL
-            .into_iter()
-            .flat_map(|lang| TEXT_SCALES.map(|scale| (lang, scale)))
-        {
+        for (lang, scale) in lang_scales() {
             let l = loader(lang);
             let mut none = Dashboard::new(None, lang, Palette::default(), mpsc::channel().1, None);
             let mut empty = dashboard(Vec::new(), lang);
