@@ -67,7 +67,7 @@ fn contact_sheet(schemes: &[ColorScheme], kind: Option<DeviceKind>) -> Pixmap {
                     None,
                 );
                 for (col, &(status, stale)) in states.iter().enumerate() {
-                    let icons = renderer.render(status, kind, &theme, mode, stale);
+                    let icons = renderer.render(&icon_key(status, kind, &theme, mode, stale));
                     let (small, large) = (icon_pixmap(&icons[0]), icon_pixmap(&icons[1]));
                     let x = (col as u32 * cell_w + PAD) as f32;
                     let paint = tiny_skia::PixmapPaint::default();

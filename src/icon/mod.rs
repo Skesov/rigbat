@@ -16,14 +16,7 @@ use theme::dimmed;
 use tiny_skia::{Color, Paint, Pixmap};
 
 pub trait IconRenderer: Send + Sync {
-    fn render(
-        &self,
-        status: BatteryStatus,
-        kind: Option<DeviceKind>,
-        theme: &Theme,
-        mode: DisplayMode,
-        stale: bool,
-    ) -> Vec<ksni::Icon>;
+    fn render(&self, key: &IconKey) -> Vec<ksni::Icon>;
 }
 
 /// Everything a rendered icon depends on: equal keys render equal pixmaps.
@@ -54,9 +47,7 @@ impl IconCache {
         if let Some((_, icons)) = self.icons.iter().find(|(k, _)| k == key) {
             return icons.clone();
         }
-        let icons = self
-            .renderer
-            .render(key.status, key.kind, &key.theme, key.mode, key.stale);
+        let icons = self.renderer.render(key);
         self.icons.push((*key, icons.clone()));
         icons
     }
@@ -84,14 +75,14 @@ impl Default for TinySkiaRenderer {
 }
 
 impl IconRenderer for TinySkiaRenderer {
-    fn render(
-        &self,
-        status: BatteryStatus,
-        kind: Option<DeviceKind>,
-        theme: &Theme,
-        mode: DisplayMode,
-        stale: bool,
-    ) -> Vec<ksni::Icon> {
+    fn render(&self, key: &IconKey) -> Vec<ksni::Icon> {
+        let IconKey {
+            status,
+            kind,
+            theme,
+            mode,
+            stale,
+        } = *key;
         let layout = Layout::new(mode, kind);
         // `resolve_for` never pairs offline with `stale`.
         let (rgba, percent) = match status {

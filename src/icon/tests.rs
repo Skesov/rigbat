@@ -18,6 +18,22 @@ impl Theme {
     }
 }
 
+fn icon_key(
+    status: BatteryStatus,
+    kind: Option<DeviceKind>,
+    theme: &Theme,
+    mode: DisplayMode,
+    stale: bool,
+) -> IconKey {
+    IconKey {
+        status,
+        kind,
+        theme: *theme,
+        mode,
+        stale,
+    }
+}
+
 /// The status mark sits under the digits with a clear gap; this asserts
 /// no digit pixel is lost at any published size.
 #[test]
@@ -38,13 +54,13 @@ fn the_status_mark_does_not_erase_a_digit() {
     ];
 
     for (status, percent, rgba) in statuses {
-        let icons = renderer.render(
+        let icons = renderer.render(&icon_key(
             status,
             Some(DeviceKind::Mouse),
             &theme,
             DisplayMode::PercentOnly,
             false,
-        );
+        ));
         for icon in icons {
             let (w, h) = (icon.width as u32, icon.height as u32);
             let mut digits = Pixmap::new(w, h).expect("digit mask pixmap");
@@ -151,7 +167,7 @@ fn dotted_digits_paint_less_but_stay_visible() {
 }
 
 fn icons(status: BatteryStatus, mode: DisplayMode) -> Vec<ksni::Icon> {
-    TinySkiaRenderer::default().render(status, None, &Theme::dark(), mode, false)
+    TinySkiaRenderer::default().render(&icon_key(status, None, &Theme::dark(), mode, false))
 }
 
 #[test]
@@ -178,8 +194,20 @@ fn dark_and_light_themes_differ_by_normal() {
 fn render_dark_differs_from_light() {
     let renderer = TinySkiaRenderer::default();
     let status = BatteryStatus::Ok { percent: 50 };
-    let dark_icons = renderer.render(status, None, &Theme::dark(), DisplayMode::IconOnly, false);
-    let light_icons = renderer.render(status, None, &Theme::light(), DisplayMode::IconOnly, false);
+    let dark_icons = renderer.render(&icon_key(
+        status,
+        None,
+        &Theme::dark(),
+        DisplayMode::IconOnly,
+        false,
+    ));
+    let light_icons = renderer.render(&icon_key(
+        status,
+        None,
+        &Theme::light(),
+        DisplayMode::IconOnly,
+        false,
+    ));
 
     assert!(!dark_icons.is_empty());
     assert!(!light_icons.is_empty());
@@ -205,8 +233,14 @@ fn stale_reading_renders_more_transparent_than_fresh() {
     let status = BatteryStatus::Ok { percent: 50 };
     let theme = Theme::dark();
 
-    let fresh = renderer.render(status, None, &theme, DisplayMode::IconOnly, false);
-    let stale = renderer.render(status, None, &theme, DisplayMode::IconOnly, true);
+    let fresh = renderer.render(&icon_key(
+        status,
+        None,
+        &theme,
+        DisplayMode::IconOnly,
+        false,
+    ));
+    let stale = renderer.render(&icon_key(status, None, &theme, DisplayMode::IconOnly, true));
 
     assert_ne!(&fresh[0].data, &stale[0].data);
     assert!(
@@ -220,20 +254,20 @@ fn stale_offline_renders_same_as_non_stale_offline() {
     let renderer = TinySkiaRenderer::default();
     let theme = Theme::dark();
 
-    let plain = renderer.render(
+    let plain = renderer.render(&icon_key(
         BatteryStatus::Offline,
         None,
         &theme,
         DisplayMode::IconOnly,
         false,
-    );
-    let stale_offline = renderer.render(
+    ));
+    let stale_offline = renderer.render(&icon_key(
         BatteryStatus::Offline,
         None,
         &theme,
         DisplayMode::IconOnly,
         true,
-    );
+    ));
 
     assert_eq!(&plain[0].data, &stale_offline[0].data);
 }
@@ -244,8 +278,14 @@ fn low_status_never_dims_when_stale() {
     let theme = Theme::dark();
     let status = BatteryStatus::Low { percent: 10 };
 
-    let fresh = renderer.render(status, None, &theme, DisplayMode::IconOnly, false);
-    let stale = renderer.render(status, None, &theme, DisplayMode::IconOnly, true);
+    let fresh = renderer.render(&icon_key(
+        status,
+        None,
+        &theme,
+        DisplayMode::IconOnly,
+        false,
+    ));
+    let stale = renderer.render(&icon_key(status, None, &theme, DisplayMode::IconOnly, true));
 
     assert_eq!(mean_alpha(&fresh[0]), mean_alpha(&stale[0]));
     assert_eq!(&fresh[0].data, &stale[0].data);
@@ -257,8 +297,14 @@ fn stale_dimming_leaves_outline_and_digits_unchanged_only_fill_dims() {
     let theme = Theme::dark();
     let status = BatteryStatus::Ok { percent: 60 };
 
-    let fresh = renderer.render(status, None, &theme, DisplayMode::IconOnly, false);
-    let stale = renderer.render(status, None, &theme, DisplayMode::IconOnly, true);
+    let fresh = renderer.render(&icon_key(
+        status,
+        None,
+        &theme,
+        DisplayMode::IconOnly,
+        false,
+    ));
+    let stale = renderer.render(&icon_key(status, None, &theme, DisplayMode::IconOnly, true));
     let fresh_icon = &fresh[0];
     let stale_icon = &stale[0];
 
@@ -387,13 +433,13 @@ fn theme_color_as_drawn(c: [u8; 4]) -> (u8, u8, u8, u8) {
 fn ok_status_uses_normal_and_not_low_or_charging() {
     let renderer = TinySkiaRenderer { sizes: vec![22] };
     let theme = Theme::dark();
-    let icons = renderer.render(
+    let icons = renderer.render(&icon_key(
         BatteryStatus::Ok { percent: 80 },
         None,
         &theme,
         DisplayMode::IconOnly,
         false,
-    );
+    ));
     let colors = opaque_colors(&icons[0]);
     assert!(
         colors.contains(&theme_color_as_drawn(theme.normal)),
@@ -413,13 +459,13 @@ fn ok_status_uses_normal_and_not_low_or_charging() {
 fn low_status_uses_low_and_not_normal() {
     let renderer = TinySkiaRenderer { sizes: vec![22] };
     let theme = Theme::dark();
-    let icons = renderer.render(
+    let icons = renderer.render(&icon_key(
         BatteryStatus::Low { percent: 10 },
         None,
         &theme,
         DisplayMode::IconOnly,
         false,
-    );
+    ));
     let colors = opaque_colors(&icons[0]);
     assert!(
         colors.contains(&theme_color_as_drawn(theme.low)),
@@ -435,13 +481,13 @@ fn low_status_uses_low_and_not_normal() {
 fn charging_status_uses_charging_color() {
     let renderer = TinySkiaRenderer { sizes: vec![22] };
     let theme = Theme::dark();
-    let icons = renderer.render(
+    let icons = renderer.render(&icon_key(
         BatteryStatus::Charging { percent: 40 },
         None,
         &theme,
         DisplayMode::IconOnly,
         false,
-    );
+    ));
     let colors = opaque_colors(&icons[0]);
     assert!(
         colors.contains(&theme_color_as_drawn(theme.charging)),
@@ -453,13 +499,13 @@ fn charging_status_uses_charging_color() {
 fn offline_status_uses_offline_color() {
     let renderer = TinySkiaRenderer { sizes: vec![22] };
     let theme = Theme::dark();
-    let icons = renderer.render(
+    let icons = renderer.render(&icon_key(
         BatteryStatus::Offline,
         None,
         &theme,
         DisplayMode::IconOnly,
         false,
-    );
+    ));
     let colors = opaque_colors(&icons[0]);
     assert!(
         colors.contains(&theme_color_as_drawn(theme.offline)),
@@ -472,13 +518,13 @@ fn fill_pixel_count_increases_with_percent() {
     let renderer = TinySkiaRenderer { sizes: vec![22] };
     let theme = Theme::dark();
     let count_for = |percent: u8| {
-        let icons = renderer.render(
+        let icons = renderer.render(&icon_key(
             BatteryStatus::Ok { percent },
             None,
             &theme,
             DisplayMode::IconOnly,
             false,
-        );
+        ));
         opaque_pixel_count(&icons[0])
     };
 
@@ -501,13 +547,13 @@ fn percent_only_digits_are_value_sensitive() {
     let theme = Theme::dark();
     let render = |percent: u8| {
         renderer
-            .render(
+            .render(&icon_key(
                 BatteryStatus::Ok { percent },
                 None,
                 &theme,
                 DisplayMode::PercentOnly,
                 false,
-            )
+            ))
             .remove(0)
     };
 
@@ -528,20 +574,20 @@ fn percent_only_digits_are_value_sensitive() {
 fn offline_is_visually_distinct_from_empty_battery() {
     let renderer = TinySkiaRenderer { sizes: vec![22] };
     let theme = Theme::dark();
-    let offline = renderer.render(
+    let offline = renderer.render(&icon_key(
         BatteryStatus::Offline,
         None,
         &theme,
         DisplayMode::IconOnly,
         false,
-    );
-    let empty = renderer.render(
+    ));
+    let empty = renderer.render(&icon_key(
         BatteryStatus::Ok { percent: 0 },
         None,
         &theme,
         DisplayMode::IconOnly,
         false,
-    );
+    ));
     assert_ne!(
         offline[0].data, empty[0].data,
         "offline (crossed battery) must differ from an empty online battery"
@@ -552,8 +598,20 @@ fn offline_is_visually_distinct_from_empty_battery() {
 fn ok_status_theme_reaches_the_pixels() {
     let renderer = TinySkiaRenderer { sizes: vec![22] };
     let status = BatteryStatus::Ok { percent: 50 };
-    let dark = renderer.render(status, None, &Theme::dark(), DisplayMode::IconOnly, false);
-    let light = renderer.render(status, None, &Theme::light(), DisplayMode::IconOnly, false);
+    let dark = renderer.render(&icon_key(
+        status,
+        None,
+        &Theme::dark(),
+        DisplayMode::IconOnly,
+        false,
+    ));
+    let light = renderer.render(&icon_key(
+        status,
+        None,
+        &Theme::light(),
+        DisplayMode::IconOnly,
+        false,
+    ));
     assert_ne!(
         dark[0].data, light[0].data,
         "Ok uses theme.normal, which differs between dark and light themes"
@@ -566,7 +624,7 @@ fn no_mode_panics_on_a_1px_or_2px_canvas() {
     for mode in DisplayMode::ALL {
         for kind in kinds() {
             for status in STATUSES {
-                let icons = renderer.render(status, kind, &Theme::dark(), mode, false);
+                let icons = renderer.render(&icon_key(status, kind, &Theme::dark(), mode, false));
                 assert_eq!(icons.len(), 2, "{mode:?} {kind:?} {status:?}");
             }
         }
@@ -588,7 +646,13 @@ fn masks(status: BatteryStatus, mode: DisplayMode, stale: bool) -> Vec<Vec<bool>
     TinySkiaRenderer {
         sizes: PUBLISHED_SIZES.to_vec(),
     }
-    .render(status, Some(DeviceKind::Mouse), &monochrome(), mode, stale)
+    .render(&icon_key(
+        status,
+        Some(DeviceKind::Mouse),
+        &monochrome(),
+        mode,
+        stale,
+    ))
     .iter()
     .map(|icon| {
         icon.data
@@ -613,10 +677,20 @@ fn charging_differs_from_ok_in_shape_and_low_in_colour_alone() {
             let ok = masks(BatteryStatus::Ok { percent }, mode, false);
             let charging = masks(BatteryStatus::Charging { percent }, mode, false);
             let low = masks(BatteryStatus::Low { percent }, mode, false);
-            let ok_colour =
-                renderer.render(BatteryStatus::Ok { percent }, mouse, &theme, mode, false);
-            let low_colour =
-                renderer.render(BatteryStatus::Low { percent }, mouse, &theme, mode, false);
+            let ok_colour = renderer.render(&icon_key(
+                BatteryStatus::Ok { percent },
+                mouse,
+                &theme,
+                mode,
+                false,
+            ));
+            let low_colour = renderer.render(&icon_key(
+                BatteryStatus::Low { percent },
+                mouse,
+                &theme,
+                mode,
+                false,
+            ));
             for (i, size) in PUBLISHED_SIZES.iter().enumerate() {
                 let at = format!("{mode:?} {percent}% at {size} px");
                 assert_ne!(ok[i], charging[i], "{at}: charging looks like ok");
@@ -688,7 +762,13 @@ fn the_status_mark_is_drawn_whole() {
                     "{at}: {area:?} leaves the canvas"
                 );
                 let icon = TinySkiaRenderer { sizes: vec![size] }
-                    .render(status, Some(DeviceKind::Mouse), &Theme::dark(), mode, false)
+                    .render(&icon_key(
+                        status,
+                        Some(DeviceKind::Mouse),
+                        &Theme::dark(),
+                        mode,
+                        false,
+                    ))
                     .remove(0);
                 for cell in cell_areas(mark, area) {
                     for y in cell.y..cell.bottom() {
@@ -727,7 +807,7 @@ fn icon_22(
     stale: bool,
 ) -> ksni::Icon {
     TinySkiaRenderer { sizes: vec![22] }
-        .render(status, kind, &monochrome(), mode, stale)
+        .render(&icon_key(status, kind, &monochrome(), mode, stale))
         .remove(0)
 }
 
@@ -764,22 +844,28 @@ fn only_device_and_battery_draws_the_kind() {
     for status in STATUSES {
         for stale in [false, true] {
             for mode in [DisplayMode::IconOnly, DisplayMode::PercentOnly] {
-                let plain = pixels(renderer.render(status, None, &theme, mode, stale));
+                let plain = pixels(renderer.render(&icon_key(status, None, &theme, mode, stale)));
                 for kind in kinds() {
-                    let icons = pixels(renderer.render(status, kind, &theme, mode, stale));
+                    let icons =
+                        pixels(renderer.render(&icon_key(status, kind, &theme, mode, stale)));
                     assert!(icons == plain, "{mode:?} {status:?} {kind:?}");
                 }
             }
-            let battery =
-                pixels(renderer.render(status, None, &theme, DisplayMode::IconOnly, stale));
+            let battery = pixels(renderer.render(&icon_key(
+                status,
+                None,
+                &theme,
+                DisplayMode::IconOnly,
+                stale,
+            )));
             for kind in [None, Some(DeviceKind::Other)] {
-                let icons = pixels(renderer.render(
+                let icons = pixels(renderer.render(&icon_key(
                     status,
                     kind,
                     &theme,
                     DisplayMode::DeviceAndBattery,
                     stale,
-                ));
+                )));
                 assert!(icons == battery, "{status:?} {kind:?}");
             }
         }
@@ -852,7 +938,8 @@ fn no_mode_panics_at_any_published_size() {
         for kind in kinds() {
             for status in STATUSES {
                 for stale in [false, true] {
-                    let icons = renderer.render(status, kind, &Theme::dark(), mode, stale);
+                    let icons =
+                        renderer.render(&icon_key(status, kind, &Theme::dark(), mode, stale));
                     assert_eq!(
                         icons.len(),
                         renderer.sizes.len(),
@@ -867,16 +954,9 @@ fn no_mode_panics_at_any_published_size() {
 struct CountingRenderer(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
 impl IconRenderer for CountingRenderer {
-    fn render(
-        &self,
-        status: BatteryStatus,
-        kind: Option<DeviceKind>,
-        theme: &Theme,
-        mode: DisplayMode,
-        stale: bool,
-    ) -> Vec<ksni::Icon> {
+    fn render(&self, key: &IconKey) -> Vec<ksni::Icon> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        TinySkiaRenderer::default().render(status, kind, theme, mode, stale)
+        TinySkiaRenderer::default().render(key)
     }
 }
 

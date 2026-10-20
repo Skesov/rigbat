@@ -5,7 +5,7 @@ use crate::appearance::ColorScheme;
 use crate::domain::{BatteryStatus, DeviceKind, DisplayMode, Palette, WindowTheme};
 use crate::gui;
 use crate::i18n::{fl, loader};
-use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
+use crate::icon::{IconKey, IconRenderer, Theme, TinySkiaRenderer};
 use crate::palette::{self, Rgb, Swatches};
 
 /// Edge of an icon-style preview, points.
@@ -191,10 +191,14 @@ fn render_style_previews(
         .into_iter()
         .filter_map(|mode| {
             let kind = (mode == DisplayMode::DeviceAndBattery).then_some(DeviceKind::Mouse);
-            let icon = renderer
-                .render(STYLE_PREVIEW_STATUS, kind, &theme, mode, false)
-                .into_iter()
-                .next()?;
+            let key = IconKey {
+                status: STYLE_PREVIEW_STATUS,
+                kind,
+                theme,
+                mode,
+                stale: false,
+            };
+            let icon = renderer.render(&key).into_iter().next()?;
             let size = [
                 usize::try_from(icon.width).ok()?,
                 usize::try_from(icon.height).ok()?,
