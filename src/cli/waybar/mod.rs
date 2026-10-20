@@ -7,10 +7,12 @@ use crate::domain::TrayState;
 
 mod follow;
 mod render;
+mod source;
 
 pub use follow::{follow_tray, forward, watch_tray};
 pub use render::featured;
 use render::render_line;
+pub use source::{OwnRuntime, next_change};
 
 /// How long `run` waits for a first battery reading before printing
 /// whatever state it has.
