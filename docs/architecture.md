@@ -14,7 +14,7 @@ a shared headless core:
   survives a device going unreachable the same way it does in the tray. With a tray running it
   follows the tray's `org.rigbat.Tray1` state instead of polling the hardware a second time;
   only without one does it hold its own `Supervisor`. A `Supervisor` has no stop of its own, so
-  that one runs on a separate tokio runtime (`OwnRuntime` in `main.rs`): when a tray appears the
+  that one runs on a separate tokio runtime (`OwnRuntime` in `cli/waybar/source.rs`): when a tray appears the
   runtime is shut down, which drops every task spawned on it — source tasks with their hidraw
   handles, the BlueZ and resume watchers, the system-bus connection — and the module follows the
   tray; when the tray stops it starts a fresh one.

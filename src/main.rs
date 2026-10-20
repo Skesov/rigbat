@@ -411,100 +411,10 @@ async fn run_tray() {
     .await;
 }
 
-/// Runs `--waybar` as a long-lived process instead of a one-shot poll, so a
-/// sleeping Bluetooth peripheral keeps showing its retained reading instead
-/// of `offline` on every bar tick — "If no interval or signal is defined, it
-/// is assumed that the out script loops itself" (`waybar-custom(5)`).
-///
-/// Modeled on `run_tray`, minus the icon/appearance/notifications stack: the
-/// bar has no icon to render, and the tray process already owns low-battery
-/// notifications, so spawning a second notifier here would double them up.
+/// Runs `--waybar` (`cli::waybar::serve`); with no tray running it polls
+/// through a `Supervisor` of its own.
 async fn run_waybar() {
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        "starting rigbat waybar module"
-    );
-
-    let config = crate::config::load();
-    let (config_tx, _config_rx) = tokio::sync::watch::channel(config);
-    crate::config::watch_file(config_tx.clone());
-
-    let conn = zbus::Connection::session()
-        .await
-        .map_err(|e| tracing::warn!("no session bus, polling the devices here: {e}"))
-        .ok();
-    let (tray_running, mut tray_changes) = match &conn {
-        Some(conn) => match cli::waybar::watch_tray(conn).await {
-            Ok((running, changes)) => (running, Some(changes)),
-            Err(e) => {
-                tracing::warn!("cannot tell whether the tray runs: {e:#}");
-                (false, None)
-            }
-        },
-        None => (false, None),
-    };
-    let (state_tx, state_rx) = tokio::sync::watch::channel(domain::TrayState { devices: vec![] });
-    let mut source = waybar_source(conn.as_ref(), tray_running, &state_tx, &config_tx).await;
-
-    // A receiver of our own, so a primary_device/hidden_devices edit is picked
-    // up between two TrayState publications; config_tx outlives the loop, as in run_tray.
-    let module = cli::waybar::run(state_rx, config_tx.subscribe());
-    tokio::pin!(module);
-    loop {
-        tokio::select! {
-            () = &mut module => return,
-            Some(change) = cli::waybar::next_change(&mut tray_changes) => {
-                let running = change.args().is_ok_and(|args| args.new_owner().is_some());
-                if source.as_ref().is_some_and(|s| s.is_tray() == running) {
-                    continue;
-                }
-                tracing::info!(tray_running = running, "switching the waybar module's source");
-                // The old source stops before the new one starts: never two pollers at once.
-                drop(source.take());
-                source = waybar_source(conn.as_ref(), running, &state_tx, &config_tx).await;
-            }
-        }
-    }
-}
-
-/// Where `--waybar` reads device state from; dropping it stops all of it.
-enum WaybarSource {
-    Tray(tokio::task::JoinHandle<()>),
-    Own { _runtime: cli::waybar::OwnRuntime },
-}
-
-impl WaybarSource {
-    fn is_tray(&self) -> bool {
-        matches!(self, Self::Tray(_))
-    }
-}
-
-impl Drop for WaybarSource {
-    fn drop(&mut self) {
-        if let Self::Tray(task) = self {
-            task.abort();
-        }
-    }
-}
-
-/// The running tray's state when one runs, else a `Supervisor` of our own.
-async fn waybar_source(
-    conn: Option<&zbus::Connection>,
-    tray_running: bool,
-    tx: &tokio::sync::watch::Sender<domain::TrayState>,
-    config_tx: &tokio::sync::watch::Sender<config::Config>,
-) -> Option<WaybarSource> {
-    if tray_running && let Some(conn) = conn {
-        match cli::waybar::follow_tray(conn, tx.clone()).await {
-            Ok(task) => {
-                tracing::info!("following the running tray's state");
-                return Some(WaybarSource::Tray(task));
-            }
-            Err(e) => tracing::warn!("cannot follow the running tray: {e:#}"),
-        }
-    }
-    let (tx, config_tx) = (tx.clone(), config_tx.clone());
-    let started = cli::waybar::OwnRuntime::start(move || {
+    cli::waybar::serve(|tx, config_tx| {
         let ctx = std::sync::Arc::new(sources::Context::new());
         // No state store here: only `rigbat tray` writes to it (see
         // `src/state/mod.rs`'s module doc and `run_tray`).
@@ -516,17 +426,8 @@ async fn waybar_source(
         );
         spawn_bus_dependent_tasks(ctx, refresh);
         tokio::spawn(cli::waybar::forward(rx, tx));
-    });
-    match started {
-        Ok(rt) => {
-            tracing::info!("no tray runs, polling the devices here");
-            Some(WaybarSource::Own { _runtime: rt })
-        }
-        Err(e) => {
-            tracing::error!("cannot start polling the devices: {e:#}");
-            None
-        }
-    }
+    })
+    .await;
 }
 
 #[cfg(test)]
