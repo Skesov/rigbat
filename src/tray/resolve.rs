@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::domain::{
-    BootTime, DeviceId, DeviceState, PrimaryStatus, Roster, TrayState, device_status,
+    BatteryStatus, BootTime, DeviceId, DeviceState, Roster, TrayState, device_status,
 };
 
 /// The devices the tray shows, in roster order.
@@ -16,7 +16,7 @@ pub(crate) fn visible<'a>(state: &'a TrayState, cfg: &Config, now: BootTime) -> 
 /// The device a tray icon stands for, resolved against the current state and config.
 pub(crate) struct Resolved {
     pub(crate) device: DeviceState,
-    pub(crate) status: PrimaryStatus,
+    pub(crate) status: BatteryStatus,
     /// `true` when `status` classifies a retained reading from a device that
     /// is not currently `Online` — the icon should render dimmed.
     pub(super) stale: bool,
@@ -58,7 +58,7 @@ mod tests {
     use super::{Resolved, visible};
     use crate::config::Config;
     use crate::domain::{BatteryReading, BootTime, ChargeState, DeviceId, DeviceInfo};
-    use crate::domain::{DeviceState, Presence, PrimaryStatus, Transport, TrayState};
+    use crate::domain::{BatteryStatus, DeviceState, Presence, Transport, TrayState};
     use crate::tray::fixtures::{
         cfg_with_primary, key, make_reading, make_state, no_access, retained,
         same_name_two_transports,
@@ -271,7 +271,7 @@ mod tests {
         // so the global default alone would report Ok, isolating the override.
         cfg.low_threshold = 5;
         let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
-        assert!(matches!(resolved.status, PrimaryStatus::Ok { .. }));
+        assert!(matches!(resolved.status, BatteryStatus::Ok { .. }));
 
         cfg.device_overrides.insert(
             "mouse".to_string(),
@@ -281,7 +281,7 @@ mod tests {
             },
         );
         let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
-        assert!(matches!(resolved.status, PrimaryStatus::Low { .. }));
+        assert!(matches!(resolved.status, BatteryStatus::Low { .. }));
     }
 
     #[test]
@@ -289,7 +289,7 @@ mod tests {
         let cfg = cfg_with_primary(None);
         let state = unreachable(Some(make_reading(5)));
         let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
-        assert!(matches!(resolved.status, PrimaryStatus::Low { .. }));
+        assert!(matches!(resolved.status, BatteryStatus::Low { .. }));
         assert!(resolved.stale);
     }
 
@@ -310,7 +310,7 @@ mod tests {
             devices: vec![retained("mouse", 88, Duration::from_secs(3600))],
         };
         let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
-        assert_eq!(resolved.status, PrimaryStatus::Ok { percent: 88 });
+        assert_eq!(resolved.status, BatteryStatus::Ok { percent: 88 });
         assert!(resolved.stale);
     }
 
@@ -333,7 +333,7 @@ mod tests {
         let cfg = cfg_with_primary(None);
         let state = unreachable(Some(BatteryReading::new(80, ChargeState::Charging)));
         let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
-        assert_eq!(resolved.status, PrimaryStatus::Ok { percent: 80 });
+        assert_eq!(resolved.status, BatteryStatus::Ok { percent: 80 });
         assert!(resolved.stale);
     }
 
@@ -344,7 +344,7 @@ mod tests {
         cfg.low_threshold = 20;
         let state = unreachable(Some(BatteryReading::new(15, ChargeState::Charging)));
         let resolved = resolve_for(Some(&key("mouse")), &state, &cfg, crate::clock::now()).unwrap();
-        assert_eq!(resolved.status, PrimaryStatus::Low { percent: 15 });
+        assert_eq!(resolved.status, BatteryStatus::Low { percent: 15 });
         assert!(resolved.stale);
     }
 

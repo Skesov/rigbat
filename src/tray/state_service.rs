@@ -150,7 +150,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::domain::{DeviceState, Estimate, Presence, PrimaryStatus, Transport};
+    use crate::domain::{BatteryStatus, DeviceState, Estimate, Presence, Transport};
 
     fn device(name: &str, presence: Presence, percent: u8, seen: BootTime) -> DeviceState {
         DeviceState::test(name)
@@ -187,7 +187,7 @@ mod tests {
             devices: vec![device("mouse", Presence::Unreachable, 15, seen)],
         };
         let card = &snapshot(&state, &Config::default(), now).devices[0];
-        assert_eq!(card.status, PrimaryStatus::Low { percent: 15 });
+        assert_eq!(card.status, BatteryStatus::Low { percent: 15 });
         assert!(card.stale);
         assert_eq!(card.seen_secs_ago, Some(600));
         assert_eq!(card.remaining_secs, Some(3600));

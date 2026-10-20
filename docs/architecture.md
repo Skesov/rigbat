@@ -32,7 +32,7 @@ Dependencies point inward. `domain` is pure: it imports only `i18n` and no infra
 layers, never the reverse.
 
 ```text
-        domain            pure types + logic (DeviceInfo, BatteryReading, PrimaryStatus,
+        domain            pure types + logic (DeviceInfo, BatteryReading, BatteryStatus,
           ▲               classify, guess_kind, freedesktop_icon_name, DeviceId, estimate,
           │               roster policy, device text, TrayState, DisplayMode/TrayMode/Palette)
         i18n              Fluent catalogues + Lang; pure, so domain may use it

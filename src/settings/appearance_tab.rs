@@ -2,7 +2,7 @@ use eframe::egui;
 
 use super::{SettingsApp, widgets};
 use crate::appearance::ColorScheme;
-use crate::domain::{DeviceKind, DisplayMode, Palette, PrimaryStatus, WindowTheme};
+use crate::domain::{BatteryStatus, DeviceKind, DisplayMode, Palette, WindowTheme};
 use crate::gui;
 use crate::i18n::{fl, loader};
 use crate::icon::{IconRenderer, Theme, TinySkiaRenderer};
@@ -22,7 +22,7 @@ const SWATCH_CELL: usize = 5;
 const SWATCH_GAP: usize = 2;
 
 /// The one reading every icon-style preview shows.
-const STYLE_PREVIEW_STATUS: PrimaryStatus = PrimaryStatus::Ok { percent: 72 };
+const STYLE_PREVIEW_STATUS: BatteryStatus = BatteryStatus::Ok { percent: 72 };
 
 /// The icon-style tiles' pictures, rendered once per scheme, palette and pixel density.
 pub(super) struct StylePreviews {

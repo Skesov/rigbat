@@ -363,7 +363,7 @@ Rendered by `TinySkiaRenderer` behind the `IconRenderer` port (`src/icon/mod.rs`
   centred on the top edge (rows 0–13); the bar's outline over rows 16–21 with the nub in the
   last column, the fill one pixel clear of the outline. Other sizes scale the 22 px layout and
   round to whole pixels. `DeviceKind::Other` has no silhouette and renders as `IconOnly`.
-- Colour from `PrimaryStatus` through `Theme::new(palette, scheme)` ([Readability](#readability)).
+- Colour from `BatteryStatus` through `Theme::new(palette, scheme)` ([Readability](#readability)).
   Offline is a crossed battery (`draw_cross_line`) in the neutral at `DIM`; in
   `DeviceAndBattery` the silhouette over an empty bar with one diagonal slash.
 - Status marks (`status_mark`), drawn whole in the full status colour behind a clear halo: a bolt

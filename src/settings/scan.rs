@@ -171,7 +171,7 @@ fn row(card: DeviceCard, now_unix: i64) -> Option<ScannedDevice> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ChargeState, DeviceKind, DisplayMode, PrimaryStatus, Transport};
+    use crate::domain::{BatteryStatus, ChargeState, DeviceKind, DisplayMode, Transport};
 
     fn card(name: &str, presence: Presence, percent: Option<u8>) -> DeviceCard {
         DeviceCard {
@@ -182,7 +182,7 @@ mod tests {
             presence,
             percent,
             charge: percent.map(|_| ChargeState::Discharging),
-            status: PrimaryStatus::Offline,
+            status: BatteryStatus::Offline,
             stale: false,
             seen_secs_ago: None,
             remaining_secs: None,

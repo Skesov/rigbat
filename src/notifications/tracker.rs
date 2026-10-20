@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::config::Config;
 use crate::domain::{
-    BatteryReading, BootTime, DeviceId, Presence, PrimaryStatus, TrayState, classify,
+    BatteryReading, BatteryStatus, BootTime, DeviceId, Presence, TrayState, classify,
 };
 
 /// Consecutive distinct low readings required before a notification fires.
@@ -66,12 +66,12 @@ enum Level {
 
 fn alert_level(reading: Option<BatteryReading>, threshold: u8) -> Level {
     match classify(reading, threshold) {
-        PrimaryStatus::Low { percent } => Level::Low(Urgency::of(percent)),
-        PrimaryStatus::Charging { .. } => Level::Rearmed,
-        PrimaryStatus::Ok { percent } if percent >= threshold.saturating_add(REARM_MARGIN) => {
+        BatteryStatus::Low { percent } => Level::Low(Urgency::of(percent)),
+        BatteryStatus::Charging { .. } => Level::Rearmed,
+        BatteryStatus::Ok { percent } if percent >= threshold.saturating_add(REARM_MARGIN) => {
             Level::Rearmed
         }
-        PrimaryStatus::Ok { .. } | PrimaryStatus::Offline => Level::Recovering,
+        BatteryStatus::Ok { .. } | BatteryStatus::Offline => Level::Recovering,
     }
 }
 

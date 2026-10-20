@@ -419,7 +419,7 @@ mod featured_tests {
     use std::time::Duration;
 
     use crate::config::Config;
-    use crate::domain::{BootTime, DeviceState, Presence, PrimaryStatus, Transport, TrayState};
+    use crate::domain::{BatteryStatus, BootTime, DeviceState, Presence, Transport, TrayState};
 
     fn device(
         name: &str,
@@ -499,7 +499,7 @@ mod featured_tests {
                     waybar.info.transport,
                     waybar_status
                 ),
-                (name, transport, PrimaryStatus::Ok { percent }),
+                (name, transport, BatteryStatus::Ok { percent }),
                 "pin {primary:?}"
             );
 

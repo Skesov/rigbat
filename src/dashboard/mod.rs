@@ -13,7 +13,7 @@ use zbus::fdo::{DBusProxy, NameOwnerChangedStream};
 
 use crate::config;
 use crate::domain::{
-    BootTime, Palette, Presence, PrimaryStatus, WindowTheme, charge_value, roster_order,
+    BatteryStatus, BootTime, Palette, Presence, WindowTheme, charge_value, roster_order,
     status_note,
 };
 use crate::gui::window_command::Pending;
@@ -549,7 +549,7 @@ fn render_row(
     gui::live_region(ui.ctx(), response.id, &format!("{}: {value}", card.name));
     response.on_hover_text(details(card, lang));
     let visuals = ui.visuals().clone();
-    let low = matches!(card.status, PrimaryStatus::Low { .. });
+    let low = matches!(card.status, BatteryStatus::Low { .. });
     let online = card.presence == Presence::Online;
 
     gui::paint_glyph(ui, kind_glyph(card.kind), rect.left(), rect.center().y);
@@ -600,11 +600,11 @@ fn render_row(
     );
 }
 
-fn bar_fill(reading: PrimaryStatus, status: &StatusColors) -> egui::Color32 {
+fn bar_fill(reading: BatteryStatus, status: &StatusColors) -> egui::Color32 {
     match reading {
-        PrimaryStatus::Low { .. } => status.low,
-        PrimaryStatus::Charging { .. } => status.charging,
-        PrimaryStatus::Ok { .. } | PrimaryStatus::Offline => status.normal,
+        BatteryStatus::Low { .. } => status.low,
+        BatteryStatus::Charging { .. } => status.charging,
+        BatteryStatus::Ok { .. } | BatteryStatus::Offline => status.normal,
     }
 }
 
@@ -679,9 +679,9 @@ mod tests {
 
     fn card(name: &str, presence: Presence, percent: Option<u8>) -> DeviceCard {
         let status = match percent {
-            Some(p) if p <= 20 => PrimaryStatus::Low { percent: p },
-            Some(p) => PrimaryStatus::Ok { percent: p },
-            None => PrimaryStatus::Offline,
+            Some(p) if p <= 20 => BatteryStatus::Low { percent: p },
+            Some(p) => BatteryStatus::Ok { percent: p },
+            None => BatteryStatus::Offline,
         };
         DeviceCard {
             name: name.to_owned(),
@@ -702,7 +702,7 @@ mod tests {
     fn charging(name: &str, percent: u8) -> DeviceCard {
         DeviceCard {
             charge: Some(ChargeState::Charging),
-            status: PrimaryStatus::Charging { percent },
+            status: BatteryStatus::Charging { percent },
             remaining_secs: None,
             kind: DeviceKind::Headset,
             ..card(name, Presence::Online, Some(percent))
@@ -799,7 +799,7 @@ mod tests {
             let l = loader(lang);
             let age = format_age(Duration::from_secs(2 * 3600), lang);
             let estimate = format_coarse(Duration::from_secs(7 * 3600), lang);
-            let offline = PrimaryStatus::Offline;
+            let offline = BatteryStatus::Offline;
             let expected = [
                 "MX Anywhere 3".to_owned(),
                 "Nothing Ear (2)".to_owned(),

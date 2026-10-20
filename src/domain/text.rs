@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use super::estimate::format_coarse;
-use super::{BootTime, ChargeState, DeviceState, Presence, PrimaryStatus};
+use super::{BatteryStatus, BootTime, ChargeState, DeviceState, Presence};
 use crate::i18n::{Lang, fl, loader};
 
 /// Installs the shipped udev rule and applies it to the hidraw nodes already
@@ -76,7 +76,7 @@ pub fn charge_value(
     presence: Presence,
     percent: Option<u8>,
     charge: Option<ChargeState>,
-    status: PrimaryStatus,
+    status: BatteryStatus,
     lang: Lang,
 ) -> String {
     value_text(presence, percent, charge, status, lang, Slot::Own)
@@ -86,14 +86,14 @@ fn value_text(
     presence: Presence,
     percent: Option<u8>,
     charge: Option<ChargeState>,
-    status: PrimaryStatus,
+    status: BatteryStatus,
     lang: Lang,
     slot: Slot,
 ) -> String {
     let text = match (presence, percent) {
         (Presence::Online, None) => "—".to_owned(),
         (Presence::Online, Some(p)) => match (status, charge) {
-            (PrimaryStatus::Charging { .. }, _) => format!("{CHARGING_SIGN} {p}%"),
+            (BatteryStatus::Charging { .. }, _) => format!("{CHARGING_SIGN} {p}%"),
             (_, Some(ChargeState::Full)) => {
                 format!("{p}% · {}", state_label(ChargeState::Full, lang))
             }
@@ -104,7 +104,7 @@ fn value_text(
             Slot::AfterName => presence_label(presence, lang),
         },
     };
-    if matches!(status, PrimaryStatus::Low { .. }) {
+    if matches!(status, BatteryStatus::Low { .. }) {
         format!("{LOW_SIGN} {text}")
     } else {
         text
@@ -152,7 +152,7 @@ pub fn status_note(
 /// A tray menu row and tooltip: name, the value, then `status_note`.
 pub fn device_line(
     device: &DeviceState,
-    status: PrimaryStatus,
+    status: BatteryStatus,
     now: BootTime,
     lang: Lang,
 ) -> String {
@@ -369,8 +369,8 @@ mod tests {
         let r = BatteryReading::new(88, ChargeState::Discharging);
         let unreachable = state("NuPhy", Presence::Unreachable, Some(r), Some(seen));
         let denied = state("mouse", Presence::NoAccess, None, None);
-        let offline = PrimaryStatus::Offline;
-        let low = PrimaryStatus::Low { percent: 5 };
+        let offline = BatteryStatus::Offline;
+        let low = BatteryStatus::Low { percent: 5 };
         for (lang, text, expected) in [
             (
                 Lang::En,
@@ -388,7 +388,7 @@ mod tests {
                     Presence::Online,
                     Some(100),
                     Some(ChargeState::Full),
-                    PrimaryStatus::Ok { percent: 100 },
+                    BatteryStatus::Ok { percent: 100 },
                     Lang::En,
                 ),
                 "100% · full",

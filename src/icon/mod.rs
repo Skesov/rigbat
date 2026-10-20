@@ -4,7 +4,7 @@ mod device_bar;
 mod digits;
 mod theme;
 
-use crate::domain::{DeviceKind, DisplayMode, PrimaryStatus};
+use crate::domain::{BatteryStatus, DeviceKind, DisplayMode};
 use battery::{
     battery_geometry, draw_battery_fill, draw_battery_nub, draw_battery_outline, draw_cross_line,
 };
@@ -18,7 +18,7 @@ use tiny_skia::{Color, Paint, Pixmap};
 pub trait IconRenderer: Send + Sync {
     fn render(
         &self,
-        status: PrimaryStatus,
+        status: BatteryStatus,
         kind: Option<DeviceKind>,
         theme: &Theme,
         mode: DisplayMode,
@@ -29,7 +29,7 @@ pub trait IconRenderer: Send + Sync {
 /// Everything a rendered icon depends on: equal keys render equal pixmaps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IconKey {
-    pub status: PrimaryStatus,
+    pub status: BatteryStatus,
     pub kind: Option<DeviceKind>,
     pub theme: Theme,
     pub mode: DisplayMode,
@@ -86,7 +86,7 @@ impl Default for TinySkiaRenderer {
 impl IconRenderer for TinySkiaRenderer {
     fn render(
         &self,
-        status: PrimaryStatus,
+        status: BatteryStatus,
         kind: Option<DeviceKind>,
         theme: &Theme,
         mode: DisplayMode,
@@ -95,18 +95,18 @@ impl IconRenderer for TinySkiaRenderer {
         let layout = Layout::new(mode, kind);
         // `resolve_for` never pairs offline with `stale`.
         let (rgba, percent) = match status {
-            PrimaryStatus::Offline => {
+            BatteryStatus::Offline => {
                 return self
                     .sizes
                     .iter()
                     .filter_map(|&size| render_offline(size, theme.offline, layout))
                     .collect();
             }
-            PrimaryStatus::Charging { percent } => (theme.charging, percent),
-            PrimaryStatus::Low { percent } => (theme.low, percent),
-            PrimaryStatus::Ok { percent } => (theme.normal, percent),
+            BatteryStatus::Charging { percent } => (theme.charging, percent),
+            BatteryStatus::Low { percent } => (theme.low, percent),
+            BatteryStatus::Ok { percent } => (theme.normal, percent),
         };
-        let retained = stale && !matches!(status, PrimaryStatus::Low { .. });
+        let retained = stale && !matches!(status, BatteryStatus::Low { .. });
         let look = Look {
             color: color(rgba),
             fill: color(if retained { dimmed(rgba) } else { rgba }),

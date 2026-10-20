@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::config::Config;
-use crate::domain::{BootTime, DeviceState, PrimaryStatus, Roster, device_line, device_status};
+use crate::domain::{BatteryStatus, BootTime, DeviceState, Roster, device_line, device_status};
 use crate::i18n::Lang;
 
 fn roster<'a>(states: &'a [DeviceState], cfg: &Config, now: BootTime) -> Roster<'a> {
@@ -19,11 +19,11 @@ pub fn featured<'a>(
     states: &'a [DeviceState],
     cfg: &Config,
     now: BootTime,
-) -> Option<(&'a DeviceState, PrimaryStatus)> {
+) -> Option<(&'a DeviceState, BatteryStatus)> {
     featured_in(&roster(states, cfg, now), cfg)
 }
 
-fn featured_in<'a>(roster: &Roster<'a>, cfg: &Config) -> Option<(&'a DeviceState, PrimaryStatus)> {
+fn featured_in<'a>(roster: &Roster<'a>, cfg: &Config) -> Option<(&'a DeviceState, BatteryStatus)> {
     let device = roster.featured(cfg.primary_device.as_deref())?;
     let (status, _) = device_status(device, cfg.effective_low_threshold(&device.info.name));
     Some((device, status))
@@ -61,12 +61,12 @@ pub fn to_waybar(states: &[DeviceState], cfg: &Config, now: BootTime) -> Value {
     let (text, class, percentage): (String, &str, Option<u8>) = match featured_in(&roster, cfg) {
         None => ("no devices".to_owned(), "offline", None),
         Some((_, status)) => match status {
-            PrimaryStatus::Offline => ("offline".to_owned(), "offline", None),
-            PrimaryStatus::Charging { percent } => {
+            BatteryStatus::Offline => ("offline".to_owned(), "offline", None),
+            BatteryStatus::Charging { percent } => {
                 (format!("{percent}%"), "charging", Some(percent))
             }
-            PrimaryStatus::Low { percent } => (format!("{percent}%"), "low", Some(percent)),
-            PrimaryStatus::Ok { percent } => (format!("{percent}%"), "ok", Some(percent)),
+            BatteryStatus::Low { percent } => (format!("{percent}%"), "low", Some(percent)),
+            BatteryStatus::Ok { percent } => (format!("{percent}%"), "ok", Some(percent)),
         },
     };
 

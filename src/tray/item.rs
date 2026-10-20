@@ -6,7 +6,7 @@ use super::resolve::{resolve_for, visible};
 use crate::appearance::ColorScheme;
 use crate::config::Config;
 use crate::domain::{
-    BootTime, DeviceId, DeviceState, PrimaryStatus, Roster, TrayMode, TrayState, absent_line,
+    BatteryStatus, BootTime, DeviceId, DeviceState, Roster, TrayMode, TrayState, absent_line,
     device_line, device_status, freedesktop_icon_name,
 };
 use crate::i18n::{Lang, fl, loader};
@@ -112,13 +112,13 @@ impl View {
         let icon = IconKey {
             status: resolved
                 .as_ref()
-                .map_or(PrimaryStatus::Offline, |r| r.status),
+                .map_or(BatteryStatus::Offline, |r| r.status),
             kind: resolved.as_ref().map(|r| r.device.info.kind),
             theme: Theme::new(cfg.palette, scheme),
             mode: cfg.display_mode,
             stale: resolved.as_ref().is_some_and(|r| r.stale),
         };
-        let shown: Vec<(&DeviceState, PrimaryStatus)> = roster
+        let shown: Vec<(&DeviceState, BatteryStatus)> = roster
             .devices()
             .iter()
             .map(|&d| {
@@ -144,12 +144,12 @@ impl View {
     }
 }
 
-fn is_low(status: PrimaryStatus) -> bool {
-    matches!(status, PrimaryStatus::Low { .. })
+fn is_low(status: BatteryStatus) -> bool {
+    matches!(status, BatteryStatus::Low { .. })
 }
 
 fn menu_rows(
-    shown: &[(&DeviceState, PrimaryStatus)],
+    shown: &[(&DeviceState, BatteryStatus)],
     roster: &Roster<'_>,
     cfg: &Config,
     now: BootTime,

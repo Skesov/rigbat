@@ -33,13 +33,13 @@ fn contact_sheet(schemes: &[ColorScheme], kind: Option<DeviceKind>) -> Pixmap {
     const ZOOM: u32 = 3;
     const PAD: u32 = 6;
     let states = [
-        (PrimaryStatus::Ok { percent: 75 }, false),
-        (PrimaryStatus::Charging { percent: 40 }, false),
-        (PrimaryStatus::Low { percent: 12 }, false),
-        (PrimaryStatus::Ok { percent: 75 }, true),
-        (PrimaryStatus::Charging { percent: 100 }, true),
-        (PrimaryStatus::Low { percent: 12 }, true),
-        (PrimaryStatus::Offline, false),
+        (BatteryStatus::Ok { percent: 75 }, false),
+        (BatteryStatus::Charging { percent: 40 }, false),
+        (BatteryStatus::Low { percent: 12 }, false),
+        (BatteryStatus::Ok { percent: 75 }, true),
+        (BatteryStatus::Charging { percent: 100 }, true),
+        (BatteryStatus::Low { percent: 12 }, true),
+        (BatteryStatus::Offline, false),
     ];
     let renderer = TinySkiaRenderer {
         sizes: vec![22, 64],
@@ -156,14 +156,14 @@ fn ascii_sheet() -> String {
     let mut cases = Vec::new();
     for mode in DisplayMode::ALL {
         for kind in DeviceKind::ALL.map(Some) {
-            cases.push((mode, kind, PrimaryStatus::Ok { percent: 60 }, false));
+            cases.push((mode, kind, BatteryStatus::Ok { percent: 60 }, false));
         }
     }
     for (status, stale) in [
-        (PrimaryStatus::Charging { percent: 60 }, false),
-        (PrimaryStatus::Low { percent: 60 }, false),
-        (PrimaryStatus::Ok { percent: 60 }, true),
-        (PrimaryStatus::Offline, false),
+        (BatteryStatus::Charging { percent: 60 }, false),
+        (BatteryStatus::Low { percent: 60 }, false),
+        (BatteryStatus::Ok { percent: 60 }, true),
+        (BatteryStatus::Offline, false),
     ] {
         let mouse = Some(DeviceKind::Mouse);
         cases.push((DisplayMode::DeviceAndBattery, mouse, status, stale));

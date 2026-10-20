@@ -1,7 +1,7 @@
 use tiny_skia::{Color, Pixmap, Rect, Transform};
 
 use super::solid_paint;
-use crate::domain::{DeviceKind, PrimaryStatus};
+use crate::domain::{BatteryStatus, DeviceKind};
 
 /// A one-colour pixel drawing: bit `cols - 1 - c` of `rows[r]` lights cell `(c, r)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,10 +118,10 @@ pub(super) const BOLT: Bitmap = Bitmap {
 
 /// The shape that tells charging apart from an ordinary reading without
 /// colour — the icon's `CHARGING_SIGN`; low is marked by colour alone.
-pub(super) fn status_mark(status: PrimaryStatus) -> Option<Bitmap> {
+pub(super) fn status_mark(status: BatteryStatus) -> Option<Bitmap> {
     match status {
-        PrimaryStatus::Charging { .. } => Some(BOLT),
-        PrimaryStatus::Ok { .. } | PrimaryStatus::Low { .. } | PrimaryStatus::Offline => None,
+        BatteryStatus::Charging { .. } => Some(BOLT),
+        BatteryStatus::Ok { .. } | BatteryStatus::Low { .. } | BatteryStatus::Offline => None,
     }
 }
 

@@ -7,7 +7,7 @@ use super::general_tab::{interval_combo, interval_label, threshold_slider};
 use super::{ActionProblem, SettingsApp, Tab, open_uri, scan, widgets};
 use crate::config::{Config, DeviceSettings};
 use crate::domain::{
-    DeviceId, INSTALL_UDEV_RULE, Presence, PrimaryStatus, TrayMode, charge_value, classify,
+    BatteryStatus, DeviceId, INSTALL_UDEV_RULE, Presence, TrayMode, charge_value, classify,
     status_note,
 };
 use crate::gui;
@@ -217,7 +217,7 @@ impl SettingsApp {
             status,
             lang,
         );
-        let low = matches!(status, PrimaryStatus::Low { .. });
+        let low = matches!(status, BatteryStatus::Low { .. });
         let online = row.presence == Presence::Online;
         let seen_ago = row
             .read_at
@@ -683,7 +683,7 @@ mod tests {
             ]
             .map(|id| l.get(id))
             .into();
-            let offline = PrimaryStatus::Offline;
+            let offline = BatteryStatus::Offline;
             expected.extend([
                 charge_value(Presence::NoAccess, None, None, offline, lang),
                 charge_value(Presence::Unreachable, None, None, offline, lang),

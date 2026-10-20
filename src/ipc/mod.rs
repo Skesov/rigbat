@@ -5,7 +5,7 @@ pub mod single_instance;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{ChargeState, DeviceKind, DisplayMode, Presence, PrimaryStatus, Transport};
+use crate::domain::{BatteryStatus, ChargeState, DeviceKind, DisplayMode, Presence, Transport};
 
 pub const TRAY_NAME: &str = "org.rigbat.Tray";
 pub const TRAY_PATH: &str = "/org/rigbat/Tray";
@@ -35,7 +35,7 @@ pub struct DeviceCard {
     pub presence: Presence,
     pub percent: Option<u8>,
     pub charge: Option<ChargeState>,
-    pub status: PrimaryStatus,
+    pub status: BatteryStatus,
     pub stale: bool,
     pub seen_secs_ago: Option<u64>,
     pub remaining_secs: Option<u64>,
@@ -89,7 +89,7 @@ mod tests {
                 presence: Presence::Unreachable,
                 percent: Some(62),
                 charge: Some(ChargeState::Discharging),
-                status: PrimaryStatus::Ok { percent: 62 },
+                status: BatteryStatus::Ok { percent: 62 },
                 stale: true,
                 seen_secs_ago: Some(300),
                 remaining_secs: Some(7 * 3600),
