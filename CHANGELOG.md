@@ -1,5 +1,84 @@
 # Changelog
 
+## [0.6.0](https://github.com/Skesov/rigbat/compare/v0.5.0...v0.6.0) (2026-10-20)
+
+
+### Features
+
+* **sources:** add Corsair Slipstream wireless mice and keyboards backend ([cae7d99](https://github.com/Skesov/rigbat/commit/cae7d990551c3f7d46062c7c872c2433d7af0ff9))
+* **sources:** add Kysona-protocol mice backend (Pulsar, ATK/VXE, Kysona) ([73281c5](https://github.com/Skesov/rigbat/commit/73281c5836776c19a74c6da90133c634b1b49f1a))
+* **sources:** add Razer wireless mice backend over hidraw feature reports ([c855f75](https://github.com/Skesov/rigbat/commit/c855f75b7892d9cff92bd29bddfcaf52e89115a1))
+
+
+### Bug Fixes
+
+* **domain:** round the remaining-time estimate once ([b66fb9b](https://github.com/Skesov/rigbat/commit/b66fb9b2006cbc5f773fbb8551f6b2c875b2da64))
+
+
+### Refactoring
+
+* **appearance:** one subscribe helper for the portal signals ([0c89488](https://github.com/Skesov/rigbat/commit/0c89488d006e6105f78f54fe6920a87eeda804d2))
+* **app:** move the supervisor tests to supervisor/tests.rs ([2b2d1ac](https://github.com/Skesov/rigbat/commit/2b2d1acadc9f402fa634a16e3575c923148cc03b))
+* **app:** simplify the supervisor and the shown_devices migration ([4ffd119](https://github.com/Skesov/rigbat/commit/4ffd1193f32ee873eae1be20edc00bd4488f0581))
+* **autostart:** fold the toggle into set_enabled and table the tests ([9a4c50e](https://github.com/Skesov/rigbat/commit/9a4c50e818d485249bc1fe509663a9687a4b7a65))
+* **bluez:** extract device_from_object and name the bus constants ([1709730](https://github.com/Skesov/rigbat/commit/1709730dc43a854f7a78acd7ca9360a809297d89))
+* **bluez:** move the event watcher into bluez/watch.rs ([ac09ab6](https://github.com/Skesov/rigbat/commit/ac09ab67037b05c57cd12aa437b4738682ac8902))
+* **cli:** build the waybar roster once and drop the module-name prefix ([65f3348](https://github.com/Skesov/rigbat/commit/65f3348d85feb2b24776418b8b9020ad59138470))
+* **cli:** move OwnRuntime and next_change into cli/waybar ([4c1b04d](https://github.com/Skesov/rigbat/commit/4c1b04d3b2e331cbcec5c0e4e22d9e65ed0bff11))
+* **cli:** move the --waybar source switching into cli/waybar ([1c8f1b0](https://github.com/Skesov/rigbat/commit/1c8f1b073d3a5eb9209cb82c132dd163edc6dedc))
+* **cli:** one stdout writer and one column layout ([178d2fc](https://github.com/Skesov/rigbat/commit/178d2fcef7079522672f4a7d73e5ad384d8d645b))
+* **cli:** split cli/waybar.rs into render, follow and the print loop ([6b7ae33](https://github.com/Skesov/rigbat/commit/6b7ae3353c83979efbe2e92ba9559f901e4eb4e9))
+* **config:** build the roster through Config::roster ([2ae2809](https://github.com/Skesov/rigbat/commit/2ae2809e50bd83f56fe244d902cd7dc914342301))
+* **config:** fold table-able tests and trim config docs ([9dff439](https://github.com/Skesov/rigbat/commit/9dff439f8f186a52f91344bd3c37c32b480c14de))
+* **corsair:** read through the shared hidraw exchange ([cb3a41d](https://github.com/Skesov/rigbat/commit/cb3a41d19e3890bc1acf44c2e855c0b87d142a14))
+* **dashboard:** name the subscription and split the bar painter ([d30471e](https://github.com/Skesov/rigbat/commit/d30471e5d8444719cefb05ed5b697e9d8d6bb7cc))
+* **doctor:** pass the config and state probes as one optional pair ([9b34a48](https://github.com/Skesov/rigbat/commit/9b34a48197f9a91ba5ccb1e2203fc295c02a6fd4))
+* **domain:** drop headset words the category keywords already match ([4b57a26](https://github.com/Skesov/rigbat/commit/4b57a2663a7fb2c37dbdab9bba1e4cc9b3f29a45))
+* **domain:** move guess_kind and its tests into domain/kind.rs ([b022ec7](https://github.com/Skesov/rigbat/commit/b022ec76e2004081c29cd76eacc725fb35e1f539))
+* **domain:** move primary.rs to status.rs ([3077bf1](https://github.com/Skesov/rigbat/commit/3077bf1865526c3bc8482b2a35a1f11805793bda))
+* **domain:** rename PrimaryStatus to BatteryStatus ([338da7d](https://github.com/Skesov/rigbat/commit/338da7d471648f74c72465febcf10a04c9263240))
+* **domain:** share test fixtures, variant lists and Estimate conversions ([4108517](https://github.com/Skesov/rigbat/commit/41085176997814cbdcb790b4835c336040db593f))
+* **gui:** share status colours, glyph, progress and copy helpers ([e460b7c](https://github.com/Skesov/rigbat/commit/e460b7c9472bcd88b457f1efd139a9e216e86f21))
+* **gui:** share the second-launch window command ([a07b0ec](https://github.com/Skesov/rigbat/commit/a07b0ec019c90e4ffb1cbd9454f8b293e6185b40))
+* **headsets:** read through the shared hidraw exchange ([b012667](https://github.com/Skesov/rigbat/commit/b0126679d2fbc98a2fe9685164dea7ddb5dc93dd))
+* **icon:** drop the identity canvas width and name the design size ([b7bd9f0](https://github.com/Skesov/rigbat/commit/b7bd9f09221af26db62c55170ab1cb798b2ea22e))
+* **icon:** move the icon tests into their own file ([a706c9a](https://github.com/Skesov/rigbat/commit/a706c9a0986d2bc81a76a90aebc4b12bb71c20f9))
+* **icon:** move the visual-review dumps into their own test module ([b047db8](https://github.com/Skesov/rigbat/commit/b047db8b90892d80a7dd5390a2e81ffb1b50819e))
+* **icon:** render takes an IconKey ([f5486f4](https://github.com/Skesov/rigbat/commit/f5486f4b8d1093e69f2c74ce03e853238fb08cd4))
+* **icon:** split theme, battery, bitmap and device bar out of icon/mod.rs ([f3299be](https://github.com/Skesov/rigbat/commit/f3299bebd4937cf0fa90e354101f2526b449ffc0))
+* **main:** drop the one-field CliOpts and history comments ([6bf608e](https://github.com/Skesov/rigbat/commit/6bf608e400b8ca2ac7ec276fdd8006e0ebf35377))
+* **notifications:** move the low-battery policy into tracker.rs ([df79299](https://github.com/Skesov/rigbat/commit/df79299131ec24d945e804253ad13671c2c0eb46))
+* **notifications:** one bounded bus call and a flat event loop ([d364b7d](https://github.com/Skesov/rigbat/commit/d364b7df4c490c6906be397e02eed5740558e178))
+* **razer:** share the charge-state choice and the node name ([052af4a](https://github.com/Skesov/rigbat/commit/052af4af11171d62d8f4dfea7d4f2ba83338982a))
+* **settings:** drop history notes and task ids from comments ([355d31c](https://github.com/Skesov/rigbat/commit/355d31cb0d9cd02f239292029f3f23d023045aa7))
+* **settings:** move the About footer out of widgets.rs ([820b221](https://github.com/Skesov/rigbat/commit/820b2211805b3f5e13b774b66ba7a1050c6d9863))
+* **settings:** one override writer for the device rows ([a95cc51](https://github.com/Skesov/rigbat/commit/a95cc5192e9c0f15b9c0e22c341aab000a9b5d3a))
+* **settings:** one tile row for icon styles and palettes ([926bbb8](https://github.com/Skesov/rigbat/commit/926bbb82887eaac8f944847ac03a84b71f17f1a4))
+* **settings:** save_edit takes the config path ([9b4d9da](https://github.com/Skesov/rigbat/commit/9b4d9dac66656cb9defe866a39e3f3017e362391))
+* **settings:** split the tray group and the autostart write ([7ebca44](https://github.com/Skesov/rigbat/commit/7ebca44e85953282434d95376622f8b922697cd9))
+* **sources:** declare the SteelSeries and Corsair vendor ids once ([d1410e1](https://github.com/Skesov/rigbat/commit/d1410e1f4c7ecb7d4533bab428a01b43aadc6c9e))
+* **sources:** share the hidraw read loop, exchange and kept handle ([d751404](https://github.com/Skesov/rigbat/commit/d751404c515c4707db107f164d8bc94593872ef3))
+* **state:** decode stored enums through the domain ALL lists ([0eb7722](https://github.com/Skesov/rigbat/commit/0eb7722ec493a42f6efbf4fd3f0c54f3686ecda4))
+* **state:** drop the orphan readings delete from prune ([a26514e](https://github.com/Skesov/rigbat/commit/a26514e919d3d6c1f91194efdbd595ad6c43c6b7))
+* **state:** rename SqliteStore to Db ([01aa51f](https://github.com/Skesov/rigbat/commit/01aa51f2546be25e6822fabb3645368e4357a913))
+* **state:** share the last-row query and trim store docs ([05741d8](https://github.com/Skesov/rigbat/commit/05741d823b3208f1fbe86291ab5bbb58f62e3da0))
+* **steelseries:** read through the shared hidraw exchange ([0ba1566](https://github.com/Skesov/rigbat/commit/0ba1566582758f6147baa01530ef164894c60c8f))
+* **sysfs:** split enumerate_in and guard test scratch dirs ([277365d](https://github.com/Skesov/rigbat/commit/277365de1226f7a18650de379e74cf5675b17dff))
+* **tray:** build the roster once per view and split reconcile ([8e6d2f0](https://github.com/Skesov/rigbat/commit/8e6d2f0e6c515134a38fc024af626f3db25141f2))
+
+
+### Documentation
+
+* describe the shared hidraw I/O in the new-device guide ([db93106](https://github.com/Skesov/rigbat/commit/db931066364c95be26a302b6f7b226a27a902890))
+* drop history and internal ids from comments ([212b8f8](https://github.com/Skesov/rigbat/commit/212b8f86bd9aadd87c23e1c7dfd58a51512a5415))
+* match architecture notes to the R110 refactors ([87171ca](https://github.com/Skesov/rigbat/commit/87171ca406b269b555e689f499c2e7c74ab782c1))
+* place the footer in settings/about.rs and the window command in gui ([6c50328](https://github.com/Skesov/rigbat/commit/6c50328b116782d428860523c6d3ad7565454e25))
+* point CONTRIBUTING at the moved BlueZ backend ([114487c](https://github.com/Skesov/rigbat/commit/114487cd52a4f9c86287f2fd82b1add3acef6571))
+* **readme:** list devices expected to work through sysfs and BlueZ ([285a69b](https://github.com/Skesov/rigbat/commit/285a69b66ea613286c9719aa38ece55ff9d1b70f))
+* **session:** cut the resume watcher doc to its non-obvious fact ([5bf0529](https://github.com/Skesov/rigbat/commit/5bf0529127f2b6f13d964a00e6579c8e49bd58c6))
+* **sources:** drop history and cross-module lists from comments ([f01942e](https://github.com/Skesov/rigbat/commit/f01942ebf216e194ad6a05872a72052460b44302))
+* **ui:** name gui::shows_progress as the shared progress delay ([324e83e](https://github.com/Skesov/rigbat/commit/324e83e93f73f37a51aa4335cef0c79e9da3fa12))
+
 ## [0.5.0](https://github.com/Skesov/rigbat/compare/v0.4.0...v0.5.0) (2026-10-09)
 
 
